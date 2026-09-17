@@ -1,0 +1,89 @@
+[workspace]
+resolver = "3"
+exclude = ["fuzz"]
+members = [
+    "crates/dc3-core",
+    "crates/dc3-bencode",
+    "crates/dc3-torrent",
+    "crates/dc3-dht",
+    "crates/dc3-peer",
+    "crates/dc3-policy",
+    "crates/dc3-store",
+    "crates/dc3-search",
+    "crates/dc3-web",
+    "crates/dhtcrawler3",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/poonasor/dhtcrawler3"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+
+[workspace.dependencies]
+dc3-core = { path = "crates/dc3-core" }
+dc3-bencode = { path = "crates/dc3-bencode" }
+dc3-torrent = { path = "crates/dc3-torrent" }
+dc3-dht = { path = "crates/dc3-dht" }
+dc3-peer = { path = "crates/dc3-peer" }
+dc3-policy = { path = "crates/dc3-policy" }
+dc3-store = { path = "crates/dc3-store" }
+dc3-search = { path = "crates/dc3-search" }
+dc3-web = { path = "crates/dc3-web" }
+
+anyhow = "1.0.104"
+askama = "0.16.1"
+askama_web = { version = "0.16.0", features = ["axum-0.8"] }
+axum = "0.8.9"
+bytes = "1.12.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+crc32c = "0.6.8"
+data-encoding = "2.11.1"
+encoding_rs = "0.8.41"
+futures = "0.3.34"
+hex = "0.4.3"
+ipnet = "2.12.2"
+lru = "0.18.2"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+percent-encoding = "2.3"
+proptest = "1.11.0"
+rand = "0.9.5"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha1 = "0.11.0"
+sha2 = "0.11.0"
+socket2 = { version = "0.6.5", features = ["all"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "macros", "migrate", "chrono", "json"] }
+tantivy = "0.26.2"
+tempfile = "3"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs"] }
+tokio-util = "0.7.19"
+toml = "0.9.12"
+tower = { version = "0.5.3", features = ["util", "limit", "timeout"] }
+tower-http = { version = "0.7.1", features = ["set-header", "limit", "timeout", "trace", "catch-panic", "normalize-path"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "json", "env-filter"] }
+unicode-normalization = "0.1.25"
+unicode-script = "0.5.8"
+unicode-security = "0.1.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+strip = "debuginfo"

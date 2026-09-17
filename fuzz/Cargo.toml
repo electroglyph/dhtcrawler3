@@ -1,0 +1,74 @@
+[package]
+name = "dhtcrawler3-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# A separate workspace: cargo-fuzz needs nightly and sanitizer flags that the
+# main workspace must not inherit. Cargo.lock starts from the main workspace's
+# lockfile so both build the same dependency versions.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sha1 = "0.11.0"
+dc3-bencode = { path = "../crates/dc3-bencode" }
+dc3-core = { path = "../crates/dc3-core" }
+dc3-dht = { path = "../crates/dc3-dht" }
+dc3-peer = { path = "../crates/dc3-peer" }
+dc3-policy = { path = "../crates/dc3-policy" }
+dc3-search = { path = "../crates/dc3-search" }
+dc3-torrent = { path = "../crates/dc3-torrent" }
+
+[[bin]]
+name = "bencode_decode"
+path = "fuzz_targets/bencode_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "krpc_message"
+path = "fuzz_targets/krpc_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compact_lists"
+path = "fuzz_targets/compact_lists.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_info"
+path = "fuzz_targets/parse_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_frames"
+path = "fuzz_targets/peer_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_normalise"
+path = "fuzz_targets/policy_normalise.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search_query"
+path = "fuzz_targets/search_query.rs"
+test = false
+doc = false
+bench = false

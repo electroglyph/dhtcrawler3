@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="notice" aria-labelledby="done-heading">
+<h1 id="done-heading">Thank you</h1>
+<p>Your report has been received. The operator of this site will review it.</p>
+{%- if csam %}
+<p>Please also report child sexual abuse material to the <a href="https://report.cybertip.org/">NCMEC CyberTipline</a> or the <a href="https://report.iwf.org.uk/">Internet Watch Foundation</a>.</p>
+{%- endif %}
+<p><a href="/">Back to the search page</a></p>
+</section>
+{% endblock %}

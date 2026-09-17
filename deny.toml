@@ -1,0 +1,50 @@
+# cargo-deny policy (requirement R13). Run: cargo deny check
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+# Fail on any vulnerability or unmaintained/yanked crate unless explicitly
+# ignored here with a reason.
+yanked = "deny"
+unmaintained = "workspace"
+ignore = [
+  # lru < 0.18.2: LruCache::pop() is not panic-safe if a key's Drop panics
+  # under catch_unwind. dhtcrawler3's own code uses lru >= 0.18.2. The remaining
+  # 0.16 copy comes from tantivy 0.26.2, whose only cache is keyed by `usize`
+  # (store/reader.rs), whose Drop cannot panic, and release builds use
+  # panic = "abort", so the unsound path is unreachable. Remove this entry when
+  # tantivy moves to lru >= 0.18.2.
+  { id = "RUSTSEC-2026-0253", reason = "only reachable via tantivy's usize-keyed cache; see comment" },
+]
+
+[licenses]
+# Permissive licences only; dhtcrawler3 is MIT.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Zlib",
+  "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own path dependencies are not wildcards.
+allow-wildcard-paths = true
+# Crates we never want in the tree.
+deny = [
+  # No OpenSSL: TLS is not used, and if it ever is, it must be rustls.
+  { name = "openssl" },
+  { name = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

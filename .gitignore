@@ -1,0 +1,9 @@
+/target
+**/fuzz/target
+**/fuzz/corpus
+**/fuzz/artifacts
+*.swp
+.DS_Store
+/data
+/deploy/secrets/*
+!/deploy/secrets/README.md

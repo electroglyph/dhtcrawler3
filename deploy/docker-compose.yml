@@ -1,0 +1,189 @@
+# dhtcrawler3 — hardened single-host deployment.
+#
+#   cd deploy && ../scripts/gen-secrets.sh && docker compose up -d --build
+#
+# Exposure (requirement R12):
+#   * UDP 6881 (DHT) on all interfaces — the only public port.
+#   * The web UI on 127.0.0.1:8080 — put a TLS reverse proxy in front of it.
+#   * PostgreSQL has no published port and sits on an internal network.
+# Every service runs non-root, read-only, with all capabilities dropped.
+
+name: dhtcrawler3
+
+x-dc3: &dc3
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  image: dhtcrawler3:local
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 512
+  tmpfs: ["/tmp:size=16m,mode=1777"]
+  restart: unless-stopped
+  environment: &dc3-env
+    DC3_DATABASE__HOST: db
+    DC3_DATABASE__PASSWORD_FILE: /run/secrets/db_password
+    DC3_LOG__FORMAT: json
+    # Metrics and health listen inside the container; only the internal backend
+    # network can reach them.
+    DC3_METRICS__LISTEN: "0.0.0.0:9100"
+
+services:
+  db:
+    image: postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+    restart: unless-stopped
+    shm_size: 256m
+    security_opt: ["no-new-privileges:true"]
+    # The official entrypoint needs these to initialise and drop to the postgres user.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_superuser_password
+      DC3_OWNER_PASSWORD_FILE: /run/secrets/dc3_owner_password
+      DC3_CRAWLER_PASSWORD_FILE: /run/secrets/dc3_crawler_password
+      DC3_INDEXER_PASSWORD_FILE: /run/secrets/dc3_indexer_password
+      DC3_WEB_PASSWORD_FILE: /run/secrets/dc3_web_password
+    secrets:
+      - pg_superuser_password
+      - dc3_owner_password
+      - dc3_crawler_password
+      - dc3_indexer_password
+      - dc3_web_password
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dc3"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    mem_limit: 2g
+
+  migrate:
+    <<: *dc3
+    command: ["migrate"]
+    restart: "no"
+    environment:
+      <<: *dc3-env
+      DC3_DATABASE__USER: dc3_owner
+    secrets:
+      - source: dc3_owner_password
+        target: db_password
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 256m
+
+  crawl:
+    <<: *dc3
+    command: ["crawl"]
+    environment:
+      <<: *dc3-env
+      DC3_DATABASE__USER: dc3_crawler
+    secrets:
+      - source: dc3_crawler_password
+        target: db_password
+    ports:
+      - "6881:6881/udp"   # IPv4 and IPv6
+    volumes:
+      - state:/var/lib/dhtcrawler3
+    networks: [backend, egress]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/dhtcrawler3", "healthcheck", "http://127.0.0.1:9100/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 5m
+    # Shutdown waits up to 30 s for fetches, flushes discoveries and saves DHT state.
+    stop_grace_period: 60s
+    # Crawl memory: in-flight metadata (256 MiB byte budget) plus routing and caches.
+    mem_limit: 1g
+
+  index:
+    <<: *dc3
+    command: ["index"]
+    environment:
+      <<: *dc3-env
+      DC3_DATABASE__USER: dc3_indexer
+      DC3_DATABASE__MAX_CONNECTIONS: "4"
+    secrets:
+      - source: dc3_indexer_password
+        target: db_password
+    volumes:
+      - index:/var/lib/dhtcrawler3/index
+    networks: [backend]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/dhtcrawler3", "healthcheck", "http://127.0.0.1:9100/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 2m
+    mem_limit: 1g
+
+  web:
+    <<: *dc3
+    command: ["web"]
+    environment:
+      <<: *dc3-env
+      DC3_DATABASE__USER: dc3_web
+      DC3_WEB__LISTEN: "0.0.0.0:8080"
+      DC3_WEB__BASE_URL: "http://127.0.0.1:8080"
+      # Connections to the published port arrive from the frontend network's
+      # gateway (docker-proxy), so that subnet is the trusted proxy.
+      DC3_WEB__TRUSTED_PROXIES: "172.30.80.0/24"
+    secrets:
+      - source: dc3_web_password
+        target: db_password
+    ports:
+      - "127.0.0.1:8080:8080"
+    # Tantivy readers take a short-lived lock file, so the index volume is writable here.
+    volumes:
+      - index:/var/lib/dhtcrawler3/index
+    networks: [backend, frontend]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/dhtcrawler3", "healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    mem_limit: 512m
+
+networks:
+  backend:
+    internal: true
+  frontend:
+    ipam:
+      config:
+        - subnet: 172.30.80.0/24
+  egress:
+    # The DHT runs over IPv4 and IPv6 (BEP 32). Requires Docker Engine 27+ (or an
+    # IPv6-enabled daemon); remove this line to run IPv4-only.
+    enable_ipv6: true
+
+volumes:
+  pgdata: {}
+  state: {}
+  index: {}
+
+secrets:
+  pg_superuser_password:
+    file: ./secrets/pg_superuser_password
+  dc3_owner_password:
+    file: ./secrets/dc3_owner_password
+  dc3_crawler_password:
+    file: ./secrets/dc3_crawler_password
+  dc3_indexer_password:
+    file: ./secrets/dc3_indexer_password
+  dc3_web_password:
+    file: ./secrets/dc3_web_password

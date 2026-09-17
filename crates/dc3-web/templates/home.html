@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero" aria-labelledby="home-heading">
+<h1 id="home-heading">{{ page.site_name }}</h1>
+<p class="tagline">Search the names and files of torrents shared in the BitTorrent DHT.</p>
+<form class="search-form" action="/search" method="get" role="search">
+<label for="q">Search torrents</label>
+<input id="q" name="q" type="search" maxlength="{{ page.max_query_chars }}" required autocomplete="off" spellcheck="false" aria-describedby="q-hint">
+<button type="submit">Search</button>
+<p class="hint" id="q-hint">Every word must match. Use "double quotes" for a phrase and -word to leave a word out.</p>
+</form>
+{%- if let Some(s) = stats %}
+<dl class="stats">
+<div><dt>Torrents</dt><dd>{{ s.torrents }}</dd></div>
+<div><dt>Added today</dt><dd>{{ s.added_today }}</dd></div>
+<div><dt>Added yesterday</dt><dd>{{ s.added_yesterday }}</dd></div>
+</dl>
+{%- else %}
+<p class="stats-missing">Index statistics are not available yet.</p>
+{%- endif %}
+</section>
+{% endblock %}

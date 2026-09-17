@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<article aria-labelledby="torrent-heading">
+<h1 class="torrent-name" id="torrent-heading"><bdi>{{ t.name }}</bdi></h1>
+{%- if let Some(magnet) = t.magnet %}
+<p><a class="button" href="{{ magnet }}">Open magnet link</a></p>
+{%- endif %}
+<dl class="facts">
+<div><dt>Size</dt><dd><span title="{{ t.size_exact }} bytes">{{ t.size_human }}</span> ({{ t.size_exact }} bytes)</dd></div>
+<div><dt>Files</dt><dd>{{ t.file_count }}</dd></div>
+<div><dt>First seen</dt><dd><time datetime="{{ t.first_seen_iso }}">{{ t.first_seen }}</time></dd></div>
+<div><dt>Last seen</dt><dd><time datetime="{{ t.last_seen_iso }}">{{ t.last_seen }}</time></dd></div>
+<div><dt>Times seen</dt><dd>{{ t.seen_count }}</dd></div>
+<div><dt>DHT key</dt><dd><code>{{ t.dht_key }}</code></dd></div>
+{%- if let Some(v1) = t.info_hash_v1 %}
+<div><dt>Info hash (v1)</dt><dd><code>{{ v1 }}</code></dd></div>
+{%- endif %}
+{%- if let Some(v2) = t.info_hash_v2 %}
+<div><dt>Info hash (v2)</dt><dd><code>{{ v2 }}</code></dd></div>
+{%- endif %}
+</dl>
+<section aria-labelledby="files-heading">
+<h2 id="files-heading">Files</h2>
+{%- if let Some(note) = files_note %}
+<p class="note">{{ note }}</p>
+{%- endif %}
+{%- if files.is_empty() %}
+<p>No file list is stored for this torrent.</p>
+{%- else %}
+<div class="table-scroll">
+<table class="files">
+<thead><tr><th scope="col">Path</th><th scope="col" class="num">Size</th></tr></thead>
+<tbody>
+{%- for f in files %}
+<tr><td class="path"><bdi>{{ f.path }}</bdi></td><td class="num"><span title="{{ f.size_exact }} bytes">{{ f.size_human }}</span></td></tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- endif %}
+</section>
+<p><a href="{{ t.report_href }}">Report this torrent</a></p>
+</article>
+{% endblock %}
