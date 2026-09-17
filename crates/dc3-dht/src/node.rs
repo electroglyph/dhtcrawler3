@@ -985,6 +985,10 @@ impl Inner {
             for handle in abort_handles {
                 handle.abort();
             }
+            // Dropping the JoinSet at the end of this function would abort the
+            // jobs too, but only after the state file is written. Abort them
+            // first so no job touches the routing table during the save.
+            jobs.abort_all();
         }
         self.save_state().await;
     }
