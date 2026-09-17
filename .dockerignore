@@ -1,0 +1,10 @@
+target
+**/target
+.git
+.github
+data
+deploy/secrets
+**/fuzz/corpus
+**/fuzz/artifacts
+*.swp
+.DS_Store

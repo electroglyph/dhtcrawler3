@@ -1,0 +1,26 @@
+[package]
+name = "dc3-search"
+description = "Tantivy search index for dhtcrawler3 with a dictionary-free CJK bigram tokenizer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dc3-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+unicode-normalization.workspace = true
+unicode-script.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

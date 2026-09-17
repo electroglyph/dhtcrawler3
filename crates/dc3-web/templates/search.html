@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Results for <bdi>{{ page.query }}</bdi></h1>
+<p class="results-summary">{{ summary }}</p>
+<nav class="sort" aria-label="Sort results">
+<span>Sort by:</span>
+<ul>
+{%- for link in sort_links %}
+<li>{% if link.current %}<span aria-current="true">{{ link.label }}</span>{% else %}<a href="{{ link.href }}">{{ link.label }}</a>{% endif %}</li>
+{%- endfor %}
+</ul>
+</nav>
+{%- if rows.is_empty() %}
+<p class="empty">No torrents on this page match your search.</p>
+{%- else %}
+<ol class="results" start="{{ first_number }}">
+{%- for row in rows %}
+<li class="result">
+<h2 class="result-title"><a href="{{ row.href }}"><bdi>{{ row.name }}</bdi></a></h2>
+<p class="meta">
+<span title="{{ row.size_exact }} bytes">{{ row.size_human }}</span>
+<span>{{ row.files }}</span>
+<span>First seen <time datetime="{{ row.first_seen_iso }}">{{ row.first_seen }}</time></span>
+<span>Seen {{ row.seen }}</span>
+</p>
+{%- if let Some(magnet) = row.magnet %}
+<p class="actions"><a href="{{ magnet }}">Magnet link</a></p>
+{%- endif %}
+</li>
+{%- endfor %}
+</ol>
+{%- endif %}
+{%- if prev_href.is_some() || next_href.is_some() %}
+<nav class="pager" aria-label="Result pages">
+{%- if let Some(href) = prev_href %}
+<a rel="prev" href="{{ href }}">Previous page</a>
+{%- endif %}
+<span>Page {{ page_number }}</span>
+{%- if let Some(href) = next_href %}
+<a rel="next" href="{{ href }}">Next page</a>
+{%- endif %}
+</nav>
+{%- endif %}
+{% endblock %}

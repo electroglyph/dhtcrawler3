@@ -1,0 +1,21 @@
+# Example TLS reverse proxy for dhtcrawler3.
+#
+# Caddy obtains and renews certificates automatically. There is deliberately no
+# `log` directive: search text is part of the URL, so an access log would store
+# visitors' IP addresses next to their queries (requirement R11).
+#
+# Run on the host:   caddy run --config deploy/Caddyfile
+# Then set web.base_url = "https://search.example.org" and web.hsts = true.
+
+search.example.org {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:8080 {
+		# Replace, rather than append to, any client-supplied X-Forwarded-For.
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	header {
+		-Server
+	}
+}

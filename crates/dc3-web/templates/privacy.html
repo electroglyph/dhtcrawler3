@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<article class="prose" aria-labelledby="privacy-heading">
+<h1 id="privacy-heading">Privacy</h1>
+<p>This site is built to know as little about you as possible. It sets no cookies, runs no JavaScript, has no analytics or advertising, and loads nothing from other sites.</p>
+<h2>What is stored</h2>
+<ul>
+<li>For each torrent: its DHT key and info hashes (v1 and v2), its name after cleaning, the paths and sizes of its first {{ stored_files }} files, its total size and number of files, when it was first and last seen, and how many times it was seen.</li>
+<li>A queue of torrent keys waiting for their metadata, with retry information.</li>
+<li>A list of blocked torrents; the reports visitors send (the reason, the message and, only if you give one, a contact address); and an audit log of moderation actions.</li>
+<li>Daily counters of the crawler's work.</li>
+</ul>
+<h2>What is never stored</h2>
+<ul>
+<li>Your IP address. To protect the site from overload, recent request counts per address are kept in memory only, and are forgotten after {{ rate_limit_minutes }} minutes without requests. No address is stored with a report.</li>
+<li>Your searches. The software logs only which kind of page was requested, the response status and how long it took.</li>
+<li>The IP addresses of BitTorrent peers. They are kept in memory only while metadata is being fetched, and for at most 45 minutes in the crawler's DHT peer store.</li>
+<li>The content of torrents, .torrent files, tracker lists and comments.</li>
+</ul>
+<p>The crawler also keeps a small state file with its own DHT node identifiers and the addresses of a few hundred DHT nodes, so that a restart does not put load on the DHT's bootstrap servers. It contains no torrent keys and no peer addresses.</p>
+<h2>Your search text</h2>
+<p>A search is part of the page address, so your browser may keep it in its history. If this site runs behind a reverse proxy, its operator is responsible for configuring the proxy not to log page addresses together with visitors' IP addresses.</p>
+</article>
+{% endblock %}

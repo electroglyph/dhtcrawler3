@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<article class="prose" aria-labelledby="legal-heading">
+<h1 id="legal-heading">Legal</h1>
+<h2 id="contact">Contact</h2>
+<dl class="facts">
+<div><dt>Contact email</dt><dd>
+{%- if let Some(email) = contact -%}
+<a href="{{ email.href }}">{{ email.text }}</a>
+{%- else -%}
+not configured
+{%- endif -%}
+</dd></div>
+<div><dt>Designated agent for copyright notices</dt><dd class="multiline">
+{%- if let Some(agent) = dmca_agent -%}
+{{ agent }}
+{%- else -%}
+not configured
+{%- endif -%}
+</dd></div>
+</dl>
+<h2>What this site is</h2>
+<p>This site indexes metadata (names, file lists, sizes and dates) of torrents that are shared publicly in the BitTorrent DHT. It does not host, store or transmit the content those torrents describe.</p>
+<h2 id="takedown">Copyright and takedown requests</h2>
+<p>To have a torrent removed, send a notice to the contact above. Include the torrent's info hash (shown on its page), the work you believe is infringed, your contact details, and a statement that you are authorised to act for the rights holder. A removed torrent is blocked: it is not shown again if it is seen later.</p>
+<h2 id="report">Reporting a torrent</h2>
+<p>Every torrent page has a "Report this torrent" link. Use it for child sexual abuse material, copyright infringement, malware or anything else that the operator should review. Reports are reviewed by the operator of this site, and no IP address is stored with them.</p>
+<p>Please also report child sexual abuse material to a hotline:</p>
+<ul>
+<li><a href="https://report.cybertip.org/">NCMEC CyberTipline</a> (United States)</li>
+<li><a href="https://report.iwf.org.uk/">Internet Watch Foundation</a> (United Kingdom and international)</li>
+</ul>
+<h2 id="security">Security</h2>
+<p>How to report a security problem is described in <a href="/.well-known/security.txt">security.txt</a>.</p>
+</article>
+{% endblock %}

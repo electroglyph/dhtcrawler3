@@ -1,0 +1,128 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Least privilege for the default token (R13). Jobs ask for more only if needed.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+        env:
+          POSTGRES_PASSWORD: dc3ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://postgres:dc3ci@localhost:5432/postgres
+      DC3_TEST_DATABASE_URL: postgres://postgres:dc3ci@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  supply-chain:
+    name: cargo-deny and cargo-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+        with:
+          tool: cargo-audit
+      - run: cargo audit --deny warnings
+
+  fuzz-smoke:
+    name: fuzz smoke (60 s per target)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # fuzz/ is its own cargo workspace with its own Cargo.lock.
+    defaults:
+      run:
+        working-directory: fuzz
+    env:
+      CARGO_FUZZ_VERSION: 0.13.2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo-fuzz needs nightly (sanitizer flags). "+nightly" overrides the
+      # stable pin in rust-toolchain.toml.
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
+      - name: Check fuzz/Cargo.lock is up to date
+        run: git diff --exit-code -- Cargo.lock
+      - name: Run each fuzz target for 60 s
+        run: |
+          set -euo pipefail
+          mapfile -t targets < <(cargo +nightly fuzz list)
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "no fuzz targets found" >&2
+            exit 1
+          fi
+          for target in "${targets[@]}"; do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=2048
+            echo "::endgroup::"
+          done
+      - name: Show crash inputs as hex
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for f in artifacts/*/*; do
+            echo "== $f"
+            od -An -tx1 -v "$f" | tr -d ' \n'
+            echo
+          done
+
+  image:
+    name: container image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          provenance: mode=max
+          sbom: true
+          tags: dhtcrawler3:ci

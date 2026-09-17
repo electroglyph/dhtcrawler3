@@ -1,0 +1,20 @@
+[package]
+name = "dc3-policy"
+description = "Content policy: blocked-term matching with Unicode normalisation and confusable folding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+unicode-normalization.workspace = true
+unicode-script.workspace = true
+unicode-security.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

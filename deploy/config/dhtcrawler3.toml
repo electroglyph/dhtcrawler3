@@ -1,0 +1,91 @@
+# dhtcrawler3 configuration.
+#
+# Every key can be overridden with an environment variable named
+#   DC3_<SECTION>__<KEY>        e.g.  DC3_DATABASE__USER=dc3_web
+# List values are given as comma-separated strings in the environment.
+# Secrets are never written here: point *_file keys at mounted secret files.
+
+[database]
+host = "db"
+port = 5432
+name = "dc3"
+# Each role connects as its own least-privilege user (see deploy/docker-compose.yml).
+user = "dc3_crawler"
+password_file = "/run/secrets/db_password"
+max_connections = 16
+
+# Optional per-role credentials, used by `dhtcrawler3 all` (one pool per role).
+# [database.crawler]
+# user = "dc3_crawler"
+# password_file = "/run/secrets/dc3_crawler_password"
+# [database.indexer]
+# user = "dc3_indexer"
+# password_file = "/run/secrets/dc3_indexer_password"
+# [database.web]
+# user = "dc3_web"
+# password_file = "/run/secrets/dc3_web_password"
+
+[crawl]
+# UDP port for the DHT. dhtcrawler3 never listens on TCP: it only dials peers.
+dht_port = 6881
+bind_v4 = "0.0.0.0"
+# IPv6 DHT (BEP 32). Disabled automatically, with a warning, when the host has no
+# global IPv6 address. Set to "" to disable it explicitly.
+bind_v6 = "::"
+bootstrap = [
+  "dht.libtorrent.org:25401",
+  "dht.transmissionbt.com:6881",
+  "router.bt.ouinet.work:6881",
+  "router.bittorrent.com:6881",
+]
+# Routing-table state (node ids, a few hundred contacts). Never contains peers.
+state_dir = "/var/lib/dhtcrawler3"
+# Global outbound DHT packet budget. Keep this modest on home connections.
+max_packets_per_sec = 250
+sampler_concurrency = 32
+# Answer no DHT queries and mark ours read-only (BEP 43). Leave false to be a
+# full, reciprocating DHT node.
+read_only = false
+fetch_workers = 64
+max_connections = 256
+max_metadata_bytes = 8388608
+# Total metadata bytes held by all fetches at once (memory bound).
+max_inflight_metadata_bytes = 268435456
+# Keys waiting for metadata. Above this, only sampled and announced keys are queued.
+max_pending = 5000000
+
+[index]
+path = "/var/lib/dhtcrawler3/index"
+writer_heap_bytes = 134217728
+batch_size = 1000
+poll_interval_ms = 1000
+
+[web]
+listen = "127.0.0.1:8080"
+# Public origin, used for CSRF checks on the report form and in security.txt.
+base_url = "http://127.0.0.1:8080"
+site_name = "dhtcrawler3"
+# Shown on /legal and /.well-known/security.txt. Set these before going public.
+contact_email = ""
+dmca_agent = ""
+# Send Strict-Transport-Security. Only enable when served exclusively over HTTPS.
+hsts = false
+# Reverse proxies whose X-Forwarded-For header is trusted (CIDR list). Behind
+# Docker's published port this is the network the proxy connects from, not 127.0.0.1.
+trusted_proxies = []
+# Maximum torrents hidden automatically by CSAM reports per hour (stored in the
+# database by `migrate`). Reports beyond it wait for an admin.
+autohide_per_hour = 60
+
+[metrics]
+# Prometheus endpoint for whichever role is running. Keep it off the public network.
+listen = "127.0.0.1:9100"
+
+[policy]
+# Extra blocked terms, appended to the built-in seed list. Empty = seed list only.
+terms_file = ""
+
+[log]
+# "json" or "pretty"
+format = "json"
+level = "info"

@@ -1,80 +1,74 @@
-## dhtcrawler2
+# dhtcrawler3
 
-dhtcrawler is a DHT crawler written in erlang. It can join a DHT network and crawl many P2P torrents. The program saves all torrent info into database and provide an http interface to search a torrent by a keyword.
+A secure, standards-compliant **BitTorrent DHT search engine**, written in Rust.
 
-![screenshot](https://raw.github.com/kevinlynx/dhtcrawler/master/screenshot.png)
+It joins the Mainline DHT as a well-behaved node and discovers torrents with BEP 51
+`sample_infohashes`. It fetches each torrent's metadata directly from peers (BEP 9/10)
+and verifies it against the infohash. It then stores the metadata in PostgreSQL and
+serves a fast, multilingual search site that runs no JavaScript.
 
-dhtcrawler2 is an extended version to [dhtcrawler](https://github.com/kevinlynx/dhtcrawler). It has improved a lot on crawling speed, and is much more stable. 
+dhtcrawler3 replaces [dhtcrawler2](https://github.com/kevinlynx/dhtcrawler2) (Erlang,
+2013), the code published by the `btdig` GitHub organisation. It is a rewrite, not a
+port. The old code downloaded metadata over plain HTTP from third-party caches that no
+longer exist, and it never verified that metadata. It also rendered attacker-chosen
+torrent names into pages without escaping, and ran MongoDB without authentication.
+[docs/02-legacy-audit.md](docs/02-legacy-audit.md) has the full audit, including what was
+verified about the 2026 redirect incident on btdig.com.
 
-This git branch maintains pre-compiled erlang files to start dhtcrawler2 directly. So you don't need to compile it yourself, just download it and run it to collect torrents and search a torrent by a keyword. 
+## How this was designed
 
-Enjoy it!
+The design is derived step by step, starting from definitions:
 
-## Usage
+1. [**00 — Horismos**](docs/00-horismos.md): every term, defined by genus and differentia, down to stated primitives.
+2. [**01 — First principles**](docs/01-first-principles.md): the system's four causes, nine axioms, and requirements R1–R20 derived from them, with a measurable meaning of "better".
+3. [**02 — Legacy audit**](docs/02-legacy-audit.md): what dhtcrawler2 actually does, its verified defects, and what happened to btdig.
+4. [**03 — Design**](docs/03-design.md): architecture, crate interfaces, schema, and every hard limit.
+5. [**04 — Operations**](docs/04-operations.md): deployment, the pre-launch checklist, administration, and metrics.
 
-* install Erlang R16B or newer
-* download mongodb and start mongodb first
+## What makes it better
 
-        mongod --dbpath your-database-path --setParameter textSearchEnabled=true
+| | dhtcrawler2 | dhtcrawler3 |
+|---|---|---|
+| Discovery | 50 static node IDs listening passively (a Sybil fleet) | One BEP 42 node per address, BEP 51 sampling, full BEP 5 responder |
+| Metadata | Plain HTTP from dead third-party caches, unverified | BEP 9 from peers, SHA-1 / SHA-256 verified before parsing |
+| Protocols | IPv4, v1 torrents | IPv4 + IPv6 (BEP 32), v1 + v2 + hybrid (BEP 52) |
+| Parsing | Recursive, unbounded | Iterative, bounded, fuzzed; memory-safe language |
+| Web | Unescaped HTML (stored and reflected XSS) | Auto-escaped templates, no JavaScript, strict CSP |
+| Search | MongoDB 2.4 text command or Sphinx | Embedded Tantivy, BM25, CJK bigrams, prefix and file-name search |
+| Data | MongoDB without auth; visitor IPs logged with queries | PostgreSQL with least-privilege roles; no peer or visitor IPs stored |
+| Reliability | Queue deleted before processing | Leased queue, backoff, idempotent writes, rebuildable index |
+| Governance | None | Denylist, CSAM term filter, report form, takedown CLI, audit log |
+| Supply chain | Precompiled binaries, dependencies at git `HEAD` | Source-only builds, lockfile, pinned images, cargo-deny/audit |
 
-* start **crawler**, on Windows, just click `win_start_crawler.bat`
-* start **hash_reader**, on Windows, just click `win_start_hash.bat`
-* start **httpd**, on Windows, just click `win_start_http.bat`
-* wait several minutes and checkout `localhost:8000`
+## Quick start
 
-You can also compile the source code and run it manually. The source code is in `src` branch of this repo.
+```sh
+scripts/gen-secrets.sh
+cd deploy && docker compose up -d --build
+# then open http://127.0.0.1:8080
+```
 
-Also you can check more technique information at my blog site (Chinese) [codemacro.com](http://codemacro.com)
+Read [docs/04-operations.md](docs/04-operations.md) **before** exposing an instance to
+the internet.
 
-## Source code
+## Development
 
-dhtcrawler is totally open source, and can be used for any purpose, but you should keep my name on, copyright by me please. You can checkout dhtcrawler2 source code in this git repo **src** branch.
+The workspace is under `crates/`, and each crate has one job (see
+[docs/03-design.md §2](docs/03-design.md#2-workspace)).
 
-## Config
+```sh
+cargo test --workspace --locked          # needs a working native toolchain
+scripts/cargo-docker.sh test --workspace # or run inside the pinned Rust image
+```
 
-Most config value is in `priv/dhtcrawler.config`, when you first run dhtcrawler, this file will be generated automatically. And the other config values are passed by arguments to erlang functions. In most case you don't need to change these config values, except these network addresses.
+Database tests need PostgreSQL. Set `DATABASE_URL` to a superuser connection; the tests
+create their own throwaway databases.
 
-## Mongodb Replica set
+## Security
 
-It's not related to dhtcrawler, but only Mongodb, try figure it yourself.
+See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
-## Another http front-end
+## License
 
-Yes of course you can write another http front-end UI based on the torrent database, if you're interested in it I can help you about the database format.
-
-## Sphinx
-
-Yes, dhtcrawler2 supports **sphinx** search. There's a tool named `sphinx-builder` load torrents from database and create sphinx index. `crawler-http` can also search text by sphinx. 
-
-dhtcrawler2 uses mongodb text search by default, to use sphinx, follow these steps below:
-
-* Download sphinx, the version tested is a fork version named `coreseek` which supports Chinese characters. [coreseek4.1](http://www.coreseek.cn/news/14/52/)
-* unzip the binary archive and add `bin` directory to `PATH` environment variable, so that dhtcrawler can invoke `indexer` tool
-* config `etc/csft.conf` file
-    * add a delta index, i.e:
-        
-            source delta:xml
-            {
-                type = xmlpipe2
-                xmlpipe_command = cat g:/downloads/coreseek-4.1-win32/var/test/delta.xml
-            }
-            index delta:xml
-            {
-                source = delta
-                path = g:/downloads/coreseek-4.1-win32/var/data/delta
-            }
-
-    * change the other directories, better to use absolute path
-* run `win_init_sphinx_index.bat` to generate a default sphinx-builder config file, and terminate `win_init_sphinx_index.bat`
-* config `priv/sphinx_builder.config`, specify `main` and `delta` sphinx index source file name, `main` and `delta` index name and sphinx config file, these file names must match these configs you write in `etc/csft.conf`
-* run `win_init_sphinx_index.bat` again to initialize sphinx index file, terminate `win_init_sphinx_index.bat` and if it initializes sphinx index successfully, never run it again
-* run sphinx `searchd` server
-* run `win_start_sphinx_builder` to start sphinx-builder, it will read torrents from your torrent database and build the index into sphinx
-* change `priv/hash_reader.config` `search_method` to `sphinx`, so that `hash_reader` will not build mongodb text search index any more
-* change `priv/httpd.config` `search_method` to `sphinx`, so that `crawler-http` will search keyword by sphinx
-
-Lots of details! And you'd better to know sphinx well. 
-
-## LICENSE
-
-See LICENSE.txt
+MIT. dhtcrawler3 is a new implementation, but it follows the design of Kevin Lynx's
+dhtcrawler2, and his copyright notice is kept in [LICENSE.txt](LICENSE.txt).

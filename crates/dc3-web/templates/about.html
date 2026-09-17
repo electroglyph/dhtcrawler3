@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<article class="prose" aria-labelledby="about-heading">
+<h1 id="about-heading">About {{ page.site_name }}</h1>
+<p>{{ page.site_name }} is a search engine for torrents that are shared through the BitTorrent distributed hash table (DHT). It runs dhtcrawler3, free software whose source anyone can read and run.</p>
+<h2>How it works</h2>
+<ol>
+<li>A crawler takes part in the DHT as an ordinary node that answers other nodes' requests, and learns the keys (info hashes) of torrents that are being shared.</li>
+<li>For each key it asks the peers sharing that torrent for its metadata: the torrent's name and its list of files. The metadata is used only if it matches the key.</li>
+<li>Names and file lists are stored and indexed so that they can be searched by words in any language.</li>
+</ol>
+<h2>What this site does not do</h2>
+<ul>
+<li>It does not host, download or distribute the content of any torrent. It stores only names, file lists, sizes and dates, and shows magnet links that a BitTorrent client can use to find a torrent in the DHT.</li>
+<li>It does not track you: no cookies, no JavaScript, no analytics, no advertising and nothing loaded from other sites. See the <a href="/privacy">privacy page</a>.</li>
+<li>It does not show torrents that have been taken down, or torrents whose names or file names contain terms on its list of blocked terms.</li>
+</ul>
+<h2>Searching</h2>
+<ul>
+<li>Every word must appear in the torrent's name or in one of its file names.</li>
+<li>Put words in "double quotes" to find them as a phrase, and put a minus sign in front of a word (-word) to leave out torrents that contain it.</li>
+<li>The last word also finds longer words that start with it, unless the search ends with a space.</li>
+<li>Chinese, Japanese and Korean text can be searched by any part of a word, including single characters.</li>
+</ul>
+<p>Questions, takedown requests and reports: see the <a href="/legal">legal page</a>.</p>
+</article>
+{% endblock %}

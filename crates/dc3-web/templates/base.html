@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>{{ page.title }} · {{ page.site_name }}</title>
+<link rel="stylesheet" href="{{ page.style_path }}">
+</head>
+<body>
+<a class="skip-link" href="#content">Skip to content</a>
+<header class="site-header">
+<div class="wrap header-inner">
+<a class="brand" href="/">{{ page.site_name }}</a>
+{%- if page.header_search %}
+<form class="search-form compact" action="/search" method="get" role="search">
+<label class="visually-hidden" for="header-q">Search torrents</label>
+<input id="header-q" name="q" type="search" maxlength="{{ page.max_query_chars }}" required autocomplete="off" spellcheck="false" value="{{ page.query }}">
+<button type="submit">Search</button>
+</form>
+{%- endif %}
+</div>
+</header>
+<main id="content" class="wrap" tabindex="-1">
+{% block content %}{% endblock %}
+</main>
+<footer class="site-footer">
+<nav class="wrap" aria-label="Site information">
+<ul class="footer-links">
+<li><a href="/about">About</a></li>
+<li><a href="/legal">Legal</a></li>
+<li><a href="/privacy">Privacy</a></li>
+<li><a href="/legal#report">Report</a></li>
+</ul>
+</nav>
+</footer>
+</body>
+</html>
