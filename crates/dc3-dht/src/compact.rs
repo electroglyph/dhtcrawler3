@@ -376,6 +376,13 @@ impl AddrPolicy {
         self.prefix_key(addr, V4_BITS, HOST_PREFIX_V6)
     }
 
+    /// The key of inbound rate limits: the IP (IPv4) or its /48 (IPv6),
+    /// the same actor the external-IP vote counts ([`Self::voter_key`]).
+    /// A /48 holder rotating source addresses shares one bucket.
+    pub(crate) fn inbound_key(self, addr: &SocketAddr) -> AddrKey {
+        self.prefix_key(addr, V4_BITS, VOTER_PREFIX_V6)
+    }
+
     /// The key of an external-IP voter, and of one source network in
     /// per-network quotas: its /24 (IPv4) or /48 (IPv6).
     pub(crate) fn voter_key(self, addr: &SocketAddr) -> AddrKey {

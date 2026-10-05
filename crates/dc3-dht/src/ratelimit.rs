@@ -122,8 +122,9 @@ impl ResponderBudget {
     }
 }
 
-/// Per-host inbound token buckets (an IPv4 address or an IPv6 /64), kept in
-/// one bounded LRU map per family, so IPv6 churn cannot evict IPv4 buckets.
+/// Per-host inbound token buckets (an IPv4 address or an IPv6 /48, one
+/// external-IP voter), kept in one bounded LRU map per family, so IPv6
+/// churn cannot evict IPv4 buckets.
 pub(crate) struct InboundLimiter {
     v4: LruCache<AddrKey, TokenBucket>,
     v6: LruCache<AddrKey, TokenBucket>,
@@ -160,7 +161,7 @@ impl InboundLimiter {
             Family::V6 => &mut self.v6,
         };
         buckets
-            .get_or_insert_mut(self.policy.host_key(from), || {
+            .get_or_insert_mut(self.policy.inbound_key(from), || {
                 TokenBucket::new(rate, burst, now)
             })
             .try_acquire(now)
@@ -463,7 +464,12 @@ mod tests {
         }
         assert_eq!(l.v4.len(), 4);
         for i in 0..10u16 {
-            assert!(l.allow(&v6(i, 0), t0));
+            // A distinct /48 each: the third group differs.
+            let a = SocketAddr::new(
+                std::net::Ipv6Addr::new(0x2a01, 0x4f8, i, 0, 0, 0, 0, 1).into(),
+                1,
+            );
+            assert!(l.allow(&a, t0));
         }
         assert_eq!(l.v6.len(), 4);
     }
@@ -476,20 +482,25 @@ mod tests {
     }
 
     #[test]
-    fn inbound_limiter_keys_ipv6_on_the_64() {
+    fn inbound_limiter_keys_ipv6_on_the_48() {
         let t0 = Instant::now();
         let mut l = InboundLimiter::new(10, 20, PRODUCTION);
         let mut allowed = 0;
-        for host in 0..50 {
+        // Different /64s of one /48 share a bucket, like one voter.
+        for net in 0..50u16 {
             for _ in 0..20 {
-                if l.allow(&v6(2, host), t0) {
+                if l.allow(&v6(net, 0), t0) {
                     allowed += 1;
                 }
             }
         }
         assert_eq!(allowed, 20);
-        // Another /64 has its own bucket.
-        assert!(l.allow(&v6(3, 0), t0));
+        // Another /48 has its own bucket.
+        let other = SocketAddr::new(
+            std::net::Ipv6Addr::new(0x2a01, 0x4f8, 2, 0, 0, 0, 0, 1).into(),
+            6881,
+        );
+        assert!(l.allow(&other, t0));
     }
 
     #[test]

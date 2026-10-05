@@ -126,7 +126,7 @@ pub struct DhtTuning {
     pub max_send_wait: Duration,
     /// Minimum time between two queries to one IP. Production: 1 s.
     pub per_address_query_spacing: Duration,
-    /// Inbound packets per second accepted from one host (IPv4 address or IPv6 /64). Production: 4.
+    /// Inbound packets per second accepted from one host (IPv4 address or IPv6 /48). Production: 4.
     pub inbound_rate: u32,
     /// Inbound burst accepted from one host. Production: 8.
     pub inbound_burst: u32,

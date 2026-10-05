@@ -71,7 +71,7 @@ Not implemented:
   - Replies have their own budget: 500 replies/s and 64 000 bytes/s.
   - A query beyond that budget is dropped unanswered (`responder_dropped`).
   - Every datagram we send is at most 1 024 bytes.
-- **Inbound.** Each host (an IPv4 address or an IPv6 /64) may send 4 packets/s with a burst of 8, which keeps our replies to it under libtorrent's 5 packets/s ban threshold. The limiter map holds
+- **Inbound.** Each host (an IPv4 address or an IPv6 /48, one external-IP voter) may send 4 packets/s with a burst of 8, which keeps our replies to it under libtorrent's 5 packets/s ban threshold. The limiter map holds
   100 000 IPs.
 - **The address chokepoint.** `is_dialable` rejects port 0 and the IANA special-purpose
   ranges. IPv4-mapped and IPv4-compatible addresses are checked as IPv4. Teredo, 6to4
@@ -88,8 +88,9 @@ Not implemented:
     of that entry; the ID that answered is learned like any responder.
   - Refreshes start at most 2 lookups per socket, for the least recently changed
     due buckets; the other buckets stay due.
-- **Per-host limits.** Inbound buckets and outbound spacing key on the IPv4 address
-  or the IPv6 /64, with separate maps per family. Replies to our own outstanding
+- **Per-host limits.** Inbound buckets key on the IPv4 address or the IPv6 /48
+  (one external-IP voter); outbound spacing keys on the IPv4 address or the
+  IPv6 /64, with separate maps per family. Replies to our own outstanding
   queries are not charged to the inbound bucket.
 - **Announces.** One peer entry per IP per key (at most 4 per IPv6 /64). A full key
   replaces the oldest entry of its most represented /24 or /64. One host may create
