@@ -11,7 +11,8 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="rust:1.98-slim-trixie"
+# Pinned like the Dockerfile's RUST_IMAGE: the tag alone floats.
+image="rust:1.98-slim-trixie@sha256:bce1476d4be4d78b83705bc5f428b86d640eeeea33e9dadafbc037b5703a53bf"
 target="${DC3_TARGET:-docker}"
 network="${DC3_NETWORK:-dc3-dev}"
 
