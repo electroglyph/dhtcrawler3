@@ -789,6 +789,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]

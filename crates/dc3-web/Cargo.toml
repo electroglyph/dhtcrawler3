@@ -29,6 +29,7 @@ tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

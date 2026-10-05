@@ -12,9 +12,10 @@ use axum::extract::{Form, Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use dc3_core::AnyKey;
-use dc3_core::text::is_bidi_control;
+use dc3_core::text::is_unwanted;
 use dc3_store::{NewReport, REPORT_CONTACT_MAX_CHARS, REPORT_MESSAGE_MAX_CHARS, ReportReason};
 use serde::Deserialize;
+use unicode_normalization::UnicodeNormalization;
 
 use super::torrent::BAD_KEY_MESSAGE;
 use super::{key_hex, log_backend_error, parse_key};
@@ -214,23 +215,29 @@ fn rejected(site: &Site, rejection: &FormRejection) -> Response {
     error_response(site, Flavor::Html, status, message)
 }
 
-/// A multi-line message: line breaks become `\n`, other control and bidi
-/// characters are removed (reports are read in a terminal), and the text is
-/// trimmed.
+/// A multi-line message: line breaks become `\n`, the text is NFC-normalised
+/// and stripped of the same unwanted characters as indexed text (reports are
+/// read in a terminal), and the text is trimmed. `\n` and `\t` are kept.
 fn clean_message(raw: &str) -> String {
     raw.replace("\r\n", "\n")
         .chars()
         .map(|c| if c == '\r' { '\n' } else { c })
-        .filter(|c| *c == '\n' || *c == '\t' || !(c.is_control() || is_bidi_control(*c)))
+        .nfc()
+        .collect::<String>()
+        .chars()
+        .filter(|c| *c == '\n' || *c == '\t' || !is_unwanted(*c))
         .collect::<String>()
         .trim()
         .to_owned()
 }
 
-/// A single line: control and bidi characters removed, trimmed.
+/// A single line: NFC-normalised, control and unwanted characters removed,
+/// trimmed.
 fn clean_line(raw: &str) -> String {
-    raw.chars()
-        .filter(|c| !(c.is_control() || is_bidi_control(*c)))
+    raw.nfc()
+        .collect::<String>()
+        .chars()
+        .filter(|c| !(c.is_control() || is_unwanted(*c)))
         .collect::<String>()
         .trim()
         .to_owned()
@@ -247,6 +254,10 @@ mod tests {
             "line one\nline two\nthree[2J\t!"
         );
         assert_eq!(clean_message("\u{0}"), "");
+        // Zero-width characters, the BOM and non-characters are stripped.
+        assert_eq!(clean_message("p\u{200B}thc \u{FEFF}hi"), "pthc hi");
+        // Combining marks are NFC-normalised like indexed text.
+        assert_eq!(clean_message("e\u{301}"), "\u{e9}");
     }
 
     #[test]
@@ -256,6 +267,8 @@ mod tests {
             "me@example.orgBcc: x"
         );
         assert_eq!(clean_line("\u{2066}a\u{2069}"), "a");
+        assert_eq!(clean_line("a\u{200D}b\u{FEFF}"), "ab");
+        assert_eq!(clean_line("e\u{301}@x.org"), "\u{e9}@x.org");
     }
 
     #[test]

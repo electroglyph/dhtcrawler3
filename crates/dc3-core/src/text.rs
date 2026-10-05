@@ -20,7 +20,9 @@ pub fn is_bidi_control(c: char) -> bool {
 /// True for characters that should never appear in displayed metadata:
 /// C0/C1 controls (except whitespace, which is collapsed separately), bidi
 /// controls, zero-width characters, the BOM and Unicode non-characters.
-fn is_unwanted(c: char) -> bool {
+/// Shared with report cleaning, so operator-visible text is held to the
+/// same standard as indexed text.
+pub fn is_unwanted(c: char) -> bool {
     if is_bidi_control(c) {
         return true;
     }
