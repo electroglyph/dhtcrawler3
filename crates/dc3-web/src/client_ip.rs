@@ -22,8 +22,9 @@ pub const MAX_FORWARDED_ENTRIES: usize = 64;
 /// left: trusted entries are skipped, and the first untrusted entry is the
 /// client. An entry that does not parse as an IP address ends the walk, and
 /// the last trusted hop seen (at first the peer itself) is returned; the
-/// walk never continues past such an entry. The leftmost entry, which the
-/// client controls, is never preferred.
+/// walk never continues past such an entry. When every examined entry is
+/// trusted, the socket peer itself is returned: the leftmost entry, which
+/// the client controls, is never preferred.
 pub fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
     let peer_ip = peer.ip().to_canonical();
     if !is_trusted(peer_ip, trusted) {
@@ -51,7 +52,9 @@ pub fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -> Ip
             last_trusted = ip;
         }
     }
-    last_trusted
+    // Every examined entry was trusted: attribute the request to the socket
+    // peer, the only address that cannot be chosen by the sender.
+    peer_ip
 }
 
 /// True when `ip` (canonical form) lies in one of `trusted`. An IPv4
@@ -177,9 +180,9 @@ mod tests {
     }
 
     #[test]
-    fn all_trusted_gives_the_leftmost_trusted_hop() {
+    fn all_trusted_chain_gives_the_socket_peer() {
         let h = xff(&["10.7.7.7, 10.8.8.8"]);
-        assert_eq!(client_ip(peer(PROXY), &h, &trusted()), ip("10.7.7.7"));
+        assert_eq!(client_ip(peer(PROXY), &h, &trusted()), ip("10.0.0.1"));
     }
 
     #[test]
