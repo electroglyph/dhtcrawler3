@@ -94,9 +94,7 @@ pub(crate) fn parse_decoded(
     }
 
     let enc = label_encoding(dict.get_bytes(b"encoding"));
-    let name = text_field(dict, b"name.utf-8", b"name")
-        .map(|b| sanitize_display(&decode_text(b, enc), NAME_MAX_CHARS))
-        .filter(|s| !s.is_empty())
+    let name = sanitised_text_field(dict, b"name.utf-8", b"name", enc)
         .unwrap_or_else(|| UNNAMED.to_owned());
     visit(&name);
 
@@ -139,6 +137,25 @@ pub(crate) fn parse_decoded(
 fn text_field<'a>(dict: &Dict<'a>, preferred: &[u8], fallback: &[u8]) -> Option<&'a [u8]> {
     dict.get_bytes(preferred)
         .or_else(|| dict.get_bytes(fallback))
+}
+
+/// Sanitised text under `preferred`, falling back to `fallback` when the
+/// preferred value is missing or sanitises to empty.
+fn sanitised_text_field(
+    dict: &Dict<'_>,
+    preferred: &[u8],
+    fallback: &[u8],
+    enc: Option<&'static Encoding>,
+) -> Option<String> {
+    for key in [preferred, fallback] {
+        if let Some(raw) = dict.get_bytes(key) {
+            let s = sanitize_display(&decode_text(raw, enc), NAME_MAX_CHARS);
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
 }
 
 /// Accumulates file entries under the parse limits.
@@ -305,6 +322,94 @@ fn path_list<'a>(d: &Dict<'a>) -> Result<Vec<&'a [u8]>, ParseError> {
         .ok_or(ParseError::InvalidField("path"))
 }
 
+fn raw_bytes_list<'a>(d: &Dict<'a>, key: &[u8]) -> Option<Vec<&'a [u8]>> {
+    d.get_list(key)?.iter().map(Value::as_bytes).collect()
+}
+
+/// Decoded components plus sanitised components for one v1 file, preferring
+/// `path.utf-8` but falling back to `path` when the preferred value
+/// sanitises to nothing. When both lists exist with equal length, falls back
+/// per component so one blank `utf-8` entry does not hide a valid `path`
+/// entry.
+fn sanitised_path_components<'a>(
+    fd: &'a Dict<'a>,
+    enc: Option<&'static Encoding>,
+) -> Result<(Vec<Cow<'a, str>>, Vec<String>), ParseError> {
+    let pref = raw_bytes_list(fd, b"path.utf-8");
+    let leg = raw_bytes_list(fd, b"path");
+    let (pref_raw, leg_raw) = match (&pref, &leg) {
+        (None, None) => return Err(ParseError::InvalidField("path")),
+        _ => (pref, leg),
+    };
+    let pref_dec: Option<Vec<Cow<'a, str>>> = pref_raw.as_ref().map(|list| {
+        list.iter().map(|b| decode_text(b, enc)).collect()
+    });
+    let leg_dec: Option<Vec<Cow<'a, str>>> = leg_raw.as_ref().map(|list| {
+        list.iter().map(|b| decode_text(b, enc)).collect()
+    });
+    // Equal-length per-component fallback preserves the most valid entries.
+    if let (Some(p), Some(l)) = (&pref_dec, &leg_dec) {
+        if p.len() == l.len() {
+            let mut comps = Vec::with_capacity(p.len());
+            let mut san = Vec::new();
+            for (a, b) in p.iter().zip(l.iter()) {
+                let s = sanitize_path_component(a)
+                    .or_else(|| sanitize_path_component(b));
+                if let Some(s) = s {
+                    san.push(s);
+                }
+                // For padding checks keep the preferred raw when present.
+                comps.push(a.clone());
+            }
+            if !san.is_empty() {
+                return Ok((comps, san));
+            }
+            // Preferred sanitised to nothing: fall through to legacy below.
+        }
+    }
+    // Whole-list preference with post-sanitisation fallback.
+    if let Some(comps) = pref_dec {
+        let san: Vec<String> = comps
+            .iter()
+            .filter_map(|c| sanitize_path_component(c))
+            .collect();
+        if !san.is_empty() {
+            return Ok((comps, san));
+        }
+        // Preferred sanitised to nothing: try legacy with fresh decode.
+        let leg_dec2: Option<Vec<Cow<'a, str>>> = leg_raw.as_ref().map(|list| {
+            list.iter().map(|b| decode_text(b, enc)).collect()
+        });
+        if let Some(comps) = leg_dec2 {
+            let san: Vec<String> = comps
+                .iter()
+                .filter_map(|c| sanitize_path_component(c))
+                .collect();
+            if !san.is_empty() {
+                return Ok((comps, san));
+            }
+        }
+    } else if let Some(comps) = leg_dec {
+        let san: Vec<String> = comps
+            .iter()
+            .filter_map(|c| sanitize_path_component(c))
+            .collect();
+        if !san.is_empty() {
+            return Ok((comps, san));
+        }
+    }
+    // Both sanitise to nothing but at least one list exists: return the
+    // preferred raw (or legacy) with an empty sanitised list so the entry
+    // is counted but unlisted, matching existing unlistable handling.
+    let comps = pref_raw
+        .map(|list| list.into_iter().map(|b| decode_text(b, enc)).collect())
+        .or_else(|| {
+            leg_raw.map(|list| list.into_iter().map(|b| decode_text(b, enc)).collect())
+        })
+        .unwrap_or_default();
+    Ok((comps, Vec::new()))
+}
+
 /// Collects the files of a v1 torrent: `files` (multi-file) or `length` (single file).
 fn v1_files(
     dict: &Dict<'_>,
@@ -317,14 +422,7 @@ fn v1_files(
         for item in list {
             let fd = item.as_dict().ok_or(ParseError::InvalidField("files"))?;
             let length = file_length(fd)?;
-            let components: Vec<Cow<'_, str>> = path_list(fd)?
-                .into_iter()
-                .map(|b| decode_text(b, enc))
-                .collect();
-            let sanitised: Vec<String> = components
-                .iter()
-                .filter_map(|c| sanitize_path_component(c))
-                .collect();
+            let (components, sanitised) = sanitised_path_components(fd, enc)?;
             let padding = is_padding(
                 components.first().map(AsRef::as_ref),
                 components.last().map(AsRef::as_ref),
