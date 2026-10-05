@@ -133,12 +133,6 @@ pub(crate) fn parse_decoded(
     })
 }
 
-/// The byte string under `preferred`, else under `fallback`.
-fn text_field<'a>(dict: &Dict<'a>, preferred: &[u8], fallback: &[u8]) -> Option<&'a [u8]> {
-    dict.get_bytes(preferred)
-        .or_else(|| dict.get_bytes(fallback))
-}
-
 /// Sanitised text under `preferred`, falling back to `fallback` when the
 /// preferred value is missing or sanitises to empty.
 fn sanitised_text_field(
@@ -309,17 +303,6 @@ impl CappedPath {
         self.text.truncate(trimmed_len);
         (!self.text.is_empty()).then_some(self.text)
     }
-}
-
-/// The path list of a v1 file dictionary: `path.utf-8` if it is a list of
-/// byte strings, else `path`, which must be one.
-fn path_list<'a>(d: &Dict<'a>) -> Result<Vec<&'a [u8]>, ParseError> {
-    let as_bytes_list = |key: &[u8]| -> Option<Vec<&'a [u8]>> {
-        d.get_list(key)?.iter().map(Value::as_bytes).collect()
-    };
-    as_bytes_list(b"path.utf-8")
-        .or_else(|| as_bytes_list(b"path"))
-        .ok_or(ParseError::InvalidField("path"))
 }
 
 fn raw_bytes_list<'a>(d: &Dict<'a>, key: &[u8]) -> Option<Vec<&'a [u8]>> {
