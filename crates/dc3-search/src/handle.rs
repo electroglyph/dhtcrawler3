@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use crate::generations::IndexRoot;
-use crate::index::{MAX_CONCURRENT_SEARCHES, Result, SearchIndex, SearchResults};
+use crate::index::{MAX_CONCURRENT_SEARCHES, Result, SearchError, SearchIndex, SearchResults};
 use crate::query::SearchQuery;
 
 /// Shortest poll interval [`SearchHandle::watch`] uses.
@@ -73,6 +73,28 @@ impl SearchHandle {
     pub async fn search(&self, q: SearchQuery, timeout: Duration) -> Result<SearchResults> {
         let index = self.index();
         index.search_async(q, timeout).await
+    }
+
+    /// Terms a trailing prefix word can expand to, on the live generation;
+    /// see [`SearchIndex::prefix_expansions`]. Shares the search limit and
+    /// timeout so gate checks cannot crowd out searches.
+    pub async fn prefix_expansions(&self, prefix: String, timeout: Duration) -> Result<Vec<String>> {
+        let index = self.index();
+        let permits = Arc::clone(&self.inner.permits);
+        let run = async move {
+            let permit = permits
+                .acquire_owned()
+                .await
+                .map_err(|e| SearchError::Task(e.to_string()))?;
+            let task = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                index.prefix_expansions(&prefix)
+            });
+            task.await.map_err(|e| SearchError::Task(e.to_string()))?
+        };
+        tokio::time::timeout(timeout, run)
+            .await
+            .map_err(|_| SearchError::Timeout)?
     }
 
     /// The generation searches currently use.

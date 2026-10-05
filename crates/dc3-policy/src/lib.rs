@@ -22,6 +22,11 @@ pub const SEED_TERMS: &str = include_str!("../../../policy/blocked-terms.txt");
 pub const MAX_TERM_LINE_CHARS: usize = 1024;
 /// Maximum number of tokens in one term (phrase).
 pub const MAX_TERM_TOKENS: usize = 16;
+/// Maximum number of characters in a seed the affix rule applies to:
+/// short seeds hide inside longer tokens (`xpthc`), where whole-token
+/// matching cannot see them. Longer seeds stay whole-token only, so
+/// everyday words keep searching.
+pub const MAX_AFFIX_SEED_CHARS: usize = 4;
 /// Maximum number of distinct terms a matcher holds.
 pub const MAX_TERMS: usize = 1_000_000;
 
@@ -51,6 +56,9 @@ pub enum PolicyError {
 pub struct TermMatcher {
     /// First token → full token sequences starting with it.
     index: HashMap<String, Vec<Vec<String>>>,
+    /// Normalized single-token seeds of at most [`MAX_AFFIX_SEED_CHARS`]
+    /// characters, for the affix rule in [`matches_affixed`](Self::matches_affixed).
+    short: Vec<String>,
     len: usize,
 }
 
@@ -84,6 +92,14 @@ impl TermMatcher {
             let Some(first) = tokens.first().cloned() else {
                 return Err(PolicyError::EmptyTerm { line: line_no });
             };
+            let short_seed = match tokens.as_slice() {
+                [only]
+                    if (1..=MAX_AFFIX_SEED_CHARS).contains(&only.chars().count()) =>
+                {
+                    Some(only.clone())
+                }
+                _ => None,
+            };
             let bucket = matcher.index.entry(first).or_default();
             if bucket.contains(&tokens) {
                 continue;
@@ -92,6 +108,11 @@ impl TermMatcher {
                 return Err(PolicyError::TooManyTerms { max: MAX_TERMS });
             }
             bucket.push(tokens);
+            if let Some(seed) = short_seed {
+                if !matcher.short.contains(&seed) {
+                    matcher.short.push(seed);
+                }
+            }
             matcher.len = matcher.len.saturating_add(1);
         }
         Ok(matcher)
@@ -125,6 +146,25 @@ impl TermMatcher {
             };
             candidates.iter().any(|term| rest.starts_with(term))
         })
+    }
+
+    /// True if [`matches`](Self::matches) holds, or a short single-token
+    /// seed appears inside any normalized token of `text`. Short seeds hide
+    /// in affixes (`xpthc`) and behind prefix searches (`pt` → `pthc`),
+    /// where whole-token matching cannot see them; the
+    /// [`MAX_AFFIX_SEED_CHARS`] bound keeps everyday words searchable.
+    pub fn matches_affixed(&self, text: &str) -> bool {
+        if self.matches(text) {
+            return true;
+        }
+        if self.short.is_empty() {
+            return false;
+        }
+        Variants::of(text)
+            .all()
+            .iter()
+            .flat_map(|tokens| tokens.iter())
+            .any(|tok| self.short.iter().any(|seed| tok.contains(seed.as_str())))
     }
 
     /// Number of distinct terms.

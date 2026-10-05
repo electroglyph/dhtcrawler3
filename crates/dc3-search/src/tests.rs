@@ -335,6 +335,20 @@ fn prefix_expansion_is_capped() {
 }
 
 #[test]
+fn prefix_expansions_lists_what_a_trailing_word_matches() {
+    let index = index_with(&[doc(1, "holiday photos", "pthc/a.jpg")]);
+    let mut got = index.prefix_expansions("pt").unwrap();
+    got.sort_unstable();
+    assert_eq!(got, ["pthc"]);
+    // File-only terms are listed too.
+    let mut got = index.prefix_expansions("pth").unwrap();
+    got.sort_unstable();
+    assert_eq!(got, ["pthc"]);
+    // No indexed term starts here.
+    assert!(index.prefix_expansions("zzz").unwrap().is_empty());
+}
+
+#[test]
 fn exclusion() {
     let index = index_with(&[
         doc(1, "linux iso", ""),

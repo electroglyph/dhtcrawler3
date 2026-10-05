@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use dc3_search::{
     DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, QueryError,
-    SEARCH_TIMEOUT, SearchError, SearchQuery, Sort,
+    SEARCH_TIMEOUT, SearchError, SearchQuery, Sort, parse_query,
 };
 use dc3_store::TorrentRecord;
 use serde::Deserialize;
@@ -91,6 +91,37 @@ fn parse_bounded(raw: Option<&str>, default: u32, max: u32) -> Option<u32> {
 /// True (and counted) if `q` contains a blocked term.
 pub(crate) fn is_blocked<B>(st: &AppState<B>, q: &str) -> bool {
     let blocked = st.policy.matches(q);
+    if blocked {
+        metrics::counter!(metric_names::BLOCKED_QUERIES).increment(1);
+    }
+    blocked
+}
+
+/// True (and counted) when the query's trailing prefix word expands to an
+/// indexed term the whole-token gate cannot see but the policy denies.
+/// Only single-token prefixes are enumerated; longer words search as
+/// phrases. Runs after parameter validation, so blocked and clean queries
+/// answer bad parameters alike. A broken index is not a block: the search
+/// itself reports it.
+pub(crate) async fn expansion_blocked<B: Backend>(st: &AppState<B>, text: &str) -> bool {
+    let single = match parse_query(text) {
+        Ok(parsed) => match parsed.words.last() {
+            Some(last) if last.prefix => match last.tokens.as_slice() {
+                [single] => single.clone(),
+                _ => return false,
+            },
+            _ => return false,
+        },
+        Err(_) => return false,
+    };
+    let expansions = match st.search.prefix_expansions(single.clone(), SEARCH_TIMEOUT).await {
+        Ok(expansions) => expansions,
+        Err(_) => return false,
+    };
+    let blocked = expansions
+        .iter()
+        .any(|term| st.policy.matches_affixed(term))
+        || st.policy.matches_affixed(&single);
     if blocked {
         metrics::counter!(metric_names::BLOCKED_QUERIES).increment(1);
     }
@@ -263,12 +294,8 @@ pub(crate) async fn search_page<B: Backend>(
             &too_long_message(),
         );
     }
-    if is_blocked(&st, q) {
-        let page = BlockedPage {
-            page: site.page("Search blocked", "", true),
-        };
-        return html(StatusCode::OK, &page);
-    }
+    // Parameters validate before either gate, so blocked and clean queries
+    // answer bad parameters alike. The refused query is not echoed.
     let bad_request =
         |message: &str| error_with_query(site, Flavor::Html, StatusCode::BAD_REQUEST, message, q);
     let page_number = match parse_page(params.p.as_deref()) {
@@ -283,6 +310,18 @@ pub(crate) async fn search_page<B: Backend>(
         Ok(n) => n,
         Err(e) => return bad_request(&e.message()),
     };
+    if is_blocked(&st, q) {
+        let page = BlockedPage {
+            page: site.page("Search blocked", "", true),
+        };
+        return html(StatusCode::OK, &page);
+    }
+    if expansion_blocked(&st, q).await {
+        let page = BlockedPage {
+            page: site.page("Search blocked", "", true),
+        };
+        return html(StatusCode::OK, &page);
+    }
 
     let found = match execute(&st, q, page_number, per_page, sort).await {
         Ok(found) => found,

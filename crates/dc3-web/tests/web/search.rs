@@ -250,6 +250,39 @@ async fn blocked_queries_get_the_deterrence_page_without_searching() {
 }
 
 #[tokio::test]
+async fn short_prefixes_of_blocked_terms_are_blocked() {
+    let _serial = serial().await;
+    // Clean name, blocked term only in the files: reachable only through
+    // prefix expansion.
+    let app = app(vec![torrent(1, "holiday photos", &[("zzforbiddenzz/a.jpg", 1)])]);
+    let blocked = metrics().counter("dc3_blocked_queries_total");
+    let searches = metrics().histogram_count("dc3_search_seconds");
+    for q in ["zz", "zzforbiddenz"] {
+        let r = send(&app.router, get(&format!("/search?q={}", enc(q)))).await;
+        assert_eq!(r.status, StatusCode::OK, "{q}");
+        assert!(
+            r.body
+                .contains("Searches for child sexual abuse material are blocked."),
+            "{q}"
+        );
+        assert!(!r.body.contains("result-title"), "{q}");
+        // The blocked query is searched never and shown nowhere.
+        let r = send(
+            &app.router,
+            get(&format!("/api/v1/search?q={}", enc(q))),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::OK, "{q}");
+        let json = r.json();
+        assert_eq!(json["blocked"], true, "{q}");
+        assert_eq!(json["query"], "", "{q}");
+    }
+    assert_eq!(metrics().counter("dc3_blocked_queries_total"), blocked + 4);
+    assert_eq!(app.backend.get_many_calls(), 0);
+    assert_eq!(metrics().histogram_count("dc3_search_seconds"), searches);
+}
+
+#[tokio::test]
 async fn over_long_queries_are_refused_before_the_policy_check() {
     let _serial = serial().await;
     let app = app(vec![torrent(1, "zzforbiddenzz movie", &[("a", 1)])]);

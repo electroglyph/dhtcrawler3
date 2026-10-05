@@ -14,8 +14,8 @@ use dc3_store::TorrentRecord;
 use serde::Serialize;
 
 use super::search::{
-    SearchParams, execute, is_blocked, parse_page, parse_per_page, parse_sort, too_long,
-    too_long_message,
+    SearchParams, execute, expansion_blocked, is_blocked, parse_page, parse_per_page, parse_sort,
+    too_long, too_long_message,
 };
 use super::{Lookup, Shown, lookup, parse_key};
 use crate::Backend;
@@ -116,6 +116,18 @@ pub(crate) async fn search<B: Backend>(
     };
     if is_blocked(&st, q) {
         // The refused query is not echoed back.
+        let body = ApiSearch {
+            query: "",
+            page,
+            per_page,
+            total: 0,
+            blocked: true,
+            results: Vec::new(),
+        };
+        return json(StatusCode::OK, &body);
+    }
+    if expansion_blocked(&st, q).await {
+        // A prefix of a blocked term is blocked like the term itself.
         let body = ApiSearch {
             query: "",
             page,

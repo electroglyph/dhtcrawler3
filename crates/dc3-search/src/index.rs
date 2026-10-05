@@ -503,6 +503,19 @@ impl SearchIndex {
         }
     }
 
+    /// Indexed terms of the name/files word fields starting with `prefix`:
+    /// what a trailing single-token prefix word can match. Used to apply
+    /// the content policy to prefix expansions, which whole-token gates
+    /// cannot see.
+    pub fn prefix_expansions(&self, prefix: &str) -> Result<Vec<String>> {
+        let searcher = self.reader.searcher();
+        let mut found = BTreeSet::new();
+        for field in [self.fields.name, self.fields.files] {
+            found.extend(expand_prefix(&searcher, field, prefix)?);
+        }
+        Ok(found.into_iter().collect())
+    }
+
     fn field_query(
         &self,
         field: Field,

@@ -72,6 +72,23 @@ fn whole_token_only() {
 }
 
 #[test]
+fn affixed_short_seeds_match() {
+    let m = TermMatcher::load("pthc\nchild porn\naverylongseed\n").unwrap();
+    // Whole tokens and phrases still match.
+    assert!(m.matches_affixed("pthc"));
+    assert!(m.matches_affixed("child porn"));
+    // Short seeds hide in affixes and behind short prefixes.
+    assert!(m.matches_affixed("xpthc"));
+    assert!(m.matches_affixed("pthc/a.jpg"));
+    // Long seeds stay whole-token only.
+    assert!(!m.matches_affixed("xaverylongseed"));
+    assert!(!m.matches_affixed("my child pornography"));
+    assert!(!m.matches_affixed("holiday photos"));
+    // An empty matcher matches nothing either way.
+    assert!(!TermMatcher::empty().matches_affixed("xpthc"));
+}
+
+#[test]
 fn years_stay_years() {
     assert_eq!(normalise("2024"), ["2024"]);
     let m = TermMatcher::load("zoza\n").unwrap();
