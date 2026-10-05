@@ -279,7 +279,10 @@ pub(crate) async fn search_page<B: Backend>(
         Ok(s) => s,
         Err(e) => return bad_request(&e.message()),
     };
-    let per_page = DEFAULT_PER_PAGE;
+    let per_page = match parse_per_page(params.per_page.as_deref()) {
+        Ok(n) => n,
+        Err(e) => return bad_request(&e.message()),
+    };
 
     let found = match execute(&st, q, page_number, per_page, sort).await {
         Ok(found) => found,
