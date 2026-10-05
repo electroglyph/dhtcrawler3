@@ -242,8 +242,10 @@ fn file_length(d: &Dict<'_>) -> Result<i64, ParseError> {
         .ok_or(ParseError::InvalidField("length"))
 }
 
-/// BEP 47 padding detection on the decoded (not yet sanitised) first and
-/// last path components.
+/// BEP 47 padding detection on the first and last path components.
+/// Callers pass raw components, sanitised components, or both (OR-ed);
+/// the stored path is built from sanitised components, so at least the
+/// sanitised form must be checked.
 fn is_padding(first: Option<&str>, last: Option<&str>, attr: Option<&[u8]>) -> bool {
     attr.is_some_and(|a| a.contains(&ATTR_PADDING))
         || first == Some(PAD_DIR)
@@ -319,15 +321,19 @@ fn v1_files(
                 .into_iter()
                 .map(|b| decode_text(b, enc))
                 .collect();
-            let padding = is_padding(
-                components.first().map(AsRef::as_ref),
-                components.last().map(AsRef::as_ref),
-                fd.get_bytes(b"attr"),
-            );
             let sanitised: Vec<String> = components
                 .iter()
                 .filter_map(|c| sanitize_path_component(c))
                 .collect();
+            let padding = is_padding(
+                components.first().map(AsRef::as_ref),
+                components.last().map(AsRef::as_ref),
+                fd.get_bytes(b"attr"),
+            ) || is_padding(
+                sanitised.first().map(String::as_str),
+                sanitised.last().map(String::as_str),
+                fd.get_bytes(b"attr"),
+            );
             // Past the budget the joined path is not needed: parsing fails.
             let mut path = None;
             let mut whole = false;
@@ -357,7 +363,7 @@ fn v1_files(
             comp.as_deref(),
             comp.as_deref(),
             dict.get_bytes(b"attr"),
-        );
+        ) || is_padding(Some(name), Some(name), dict.get_bytes(b"attr"));
         if let Some(p) = &comp {
             if p != name && !files.show_joined(p) {
                 files.show(p);
@@ -387,10 +393,10 @@ struct DirMark {
 
 impl OpenDirs {
     fn open(&mut self, raw: &str) {
-        if self.marks.is_empty() {
-            self.top_is_pad = raw == PAD_DIR;
-        }
         let comp = sanitize_path_component(raw);
+        if self.marks.is_empty() {
+            self.top_is_pad = raw == PAD_DIR || comp.as_deref() == Some(PAD_DIR);
+        }
         self.marks.push(DirMark {
             len: self.path.text.len(),
             chars: self.path.chars,
@@ -423,15 +429,32 @@ impl OpenDirs {
     }
 
     /// Whether a file named `raw` in the current directory is padding.
-    fn is_padding(&self, raw: &str, attr: Option<&[u8]>) -> bool {
-        let first = if self.marks.is_empty() {
+    /// Checks both the raw and sanitised file name, so whitespace or
+    /// invisible characters cannot hide a padding marker.
+    fn is_padding(
+        &self,
+        raw: &str,
+        sanitised: Option<&str>,
+        attr: Option<&[u8]>,
+    ) -> bool {
+        let first_raw = if self.marks.is_empty() {
             raw
         } else if self.top_is_pad {
             PAD_DIR
         } else {
             ""
         };
-        is_padding(Some(first), Some(raw), attr)
+        if is_padding(Some(first_raw), Some(raw), attr) {
+            return true;
+        }
+        let first_san = if self.marks.is_empty() {
+            sanitised.unwrap_or("")
+        } else if self.top_is_pad {
+            PAD_DIR
+        } else {
+            ""
+        };
+        is_padding(Some(first_san), sanitised, attr)
     }
 
     /// Shows the file `comp` in the current directory and returns its path.
@@ -497,8 +520,8 @@ fn walk_file_tree(
                 "file entry is not a dictionary",
             ))?;
             let length = file_length(fd)?;
-            let padding = dirs.is_padding(&name, fd.get_bytes(b"attr"));
             let comp = sanitize_path_component(&name);
+            let padding = dirs.is_padding(&name, comp.as_deref(), fd.get_bytes(b"attr"));
             let path = dirs.show_file(comp.as_deref(), files);
             files.add(padding, length, path)?;
         } else {
