@@ -188,7 +188,7 @@ async fn exercise(options: PgConnectOptions) {
         &app,
         report_post(
             &hex,
-            &[SAME_ORIGIN],
+            &SAME_ORIGIN_HEADERS,
             "reason=csam&message=please+review",
             "192.0.2.201:1",
         ),
@@ -211,7 +211,7 @@ async fn exercise(options: PgConnectOptions) {
     let unknown = DhtKey([0x77; 20]).to_hex();
     let r = send(
         &app,
-        report_post(&unknown, &[SAME_ORIGIN], "reason=other", "192.0.2.202:1"),
+        report_post(&unknown, &SAME_ORIGIN_HEADERS, "reason=other", "192.0.2.202:1"),
     )
     .await;
     assert_eq!(r.status, StatusCode::OK);
@@ -223,7 +223,7 @@ async fn exercise(options: PgConnectOptions) {
         .unwrap();
     let r = send(
         &app,
-        report_post(&unknown, &[SAME_ORIGIN], "reason=other", "192.0.2.203:1"),
+        report_post(&unknown, &SAME_ORIGIN_HEADERS, "reason=other", "192.0.2.203:1"),
     )
     .await;
     assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);

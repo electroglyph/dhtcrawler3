@@ -56,10 +56,16 @@ async fn csrf_checks() {
     let app = app(vec![torrent(1, "reportable", &[])]);
     let key = key_for(1).to_hex();
     let body = form("copyright", "mine", "");
-    let cases: [(&[(&str, &str)], StatusCode); 8] = [
-        (&[("sec-fetch-site", "same-origin")], StatusCode::OK),
-        (&[("sec-fetch-site", "none")], StatusCode::OK),
+    let cases: [(&[(&str, &str)], StatusCode); 10] = [
+        (&SAME_ORIGIN_HEADERS, StatusCode::OK),
+        (
+            &[("sec-fetch-site", "none"), ("origin", BASE_URL)],
+            StatusCode::OK,
+        ),
         (&[("origin", BASE_URL)], StatusCode::OK),
+        // A forged fetch-metadata header alone proves nothing.
+        (&[("sec-fetch-site", "same-origin")], StatusCode::FORBIDDEN),
+        (&[("sec-fetch-site", "none")], StatusCode::FORBIDDEN),
         (&[("sec-fetch-site", "cross-site")], StatusCode::FORBIDDEN),
         (
             &[("sec-fetch-site", "same-site"), ("origin", BASE_URL)],
@@ -110,7 +116,7 @@ async fn large_valid_report_is_accepted_and_stored_exactly() {
     );
     let r = send(
         &app.router,
-        report_post(&key, &[SAME_ORIGIN], &body, CLIENT),
+        report_post(&key, &SAME_ORIGIN_HEADERS, &body, CLIENT),
     )
     .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
@@ -137,7 +143,7 @@ async fn oversized_reports_are_refused_with_413() {
     // With a Content-Length header.
     let r = send(
         &app.router,
-        report_post(&key, &[SAME_ORIGIN], &big, "192.0.2.50:1"),
+        report_post(&key, &SAME_ORIGIN_HEADERS, &big, "192.0.2.50:1"),
     )
     .await;
     assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE);
@@ -157,6 +163,8 @@ async fn oversized_reports_are_refused_with_413() {
     );
     req.headers_mut()
         .insert("sec-fetch-site", "same-origin".parse().unwrap());
+    req.headers_mut()
+        .insert("origin", BASE_URL.parse().unwrap());
     let r = send(&app.router, req).await;
     assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_security_headers(&r, true);
@@ -167,7 +175,7 @@ async fn oversized_reports_are_refused_with_413() {
     let exact = &big[..limit];
     let r = send(
         &app.router,
-        report_post(&key, &[SAME_ORIGIN], exact, "192.0.2.52:1"),
+        report_post(&key, &SAME_ORIGIN_HEADERS, exact, "192.0.2.52:1"),
     )
     .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -196,7 +204,7 @@ async fn report_outcomes_are_counted_but_never_shown() {
     );
 
     let submit =
-        |reason: &str, peer: &str| report_post(&key, &[SAME_ORIGIN], &form(reason, "", ""), peer);
+        |reason: &str, peer: &str| report_post(&key, &SAME_ORIGIN_HEADERS, &form(reason, "", ""), peer);
 
     app.backend.set_behaviour(ReportBehaviour::Hidden);
     let first = send(&app.router, submit("csam", "192.0.2.60:1")).await;
@@ -250,7 +258,7 @@ async fn backend_refusals() {
     {
         app.backend.set_behaviour(behaviour);
         let peer = format!("192.0.2.{}:1", 70 + i);
-        let r = send(&app.router, report_post(&key, &[SAME_ORIGIN], &body, &peer)).await;
+        let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, &body, &peer)).await;
         assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{behaviour:?}");
         assert!(r.body.contains("Reports are temporarily unavailable."));
         assert_security_headers(&r, true);
@@ -259,7 +267,7 @@ async fn backend_refusals() {
     app.backend.set_behaviour(ReportBehaviour::Invalid);
     let r = send(
         &app.router,
-        report_post(&key, &[SAME_ORIGIN], &body, "192.0.2.72:1"),
+        report_post(&key, &SAME_ORIGIN_HEADERS, &body, "192.0.2.72:1"),
     )
     .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -291,7 +299,7 @@ async fn invalid_reports_are_refused_with_the_form() {
     ];
     for (i, (body, message)) in cases.iter().enumerate() {
         let peer = format!("192.0.2.{}:1", 80 + i);
-        let r = send(&app.router, report_post(&key, &[SAME_ORIGIN], body, &peer)).await;
+        let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, body, &peer)).await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST, "{message}");
         assert!(r.body.contains(message), "{message}");
         assert!(r.body.contains("<form class=\"report-form\""));
@@ -302,7 +310,7 @@ async fn invalid_reports_are_refused_with_the_form() {
     let crlf = "<b>\r\n".repeat(400);
     let r = send(
         &app.router,
-        report_post(&key, &[SAME_ORIGIN], &form("x", &crlf, ""), "192.0.2.90:1"),
+        report_post(&key, &SAME_ORIGIN_HEADERS, &form("x", &crlf, ""), "192.0.2.90:1"),
     )
     .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -310,7 +318,7 @@ async fn invalid_reports_are_refused_with_the_form() {
     assert_safe_html(&r.body);
 
     // Wrong content type.
-    let mut req = report_post(&key, &[SAME_ORIGIN], "{}", "192.0.2.91:1");
+    let mut req = report_post(&key, &SAME_ORIGIN_HEADERS, "{}", "192.0.2.91:1");
     req.headers_mut()
         .insert("content-type", "application/json".parse().unwrap());
     let r = send(&app.router, req).await;
@@ -322,7 +330,7 @@ async fn invalid_reports_are_refused_with_the_form() {
         &app.router,
         report_post(
             "nope",
-            &[SAME_ORIGIN],
+            &SAME_ORIGIN_HEADERS,
             &form("other", "", ""),
             "192.0.2.92:1",
         ),
@@ -343,7 +351,7 @@ async fn crlf_messages_are_normalised_before_counting() {
         &app.router,
         report_post(
             &key,
-            &[SAME_ORIGIN],
+            &SAME_ORIGIN_HEADERS,
             &form("other", &message, " x\u{202E}y "),
             CLIENT,
         ),
@@ -359,7 +367,7 @@ async fn crlf_messages_are_normalised_before_counting() {
         &app.router,
         report_post(
             &key,
-            &[SAME_ORIGIN],
+            &SAME_ORIGIN_HEADERS,
             &form("other", &message, ""),
             "192.0.2.93:1",
         ),
@@ -381,10 +389,10 @@ async fn report_submissions_are_rate_limited() {
     let body = form("other", "", "");
     let peer = "198.51.100.200:5000";
     for _ in 0..3 {
-        let r = send(&app.router, report_post(&key, &[SAME_ORIGIN], &body, peer)).await;
+        let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, &body, peer)).await;
         assert_eq!(r.status, StatusCode::OK);
     }
-    let r = send(&app.router, report_post(&key, &[SAME_ORIGIN], &body, peer)).await;
+    let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, &body, peer)).await;
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
     assert_security_headers(&r, true);
     let retry: u64 = r.header("retry-after").parse().unwrap();

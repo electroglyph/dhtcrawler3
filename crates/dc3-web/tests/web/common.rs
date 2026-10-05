@@ -477,7 +477,9 @@ pub fn report_post(key: &str, headers: &[(&str, &str)], body: &str, peer: &str) 
     req
 }
 
-pub const SAME_ORIGIN: (&str, &str) = ("sec-fetch-site", "same-origin");
+/// Headers of a browser same-origin POST: fetch metadata plus origin.
+pub const SAME_ORIGIN_HEADERS: [(&str, &str); 2] =
+    [("sec-fetch-site", "same-origin"), ("origin", BASE_URL)];
 
 pub async fn send(router: &Router, req: Request<Body>) -> TestResponse {
     let response = router.clone().oneshot(req).await.unwrap();

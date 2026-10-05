@@ -8,18 +8,25 @@ const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
 
 /// True if a POST with these headers may be processed.
 ///
-/// A browser's `Sec-Fetch-Site` must be `same-origin` or `none`. Without that
-/// header (older browsers), `Origin` must equal the site's public origin.
-/// Anything else, including a request with neither header, is refused.
+/// `Origin` must always equal the site's public origin: browsers send it on
+/// every POST, while any script can forge `Sec-Fetch-Site` alone. Fetch
+/// metadata is defence in depth only — a value contradicting a same-origin
+/// POST still refuses it — never sufficient. A request with no `Origin` is
+/// refused, whatever else it carries.
 pub(crate) fn post_allowed(headers: &HeaderMap, origin: &str) -> bool {
-    if let Some(site) = headers.get(SEC_FETCH_SITE) {
-        return site.to_str().is_ok_and(|site| {
-            site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none")
-        });
-    }
-    match headers.get(ORIGIN).map(|v| v.to_str()) {
+    let origin_ok = match headers.get(ORIGIN).map(|v| v.to_str()) {
         Some(Ok(value)) => !origin.is_empty() && value.eq_ignore_ascii_case(origin),
-        _ => false,
+        _ => return false,
+    };
+    if !origin_ok {
+        return false;
+    }
+    match headers.get(SEC_FETCH_SITE).map(|v| v.to_str()) {
+        None => true,
+        Some(Ok(site)) => {
+            site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none")
+        }
+        Some(Err(_)) => false,
     }
 }
 
@@ -43,14 +50,24 @@ mod tests {
     }
 
     #[test]
-    fn same_origin_and_user_initiated_are_accepted() {
-        assert!(post_allowed(
+    fn fetch_metadata_alone_is_not_enough() {
+        // A curl-forged Sec-Fetch-Site with no Origin is refused.
+        assert!(!post_allowed(
             &headers(&[("sec-fetch-site", "same-origin")]),
             SITE
         ));
-        assert!(post_allowed(&headers(&[("sec-fetch-site", "none")]), SITE));
+        assert!(!post_allowed(&headers(&[("sec-fetch-site", "none")]), SITE));
+        // With a matching Origin, same-origin metadata is accepted.
         assert!(post_allowed(
-            &headers(&[("sec-fetch-site", "Same-Origin")]),
+            &headers(&[("sec-fetch-site", "same-origin"), ("origin", SITE)]),
+            SITE
+        ));
+        assert!(post_allowed(
+            &headers(&[("sec-fetch-site", "none"), ("origin", SITE)]),
+            SITE
+        ));
+        assert!(post_allowed(
+            &headers(&[("sec-fetch-site", "Same-Origin"), ("origin", SITE)]),
             SITE
         ));
     }
