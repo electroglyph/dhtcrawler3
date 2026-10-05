@@ -196,7 +196,7 @@ pub fn decode(buf: &[u8]) -> Result<Message, DecodeError> {
         .get_bytes(b"v")
         .filter(|v| v.len() <= MAX_VERSION_LEN)
         .map(<[u8]>::to_vec);
-    let ip = top.get_bytes(b"ip").and_then(compact::decode_peer);
+    let ip = top.get_bytes(b"ip").and_then(compact::decode_bep42_ip);
     let read_only = top.get_int(b"ro") == Some(1);
     let body = match y {
         b"q" => match decode_query(top) {
@@ -731,6 +731,17 @@ mod tests {
         .unwrap();
         assert_eq!(m.ip, None);
         assert!(!m.read_only);
+        // BEP 42 raw-address forms decode with port 0: only the IP is used.
+        let m = decode(
+            b"d2:ip4:\x01\x02\x03\x041:rd2:id20:mnopqrstuvwxyz123456e2:roi1e1:t1:x1:y1:re",
+        )
+        .unwrap();
+        assert_eq!(m.ip, Some(sa("1.2.3.4:0")));
+        let m = decode(
+            b"d2:ip16:\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x011:rd2:id20:mnopqrstuvwxyz123456e2:roi1e1:t1:x1:y1:re",
+        )
+        .unwrap();
+        assert_eq!(m.ip, Some(sa("[2001:db8::1]:0")));
         // Unknown keys are ignored.
         assert!(
             decode(b"d1:rd2:id20:mnopqrstuvwxyz1234565:extrai1ee1:t1:x1:y1:r3:zzz3:zzze").is_ok()

@@ -109,6 +109,29 @@ pub fn decode_peer(bytes: &[u8]) -> Option<SocketAddr> {
     }
 }
 
+/// Decodes a top-level BEP 42 `ip` field: the sender's address as raw
+/// bytes (4 IPv4 or 16 IPv6, port unknown, reported with port 0) or as a
+/// compact endpoint (6 or 18 bytes, with port). Anything else is ignored.
+pub fn decode_bep42_ip(bytes: &[u8]) -> Option<SocketAddr> {
+    match bytes.len() {
+        4 => {
+            let ip: [u8; 4] = bytes.try_into().ok()?;
+            Some(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), 0)))
+        }
+        16 => {
+            let ip: [u8; 16] = bytes.try_into().ok()?;
+            Some(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(ip),
+                0,
+                0,
+                0,
+            )))
+        }
+        COMPACT_PEER_V4_LEN | COMPACT_PEER_V6_LEN => decode_peer(bytes),
+        _ => None,
+    }
+}
+
 /// Appends the compact form of `addr` (6 or 18 bytes) to `out`.
 pub fn encode_peer_into(addr: &SocketAddr, out: &mut Vec<u8>) {
     match addr {
@@ -435,6 +458,24 @@ mod tests {
         allow_private: true,
         by_endpoint: true,
     };
+
+    #[test]
+    fn bep42_ip_forms() {
+        assert_eq!(decode_bep42_ip(&[1, 2, 3, 4]), Some(sa("1.2.3.4:0")));
+        assert_eq!(
+            decode_bep42_ip(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            Some(sa("[2001:db8::1]:0"))
+        );
+        // Compact endpoints with ports still decode with their port.
+        assert_eq!(
+            decode_bep42_ip(&[1, 2, 3, 4, 0, 5]),
+            Some(sa("1.2.3.4:5"))
+        );
+        // Anything else is ignored.
+        for bad in [&[][..], &[0; 3], &[0; 5], &[0; 7], &[0; 17], &[0; 19]] {
+            assert_eq!(decode_bep42_ip(bad), None, "len={}", bad.len());
+        }
+    }
 
     #[test]
     fn peer_round_trip() {
