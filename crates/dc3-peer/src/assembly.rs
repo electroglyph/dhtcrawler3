@@ -25,13 +25,25 @@ pub(crate) struct Assembly {
     received: usize,
 }
 
+/// Largest piece count an [`Assembly`] tracks, whatever the fetch limit
+/// allows: 4096 pieces of 16 KiB (64 MiB). The tables stay small even if
+/// `max_metadata` is ever raised; the default 8 MiB limit needs about 512.
+const MAX_ASSEMBLY_PIECES: usize = 4096;
+
 impl Assembly {
     /// `size` must already be validated to be non-zero and within limits.
+    /// Sizes needing more than [`MAX_ASSEMBLY_PIECES`] pieces are refused
+    /// here too, so the tables below stay small whatever the caller allows.
     pub(crate) fn new(size: usize) -> Result<Self, FetchError> {
         if size == 0 {
             return Err(FetchError::MetadataSizeInvalid(0));
         }
         let count = size.div_ceil(METADATA_PIECE_LEN);
+        if count > MAX_ASSEMBLY_PIECES {
+            return Err(FetchError::MetadataSizeInvalid(
+                i64::try_from(size).unwrap_or(i64::MAX),
+            ));
+        }
         Ok(Self {
             size,
             state: vec![PieceState::NotRequested; count],
@@ -143,7 +155,10 @@ impl Assembly {
 
     /// Concatenates the pieces. Call only when [`is_complete`](Self::is_complete).
     pub(crate) fn finish(self) -> Result<Vec<u8>, FetchError> {
-        let mut out = Vec::with_capacity(self.size);
+        // Fallible: an abort on reserve would turn a bad size into a crash.
+        let mut out = Vec::new();
+        out.try_reserve(self.size)
+            .map_err(|_| FetchError::Protocol("assembled metadata too large".into()))?;
         for piece in self.pieces {
             let piece = piece.ok_or_else(|| FetchError::Protocol("missing piece".into()))?;
             out.extend_from_slice(&piece);
