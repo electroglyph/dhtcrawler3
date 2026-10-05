@@ -41,7 +41,7 @@ pub async fn crawl(cfg: &Config, cancel: CancellationToken) -> anyhow::Result<()
     let metrics = start_metrics(cfg, readiness).await?;
     let result: anyhow::Result<()> = async {
         let opts = CrawlOptions::from_config(cfg)?;
-        let store = connect(cfg, DbRole::Main).await?;
+        let store = connect(cfg, DbRole::Crawler).await?;
         let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
         crawl::run(opts, store, policy, ready, cancel).await?;
         Ok(())
@@ -57,7 +57,7 @@ pub async fn index(cfg: &Config, cancel: CancellationToken) -> anyhow::Result<()
     let ready = readiness.register();
     let metrics = start_metrics(cfg, readiness).await?;
     let result: anyhow::Result<()> = async {
-        let store = connect(cfg, DbRole::Main).await?;
+        let store = connect(cfg, DbRole::Indexer).await?;
         let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
         index::run(
             IndexOptions::from_config(&cfg.index),
@@ -80,7 +80,7 @@ pub async fn rebuild(
     cancel: CancellationToken,
     out: &mut (dyn Write + Send),
 ) -> anyhow::Result<()> {
-    let store = connect(cfg, DbRole::Main).await?;
+    let store = connect(cfg, DbRole::Indexer).await?;
     let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
     writeln!(
         out,
@@ -127,7 +127,7 @@ pub async fn web(cfg: &Config, cancel: CancellationToken) -> anyhow::Result<()> 
     let result: anyhow::Result<()> = async {
         log_warnings(cfg);
         let web_cfg = web::web_config(cfg)?;
-        let store = connect(cfg, DbRole::Main).await?;
+        let store = connect(cfg, DbRole::Web).await?;
         let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
         let search = web::open_search(&cfg.index.path).await?;
         web::run(web_cfg, store, search, policy, ready, cancel).await?;

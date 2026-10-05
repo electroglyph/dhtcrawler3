@@ -323,7 +323,8 @@ pub enum LogLevel {
 /// Whose database credentials to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DbRole {
-    /// `[database]` itself: single-role commands and admin commands.
+    /// `[database]` itself: admin commands, and any role without its own
+    /// `[database.<role>]` section.
     Main,
     /// `[database.crawler]`, falling back to `[database]`.
     Crawler,
