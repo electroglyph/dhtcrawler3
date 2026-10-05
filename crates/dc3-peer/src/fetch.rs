@@ -179,7 +179,14 @@ async fn fetch_inner(
                 )
                 .await??;
             }
-            MetadataMessage::Reject { .. } => return Err(FetchError::Rejected),
+            MetadataMessage::Reject { piece } => {
+                // Only a reject for a piece we asked for fails the fetch;
+                // unsolicited rejects (never requested, already received)
+                // are ignored.
+                if assembly.is_awaiting(piece) {
+                    return Err(FetchError::Rejected);
+                }
+            }
             // We hold no metadata, so BEP 9 asks us to reject requests.
             MetadataMessage::Request { piece } => {
                 if rejects_sent < MAX_REJECTS_SENT {

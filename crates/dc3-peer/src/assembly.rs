@@ -70,6 +70,15 @@ impl Assembly {
         out
     }
 
+    /// True when `piece` names a piece we asked for and still await: a
+    /// reject for any other piece is unsolicited and ignored.
+    pub(crate) fn is_awaiting(&self, piece: i64) -> bool {
+        usize::try_from(piece)
+            .ok()
+            .and_then(|i| self.state.get(i))
+            .is_some_and(|s| *s == PieceState::Requested)
+    }
+
     /// Checks one data message without storing it, and returns its piece
     /// index. The same checks run again in [`accept`](Self::accept).
     pub(crate) fn validate(
