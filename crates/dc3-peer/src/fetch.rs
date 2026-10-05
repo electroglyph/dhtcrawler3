@@ -64,6 +64,13 @@ fn our_peer_id() -> [u8; PEER_ID_LEN] {
     id
 }
 
+/// A per-operation deadline for phase 2, so a peer that stalls after the
+/// extended handshake cannot hold a fetch worker for the whole `total`
+/// budget. Each stalled read or write costs at most `handshake`.
+fn op_deadline(limits: &FetchLimits) -> Option<Instant> {
+    Instant::now().checked_add(limits.handshake)
+}
+
 async fn fetch_inner(
     peer: SocketAddr,
     key: DhtKey,
@@ -133,14 +140,17 @@ async fn fetch_inner(
         }
     };
 
-    // Phase 2: download pieces.
+    // Phase 2: download pieces. Every read and write has its own
+    // handshake-scale deadline; only a fully idle peer costs `total`.
     let mut budget = Budget::new(limits.byte_budget.as_ref());
     let mut rejects_sent = 0usize;
-    send_requests(&mut wr, &mut assembly, peer_ut_id).await?;
+    within(op_deadline(limits), send_requests(&mut wr, &mut assembly, peer_ut_id)).await??;
     loop {
-        let Frame::Extended(payload) =
-            wire::read_frame(&mut rd, MAX_FRAME_AFTER_EXT_HANDSHAKE).await?
-        else {
+        let Frame::Extended(payload) = within(
+            op_deadline(limits),
+            wire::read_frame(&mut rd, MAX_FRAME_AFTER_EXT_HANDSHAKE),
+        )
+        .await?? else {
             continue;
         };
         let body = match wire::parse_message(&payload)? {
@@ -163,7 +173,11 @@ async fn fetch_inner(
                 if assembly.is_complete() {
                     break;
                 }
-                send_requests(&mut wr, &mut assembly, peer_ut_id).await?;
+                within(
+                    op_deadline(limits),
+                    send_requests(&mut wr, &mut assembly, peer_ut_id),
+                )
+                .await??;
             }
             MetadataMessage::Reject { .. } => return Err(FetchError::Rejected),
             // We hold no metadata, so BEP 9 asks us to reject requests.
@@ -172,7 +186,7 @@ async fn fetch_inner(
                     rejects_sent = rejects_sent.saturating_add(1);
                     let frame =
                         wire::extended_frame(peer_ut_id, &wire::metadata_reject_body(piece))?;
-                    wr.write_all(&frame).await?;
+                    within(op_deadline(limits), wr.write_all(&frame)).await??;
                 }
             }
             MetadataMessage::Unknown(_) => {}
