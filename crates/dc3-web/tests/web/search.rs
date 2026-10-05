@@ -224,10 +224,24 @@ async fn blocked_queries_get_the_deterrence_page_without_searching() {
     assert_eq!(json["blocked"], true);
     assert_eq!(json["total"], 0);
     assert_eq!(json["results"].as_array().unwrap().len(), 0);
-    assert_eq!(json["query"], "zzforbiddenzz");
+    // The refused query is not echoed back.
+    assert_eq!(json["query"], "");
     assert_eq!(json["per_page"], 5);
     assert_eq!(metrics().counter("dc3_blocked_queries_total"), blocked + 5);
     assert_eq!(app.backend.get_many_calls(), 0);
+
+    // Bad parameters answer alike for blocked and clean queries: no oracle.
+    for q in ["zzforbiddenzz", "hello"] {
+        for bad in [
+            "/api/v1/search?q=hello&p=0",
+            "/api/v1/search?q=hello&per_page=999",
+            "/api/v1/search?q=hello&sort=bogus",
+        ] {
+            let url = bad.replacen("q=hello", &format!("q={q}"), 1);
+            let r = send(&app.router, get(&url)).await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{url}");
+        }
+    }
 
     // Whole tokens only: a longer word is not blocked.
     let r = send(&app.router, get("/search?q=zzforbiddenzzz")).await;

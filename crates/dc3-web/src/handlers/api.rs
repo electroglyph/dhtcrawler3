@@ -103,18 +103,8 @@ pub(crate) async fn search<B: Backend>(
     if too_long(q) {
         return json_error(StatusCode::BAD_REQUEST, &too_long_message());
     }
-    if is_blocked(&st, q) {
-        let body = ApiSearch {
-            query: q,
-            page: parse_page(params.p.as_deref()).unwrap_or(1),
-            per_page: parse_per_page(params.per_page.as_deref())
-                .unwrap_or(dc3_search::DEFAULT_PER_PAGE),
-            total: 0,
-            blocked: true,
-            results: Vec::new(),
-        };
-        return json(StatusCode::OK, &body);
-    }
+    // Validated first, so blocked and clean queries answer bad parameters
+    // alike: no status oracle for the blocklist.
     let parsed = parse_page(params.p.as_deref()).and_then(|page| {
         let per_page = parse_per_page(params.per_page.as_deref())?;
         let sort = parse_sort(params.sort.as_deref())?;
@@ -124,6 +114,18 @@ pub(crate) async fn search<B: Backend>(
         Ok(v) => v,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.message()),
     };
+    if is_blocked(&st, q) {
+        // The refused query is not echoed back.
+        let body = ApiSearch {
+            query: "",
+            page,
+            per_page,
+            total: 0,
+            blocked: true,
+            results: Vec::new(),
+        };
+        return json(StatusCode::OK, &body);
+    }
     match execute(&st, q, page, per_page, sort).await {
         Ok(found) => {
             let body = ApiSearch {
