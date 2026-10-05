@@ -351,10 +351,19 @@ fn v1_files(
         }
         Ok(())
     } else {
-        // The path is the name, which has already been shown.
         let length = file_length(dict)?;
-        let padding = is_padding(Some(name), Some(name), dict.get_bytes(b"attr"));
-        files.add(padding, length, Some(name.to_owned()))
+        let comp = sanitize_path_component(name);
+        let padding = is_padding(
+            comp.as_deref(),
+            comp.as_deref(),
+            dict.get_bytes(b"attr"),
+        );
+        if let Some(p) = &comp {
+            if p != name && !files.show_joined(p) {
+                files.show(p);
+            }
+        }
+        files.add(padding, length, comp)
     }
 }
 
