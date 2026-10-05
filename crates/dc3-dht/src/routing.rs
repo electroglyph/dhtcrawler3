@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::compact::{AddrKey, AddrPolicy, CompactNode, Family, OwnAddrs, canonical_addr};
-use crate::node_id::{Distance, ID_BITS, NodeId};
+use crate::node_id::{Distance, ID_BITS, NodeId, is_bep42_exempt};
 
 /// Bucket size (BEP 5).
 pub(crate) const K: usize = 8;
@@ -304,6 +304,14 @@ impl RoutingTable {
         }
         if let Some(seen) = seen {
             cand.mark(seen, now);
+        }
+        // BEP 42: a sender whose address is public but whose ID is not valid
+        // for it never becomes a full member; it waits in the replacements
+        // cache. Otherwise one IP could claim arbitrarily close IDs.
+        if !cand.bep42 && !is_bep42_exempt(cand.addr.ip()) {
+            let idx = self.bucket_index(&cand.id);
+            self.add_replacement(idx, cand);
+            return false;
         }
         // Only a node that has answered us may displace or move existing entries.
         let proven = match seen {
@@ -814,8 +822,9 @@ mod tests {
         let mut t = table(now);
         let own = t.own_id();
         // 20 far nodes (common prefix 0) — they all belong to bucket 0.
+        // (`true` simulates BEP 42-valid IDs; this test is about splits.)
         for i in 0..20u32 {
-            t.on_response(own.random_with_prefix(0, true), addr(i), false, now);
+            t.on_response(own.random_with_prefix(0, true), addr(i), true, now);
         }
         check(&t);
         // The first split happened (bucket 0 held our own ID), but bucket 0
@@ -824,11 +833,12 @@ mod tests {
         assert_eq!(t.len(), K);
         assert_eq!(t.buckets[0].replacements.len(), REPLACEMENTS_PER_BUCKET);
         // Near nodes keep splitting the last bucket.
+        // (`true` simulates BEP 42-valid IDs; this test is about splits.)
         for i in 0..30u32 {
             t.on_response(
                 own.random_with_prefix(10 + (i as usize % 10), true),
                 addr(100 + i),
-                false,
+                true,
                 now,
             );
             check(&t);
@@ -1118,33 +1128,37 @@ mod tests {
     }
 
     #[test]
-    fn bep42_valid_nodes_are_preferred() {
+    fn bep42_invalid_public_senders_wait_in_replacements() {
         let now = Instant::now();
         let mut t = table(now);
         let own = t.own_id();
-        t.on_response(own.random_with_prefix(5, true), addr(999), true, now);
         let mut invalid = Vec::new();
         for i in 0..K as u32 {
             let id = own.random_with_prefix(0, true);
-            t.on_response(id, addr(i), false, now);
+            // Invalid IDs from public senders never become members, even
+            // when they answer us: they wait in the replacements cache.
+            assert!(!t.on_response(id, addr(i), false, now));
+            assert!(t.member(&id).is_none());
             invalid.push(id);
         }
-        let valid = own.random_with_prefix(0, true);
-        // An unproven (query) node cannot displace.
-        assert!(!t.on_query(valid, addr(20), true, now));
-        assert!(t.member(&valid).is_none());
-        assert!(t.on_response(valid, addr(20), true, now));
-        assert!(t.member(&valid).is_some());
-        assert_eq!(t.buckets[0].nodes.len(), K);
-        // The displaced node waits in the replacement cache.
-        let displaced: Vec<_> = invalid.iter().filter(|id| t.member(id).is_none()).collect();
-        assert_eq!(displaced.len(), 1);
-        assert!(
-            t.buckets[0]
-                .replacements
-                .iter()
-                .any(|r| r.id == *displaced[0])
-        );
+        assert_eq!(t.len(), 0);
+        // Fill the bucket with proven, valid members.
+        for i in 0..K as u32 {
+            let id = own.random_with_prefix(0, true);
+            assert!(t.on_response(id, addr(100 + i), true, now));
+        }
+        assert_eq!(t.len(), K);
+        // A query-only node cannot displace a member ...
+        let newcomer = own.random_with_prefix(0, true);
+        assert!(!t.on_query(newcomer, addr(200), true, now));
+        assert!(t.member(&newcomer).is_none());
+        // ... nor can a proven node whose ID is invalid for its address.
+        let spoof = own.random_with_prefix(0, true);
+        assert!(!t.on_response(spoof, addr(201), false, now));
+        assert!(t.member(&spoof).is_none());
+        for id in &invalid {
+            assert!(t.member(id).is_none());
+        }
         check(&t);
     }
 
