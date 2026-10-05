@@ -290,9 +290,14 @@ fn decode_dict_prefix(body: &[u8]) -> Result<(dc3_bencode::Dict<'_>, usize), Fet
     }
 }
 
-/// Parses an extended-handshake body. Trailing bytes are ignored.
+/// Parses an extended-handshake body: exactly one dictionary.
 pub(crate) fn parse_ext_handshake(body: &[u8]) -> Result<ExtHandshake, FetchError> {
-    let (dict, _) = decode_dict_prefix(body)?;
+    let (dict, used) = decode_dict_prefix(body)?;
+    if used != body.len() {
+        return Err(FetchError::Protocol(
+            "trailing bytes in extended handshake".into(),
+        ));
+    }
     let ut_metadata = dict.get_dict(b"m").and_then(|m| m.get_int(b"ut_metadata"));
     Ok(ExtHandshake {
         ut_metadata,
@@ -354,8 +359,9 @@ pub(crate) enum MetadataMessage<'a> {
     Unknown(i64),
 }
 
-/// Parses a `ut_metadata` message body: a dictionary, followed by raw piece
-/// bytes for data messages.
+/// Parses a `ut_metadata` message body: exactly one dictionary for
+/// request and reject messages (unknown types must name a piece too),
+/// a dictionary followed by raw piece bytes for data messages.
 pub(crate) fn parse_metadata_message(body: &[u8]) -> Result<MetadataMessage<'_>, FetchError> {
     let (dict, used) = decode_dict_prefix(body)?;
     let msg_type = dict
@@ -365,8 +371,19 @@ pub(crate) fn parse_metadata_message(body: &[u8]) -> Result<MetadataMessage<'_>,
         dict.get_int(b"piece")
             .ok_or_else(|| FetchError::Protocol("ut_metadata message without piece".into()))
     };
+    // Only data messages carry bytes after the dictionary.
+    let no_trailing = |what: &str| {
+        if used != body.len() {
+            return Err(FetchError::Protocol(format!("trailing bytes in {what}")));
+        }
+        Ok(())
+    };
     match msg_type {
-        UT_REQUEST => Ok(MetadataMessage::Request { piece: piece()? }),
+        UT_REQUEST => {
+            let request = MetadataMessage::Request { piece: piece()? };
+            no_trailing("ut_metadata request")?;
+            Ok(request)
+        }
         UT_DATA => {
             let total_size = dict.get_int(b"total_size").ok_or_else(|| {
                 FetchError::Protocol("ut_metadata data without total_size".into())
@@ -378,8 +395,19 @@ pub(crate) fn parse_metadata_message(body: &[u8]) -> Result<MetadataMessage<'_>,
                 payload,
             })
         }
-        UT_REJECT => Ok(MetadataMessage::Reject { piece: piece()? }),
-        other => Ok(MetadataMessage::Unknown(other)),
+        UT_REJECT => {
+            let reject = MetadataMessage::Reject { piece: piece()? };
+            no_trailing("ut_metadata reject")?;
+            Ok(reject)
+        }
+        other => {
+            // Unknown types are still ignored, but they must be shaped
+            // like the known ones: one dictionary naming a piece.
+            let unknown = MetadataMessage::Unknown(other);
+            let _ = piece()?;
+            no_trailing("ut_metadata message")?;
+            Ok(unknown)
+        }
     }
 }
 

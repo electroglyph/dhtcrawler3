@@ -270,9 +270,34 @@ fn metadata_messages() {
         Ok(MetadataMessage::Reject { piece: 1 })
     );
     assert_eq!(
-        wire::parse_metadata_message(b"d8:msg_typei9ee"),
+        wire::parse_metadata_message(b"d8:msg_typei9e5:piecei3ee"),
         Ok(MetadataMessage::Unknown(9))
     );
+    // An unknown type without a piece is malformed, not ignorable.
+    assert!(matches!(
+        wire::parse_metadata_message(b"d8:msg_typei9ee"),
+        Err(FetchError::Protocol(_))
+    ));
+    // Trailing bytes are rejected on non-data messages ...
+    let mut trailing = wire::metadata_request_body(4);
+    trailing.extend_from_slice(b"junk");
+    assert!(matches!(
+        wire::parse_metadata_message(&trailing),
+        Err(FetchError::Protocol(_))
+    ));
+    let mut trailing = wire::metadata_reject_body(1);
+    trailing.push(0);
+    assert!(matches!(
+        wire::parse_metadata_message(&trailing),
+        Err(FetchError::Protocol(_))
+    ));
+    // ... and on the extended handshake, whose body is one dictionary.
+    let mut hs = wire::ext_handshake_body(1, None, None, None);
+    hs.extend_from_slice(b"de");
+    assert!(matches!(
+        wire::parse_ext_handshake(&hs),
+        Err(FetchError::Protocol(_))
+    ));
     assert!(matches!(
         wire::parse_metadata_message(b"d8:msg_typei1e5:piecei0ee"),
         Err(FetchError::Protocol(_))
