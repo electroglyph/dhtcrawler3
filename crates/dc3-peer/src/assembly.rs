@@ -58,6 +58,13 @@ impl Assembly {
         self.state.len()
     }
 
+    /// True when `piece` names a piece of this metadata.
+    pub(crate) fn has_piece(&self, piece: i64) -> bool {
+        usize::try_from(piece)
+            .ok()
+            .is_some_and(|i| i < self.piece_count())
+    }
+
     /// Exact length that piece `index` must have.
     fn expected_len(&self, index: usize) -> usize {
         let start = index.saturating_mul(METADATA_PIECE_LEN);

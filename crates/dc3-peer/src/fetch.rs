@@ -188,8 +188,10 @@ async fn fetch_inner(
                 }
             }
             // We hold no metadata, so BEP 9 asks us to reject requests.
+            // Out-of-range pieces are never reflected back: they are
+            // ignored instead of echoed into a reject.
             MetadataMessage::Request { piece } => {
-                if rejects_sent < MAX_REJECTS_SENT {
+                if assembly.has_piece(piece) && rejects_sent < MAX_REJECTS_SENT {
                     rejects_sent = rejects_sent.saturating_add(1);
                     let frame =
                         wire::extended_frame(peer_ut_id, &wire::metadata_reject_body(piece))?;

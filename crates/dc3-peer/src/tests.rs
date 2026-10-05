@@ -352,6 +352,25 @@ fn assembly_pipelines_and_orders() {
 }
 
 #[test]
+fn piece_range_and_awaiting() {
+    let size = 2 * METADATA_PIECE_LEN + 1;
+    let mut a = Assembly::new(size).unwrap();
+    // Three pieces: 0, 1, 2.
+    assert!(a.has_piece(0));
+    assert!(a.has_piece(2));
+    assert!(!a.has_piece(3));
+    assert!(!a.has_piece(-1));
+    assert!(!a.has_piece(i64::MAX));
+    // Nothing requested yet: no reject fails the fetch.
+    assert!(!a.is_awaiting(0));
+    assert_eq!(a.next_requests(), vec![0, 1, 2]);
+    assert!(a.is_awaiting(0));
+    assert!(a.is_awaiting(2));
+    assert!(!a.is_awaiting(3));
+    assert!(!a.is_awaiting(-1));
+}
+
+#[test]
 fn verify_v1_and_v2() {
     use sha1::{Digest, Sha1};
     use sha2::Sha256;

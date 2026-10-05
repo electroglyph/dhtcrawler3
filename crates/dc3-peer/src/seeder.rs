@@ -284,8 +284,10 @@ async fn handle(
                 .filter(|v| *v != 0);
             if let (Misbehaviour::RequestsMetadata, Some(out_id)) = (mb, their_ut_id) {
                 let mut out = Vec::new();
+                // In-range pieces, cycling: every request must be answered,
+                // but answers stop at the cap.
                 for piece in 0..METADATA_REQUESTS_SENT {
-                    let piece = i64::try_from(piece).unwrap_or(i64::MAX);
+                    let piece = i64::try_from(piece % piece_count.max(1)).unwrap_or(i64::MAX);
                     out.extend_from_slice(&wire::extended_frame(
                         out_id,
                         &wire::metadata_request_body(piece),
