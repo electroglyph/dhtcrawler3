@@ -347,12 +347,18 @@ impl RoutingTable {
                 self.insert_member(idx, cand, now);
                 return true;
             }
-            if let Some(bad) = bucket
+            let bad_id = bucket
                 .nodes
                 .iter()
                 .find(|n| status_of(n, now, qa) == Status::Bad)
-            {
-                let bad_id = bad.id;
+                .map(|n| n.id);
+            if let Some(bad_id) = bad_id {
+                // Only a node that has answered us may displace a member:
+                // a query-only sender waits in the replacements cache.
+                if !proven {
+                    self.add_replacement(idx, cand);
+                    return false;
+                }
                 self.remove_member(&bad_id);
                 self.insert_member(idx, cand, now);
                 return true;
@@ -1094,7 +1100,8 @@ mod tests {
         assert!(t.member(&bad_id).is_none());
         assert!(t.member(&extra_best).is_some());
         check(&t);
-        // A new node takes a bad member's slot directly.
+        // A query-only node cannot take a bad member's slot directly: it
+        // waits in the replacements cache until it answers us.
         let (bad2, bad2_addr) = members[4];
         t.buckets[0].replacements.clear();
         for _ in 0..MAX_FAILURES {
@@ -1102,7 +1109,10 @@ mod tests {
         }
         assert!(t.member(&bad2).is_some());
         let newcomer = own.random_with_prefix(0, true);
-        assert!(t.on_query(newcomer, addr(60), true, now));
+        assert!(!t.on_query(newcomer, addr(60), true, now));
+        assert!(t.member(&bad2).is_some());
+        // Once it answers, it is proven and may displace the bad member.
+        assert!(t.on_response(newcomer, addr(60), true, now));
         assert!(t.member(&bad2).is_none());
         check(&t);
     }
