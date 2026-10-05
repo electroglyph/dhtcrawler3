@@ -499,6 +499,9 @@ fn walk_file_tree(
     if root.contains_key(b"") {
         return Err(ParseError::InvalidFileTree("the root is a file"));
     }
+    if root.len() == 0 {
+        return Err(ParseError::InvalidFileTree("empty file tree"));
+    }
     let mut stack = vec![root.iter()];
     // Directories on the stack (the root has none).
     let mut dirs = OpenDirs::default();
