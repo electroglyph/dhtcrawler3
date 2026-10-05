@@ -348,6 +348,7 @@ async fn scenario(options: PgConnectOptions) {
         &[
             ("Content-Type", "application/x-www-form-urlencoded"),
             ("Sec-Fetch-Site", "same-origin"),
+            ("Origin", BASE_URL),
         ],
         form,
     )
