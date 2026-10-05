@@ -404,7 +404,7 @@ mod tests {
         check_config(&cfg, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains("topsecret"), "{text}");
-        assert!(text.contains("u:REDACTED@h/db"), "{text}");
+        assert!(text.contains("postgres://u@h/db"), "{text}");
         assert!(text.contains("[crawl]"), "{text}");
         assert!(
             text.contains("warning: web.trusted_proxies is empty"),

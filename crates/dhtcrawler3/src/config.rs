@@ -128,7 +128,8 @@ pub struct DatabaseConfig {
     pub password_file: PathBuf,
     pub max_connections: u32,
     /// `postgres://host:port/name`; overrides host, port and name. The user
-    /// and password still come from `user` and `password_file`.
+    /// comes from `user` and the password from `password_file`: a URL with
+    /// a `user:password@` section is refused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// Credentials of the crawl role in `all`.
@@ -921,9 +922,45 @@ fn parse_db_url(url: &str) -> Result<PgConnectOptions, ConfigError> {
             "database.url must start with postgres:// or postgresql://",
         ));
     }
+    if url_has_userinfo_password(url) || url_has_secret_query_key(url) {
+        return Err(invalid(
+            "database.url must not include a password; put it in database.password_file",
+        ));
+    }
     // The parser's error could quote parts of the URL, so it is not shown.
     PgConnectOptions::from_str(url)
         .map_err(|_| invalid("database.url is not a valid PostgreSQL URL"))
+}
+
+/// True when `url` carries a password in its `user:password@` section.
+/// Passwords come from files, never from the URL (which shows up in the
+/// environment, process listings and dumps).
+fn url_has_userinfo_password(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..authority_end].rsplit_once('@') {
+        Some((userinfo, _)) => userinfo.contains(':'),
+        None => false,
+    }
+}
+
+/// True when `url` carries a secret-looking query parameter (`password`
+/// and variants): sqlx reads those live, so they bypass file-only
+/// passwords exactly like a userinfo password does.
+fn url_has_secret_query_key(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let rest = rest.split_once('#').map(|(t, _)| t).unwrap_or(rest);
+    let Some((_, query)) = rest.split_once('?') else {
+        return false;
+    };
+    query.split('&').any(|pair| {
+        let name = pair.split_once('=').map(|(n, _)| n).unwrap_or(pair);
+        !name.is_empty() && is_password_key(name)
+    })
 }
 
 /// Reads a password file: at most [`MAX_PASSWORD_BYTES`], one line, with
@@ -955,8 +992,9 @@ pub fn read_password_file(path: &Path) -> Result<String, ConfigError> {
     Ok(password.to_owned())
 }
 
-/// `url` with the password part of its user info, and any `password`
-/// query parameter, replaced by [`REDACTED`].
+/// `url` with its userinfo password, secret-looking query parameters and
+/// fragment dropped. Display only: the result carries no secret and parses
+/// back to the same non-secret settings.
 pub fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return REDACTED.to_owned();
@@ -965,36 +1003,42 @@ pub fn redact_url(url: &str) -> String {
     let (authority, tail) = rest.split_at(authority_end);
     let authority = match authority.rsplit_once('@') {
         Some((userinfo, host)) => match userinfo.split_once(':') {
-            Some((user, _)) => format!("{user}:{REDACTED}@{host}"),
+            Some((user, _)) => format!("{user}@{host}"),
             None => authority.to_owned(),
         },
         None => authority.to_owned(),
     };
+    // Fragments never reach the server; a `#` can only hide text from the
+    // key matching below, so it is dropped, never printed.
+    let tail = tail.split_once('#').map(|(t, _)| t).unwrap_or(tail);
     let tail = match tail.split_once('?') {
         Some((path, query)) => {
-            let (query, fragment) = match query.split_once('#') {
-                Some((q, f)) => (q, Some(f)),
-                None => (query, None),
-            };
-            let query: Vec<String> = query
+            let kept: Vec<&str> = query
                 .split('&')
-                .map(|pair| match pair.split_once('=') {
-                    Some((name, _)) if name.eq_ignore_ascii_case("password") => {
-                        format!("{name}={REDACTED}")
-                    }
-                    _ => pair.to_owned(),
+                .filter(|pair| {
+                    let name = pair.split_once('=').map(|(n, _)| n).unwrap_or(pair);
+                    name.is_empty() || !is_password_key(name)
                 })
                 .collect();
-            let mut out = format!("{path}?{}", query.join("&"));
-            if let Some(f) = fragment {
-                out.push('#');
-                out.push_str(f);
+            if kept.is_empty() {
+                path.to_owned()
+            } else {
+                format!("{path}?{}", kept.join("&"))
             }
-            out
         }
         None => tail.to_owned(),
     };
     format!("{scheme}://{authority}{tail}")
+}
+
+/// True for query keys that may hold a secret (`password` and its common
+/// variants). Over-redaction is safe: this is display only.
+fn is_password_key(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("pass")
+        || lower.contains("pwd")
+        || lower.contains("secret")
+        || lower.contains("token")
 }
 
 /// True for `host:port` with a non-zero port (IPv6 literals in brackets).
@@ -1412,11 +1456,8 @@ mod tests {
 
     #[test]
     fn url_overrides_host_but_not_credentials() {
-        let c = with_env(&[
-            (
-                "DC3_DATABASE__URL",
-                "postgres://someone:urlpw@pg.internal:6543/other",
-            ),
+        let mut c = with_env(&[
+            ("DC3_DATABASE__URL", "postgres://pg.internal:6543/other"),
             ("DC3_DATABASE__USER", "dc3_owner"),
             ("DC3_DATABASE__PASSWORD_FILE", ""),
         ])
@@ -1426,10 +1467,27 @@ mod tests {
         assert_eq!(o.get_port(), 6543);
         assert_eq!(o.get_database(), Some("other"));
         assert_eq!(o.get_username(), "dc3_owner");
+        // A URL password is refused at load: passwords come from files.
+        let err = with_env(&[
+            (
+                "DC3_DATABASE__URL",
+                "postgres://someone:urlpw@pg.internal:6543/other",
+            ),
+            ("DC3_DATABASE__USER", "dc3_owner"),
+            ("DC3_DATABASE__PASSWORD_FILE", ""),
+        ])
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
+        assert!(parse_db_url("postgres://u:p@h/db").is_err());
+        assert!(parse_db_url("postgres://u@h/db").is_ok());
+        assert!(parse_db_url("postgres://h/db?password=x").is_err());
+        assert!(parse_db_url("postgres://h/db?sslmode=disable").is_ok());
+        // ... but redaction still hides it when such a config is printed.
+        c.database.url = Some("postgres://someone:urlpw@pg.internal:6543/other".into());
         let printed = c.to_redacted_toml().unwrap();
         assert!(!printed.contains("urlpw"), "{printed}");
         assert!(
-            printed.contains("someone:REDACTED@pg.internal:6543/other"),
+            printed.contains("postgres://someone@pg.internal:6543/other"),
             "{printed}"
         );
     }
@@ -1437,15 +1495,33 @@ mod tests {
     #[test]
     fn url_redaction() {
         for (input, expected) in [
-            ("postgres://u:p@h/db", "postgres://u:REDACTED@h/db"),
+            ("postgres://u:p@h/db", "postgres://u@h/db"),
             ("postgres://u@h/db", "postgres://u@h/db"),
             ("postgres://h:5432/db", "postgres://h:5432/db"),
             (
-                "postgres://u:p:q@h/db?sslmode=disable&password=x#f",
-                "postgres://u:REDACTED@h/db?sslmode=disable&password=REDACTED#f",
+                "postgres://u:p:q@h/db?sslmode=disable&password=x",
+                "postgres://u@h/db?sslmode=disable",
             ),
-            ("postgres://u:p@h", "postgres://u:REDACTED@h"),
-            ("postgres://a:b@c@h/x", "postgres://a:REDACTED@h/x"),
+            // Password variants are dropped, fragments never printed.
+            (
+                "postgres://bob:s3cret@h/db?passwd=x",
+                "postgres://bob@h/db",
+            ),
+            (
+                "postgres://bob:s3cret@h/db?pass=x",
+                "postgres://bob@h/db",
+            ),
+            (
+                "postgres://bob:s3cret@h/db?sslmode=disable&PWD=x&Token=y",
+                "postgres://bob@h/db?sslmode=disable",
+            ),
+            ("postgres://bob:s3cret@h/db#fragpw", "postgres://bob@h/db"),
+            (
+                "postgres://u:p:q@h/db?sslmode=disable&password=x#f",
+                "postgres://u@h/db?sslmode=disable",
+            ),
+            ("postgres://u:p@h", "postgres://u@h"),
+            ("postgres://a:b@c@h/x", "postgres://a@h/x"),
             ("garbage with p@ss", "REDACTED"),
         ] {
             assert_eq!(redact_url(input), expected, "{input}");
