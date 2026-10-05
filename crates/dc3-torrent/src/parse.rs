@@ -83,7 +83,7 @@ pub(crate) fn parse_decoded(
 ) -> Result<TorrentMeta, ParseError> {
     let dict = root.as_dict().ok_or(ParseError::NotADict)?;
 
-    let is_v1 = matches!(dict.get(b"pieces"), Some(Value::Bytes(_)));
+    let is_v1 = matches!(dict.get(b"pieces"), Some(Value::Bytes(b)) if !b.is_empty() && b.len() % 20 == 0);
     let tree = if dict.get_int(b"meta version") == Some(META_VERSION_2) {
         dict.get_dict(b"file tree")
     } else {
