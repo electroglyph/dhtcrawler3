@@ -310,13 +310,14 @@ async fn blocked_terms_in_stored_text_hide_torrents() {
         torrent(2, "holiday video", &[("b.mp4", 1)]),
         torrent(3, "holiday zzforbiddenzz", &[("c.mp4", 1)]),
     ]);
-    // Result lists check names (the indexer checked the paths).
+    // Result lists screen names and file paths alike: the file-blocked
+    // torrent is hidden, not just unlisted.
     let r = send(&app.router, get("/search?q=holiday")).await;
     let mut names = result_names(&r.body);
     names.sort();
-    assert_eq!(names, ["holiday photos", "holiday video"]);
+    assert_eq!(names, ["holiday video"]);
     let r = send(&app.router, get("/api/v1/search?q=holiday")).await;
-    assert_eq!(r.json()["results"].as_array().unwrap().len(), 2);
+    assert_eq!(r.json()["results"].as_array().unwrap().len(), 1);
     // Detail pages check the name and every listed path.
     for id in [1, 3] {
         let key = key_for(id).to_hex();

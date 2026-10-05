@@ -18,7 +18,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::sync::SemaphorePermit;
 
 use crate::app::{AppState, routes};
-use crate::{Backend, BackendError, MAX_CHECKED_PATH_BYTES, MAX_LISTED_PATH_CHARS};
+use crate::{Backend, BackendError, MAX_LISTED_PATH_CHARS};
 
 /// Characters left unescaped in a query-string value (RFC 3986 unreserved).
 const QUERY_VALUE: &AsciiSet = &NON_ALPHANUMERIC
@@ -84,40 +84,35 @@ pub(crate) enum Detail {
 /// (R8). Returns `None` if any displayed text contains a blocked term (R18);
 /// the torrent is then not shown at all.
 ///
-/// Matching can cost several microseconds per character (non-ASCII text is
-/// the slow case), so result lists check only names, and detail pages
-/// check paths only within the first [`MAX_CHECKED_PATH_BYTES`]. The
-/// indexer checked every stored path, and deletes matches after a policy
-/// change.
+/// Every listed path is matched (match-then-truncate): result lists screen
+/// the same file paths within the same [`MAX_LISTED_PATH_CHARS`] budget
+/// they would list, so nothing displayed is unchecked. The indexer checked
+/// every stored path, and deletes matches after a policy change.
 pub(crate) fn show(record: &TorrentRecord, policy: &TermMatcher, detail: Detail) -> Option<Shown> {
     let mut name = text::sanitize_display(&record.name, MAX_NAME_CHARS);
     if name.is_empty() {
         name = record.dht_key.to_hex();
     }
-    if policy.matches(&name) {
+    if policy.matches_affixed(&name) {
         return None;
     }
     let mut files = Vec::new();
     let mut files_cut = false;
-    if detail == Detail::WithFiles {
-        let mut budget = MAX_LISTED_PATH_CHARS;
-        let mut check_budget = MAX_CHECKED_PATH_BYTES;
-        for file in &record.files {
-            let path = text::sanitize_display(&file.path, MAX_PATH_CHARS);
-            let Some(rest) = budget.checked_sub(path.chars().count()) else {
-                files_cut = true;
-                break;
-            };
-            budget = rest;
-            match check_budget.checked_sub(path.len()) {
-                Some(rest) => {
-                    check_budget = rest;
-                    if policy.matches(&path) {
-                        return None;
-                    }
-                }
-                None => check_budget = 0,
-            }
+    let mut budget = MAX_LISTED_PATH_CHARS;
+    for file in &record.files {
+        let path = text::sanitize_display(&file.path, MAX_PATH_CHARS);
+        if policy.matches_affixed(&path) {
+            return None;
+        }
+        let Some(rest) = budget.checked_sub(path.chars().count()) else {
+            // Past the budget paths are neither listed nor shown: on detail
+            // pages the list is marked truncated, on result lists there is
+            // nothing to list either way.
+            files_cut = detail == Detail::WithFiles;
+            break;
+        };
+        budget = rest;
+        if detail == Detail::WithFiles {
             files.push(FileRow {
                 path,
                 size: file.size,
@@ -266,15 +261,16 @@ mod tests {
         );
         let unnamed = show(&record("\u{202E}", &[]), &policy, Detail::NameOnly).unwrap();
         assert_eq!(unnamed.name, DhtKey([7; 20]).to_hex());
-        // Result lists neither list nor check paths.
-        let listed = show(
-            &record("fine", &["dir/forbiddenword.txt"]),
-            &policy,
-            Detail::NameOnly,
-        )
-        .unwrap();
-        assert!(listed.files.is_empty());
-        assert!(!listed.files_cut);
+        // Result lists screen file paths too: a file-blocked torrent is
+        // hidden, not just unlisted.
+        assert!(
+            show(
+                &record("fine", &["dir/forbiddenword.txt"]),
+                &policy,
+                Detail::NameOnly
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test]
@@ -317,22 +313,45 @@ mod tests {
     }
 
     #[test]
-    fn detail_pages_match_a_bounded_amount_of_path_text() {
+    fn detail_pages_match_every_listed_path() {
         let policy = TermMatcher::load("forbiddenword\n").unwrap();
         // 3000 bytes of a character the matcher is slow on.
         let filler = "\u{FDFA}".repeat(1000);
         let late = "dir/forbiddenword.txt";
-        // Past 8 KiB of paths, paths are listed but not matched again (the
-        // indexer checked every stored path).
+        // A blocked path past the listing budget is still denied: every
+        // listed path is matched before anything is shown.
         let paths = [filler.as_str(), filler.as_str(), filler.as_str(), late];
-        let shown = show(&record("fine", &paths), &policy, Detail::WithFiles).unwrap();
-        assert_eq!(shown.files.len(), 4);
-        assert!(!shown.files_cut);
+        assert!(show(&record("fine", &paths), &policy, Detail::WithFiles).is_none());
+        assert!(show(&record("fine", &paths), &policy, Detail::NameOnly).is_none());
         // Within the budget a path is still matched.
         let early = [filler.as_str(), late];
         assert!(show(&record("fine", &early), &policy, Detail::WithFiles).is_none());
         // The name is always matched.
         assert!(show(&record("forbiddenword", &paths), &policy, Detail::WithFiles).is_none());
+        // Clean pages still list.
+        let shown = show(
+            &record("fine", &[filler.as_str(), "ok.txt"]),
+            &policy,
+            Detail::WithFiles,
+        )
+        .unwrap();
+        assert_eq!(shown.files.len(), 2);
+        assert!(!shown.files_cut);
+    }
+
+    #[test]
+    fn affixed_short_terms_hide_torrents() {
+        let policy = TermMatcher::load("pthc\n").unwrap();
+        assert!(
+            show(&record("fine", &["xpthc/a.jpg"]), &policy, Detail::WithFiles).is_none()
+        );
+        assert!(
+            show(&record("fine", &["xpthc/a.jpg"]), &policy, Detail::NameOnly).is_none()
+        );
+        assert!(show(&record("xpthc movie", &[]), &policy, Detail::NameOnly).is_none());
+        assert!(
+            show(&record("holiday photos", &["ok.jpg"]), &policy, Detail::NameOnly).is_some()
+        );
     }
 
     #[test]

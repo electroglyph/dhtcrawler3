@@ -67,10 +67,8 @@ pub const MAX_CONCURRENT_DETAILS: usize = 16;
 /// A detail page or API response lists file paths until they add up to this
 /// many characters; the rest is left out and the list is marked truncated.
 pub const MAX_LISTED_PATH_CHARS: usize = 128_000;
-/// A detail page or API response matches listed file paths against the
-/// blocked terms only within this many bytes of paths (the name is always
-/// matched). It bounds the matcher's work per request.
-pub const MAX_CHECKED_PATH_BYTES: usize = 8 * 1024;
+/// Every listed path is matched against the blocked terms first; the
+/// listing budget above bounds that work per request.
 /// How long `/readyz` waits for the database.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(2);
 /// `Expires` in `security.txt` lies this far after process start.
