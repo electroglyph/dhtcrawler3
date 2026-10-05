@@ -16,6 +16,10 @@ use crate::tokenizer::{Dc3Tokenizer, contains_cjk, is_cjk_unigram};
 pub const MAX_QUERY_CHARS: usize = 200;
 /// Maximum number of words (including excluded ones) in a query.
 pub const MAX_TERMS: usize = 12;
+/// Maximum index tokens kept from one word. One long CJK word tokenizes to
+/// hundreds of overlapping bigrams; without a cap a single word becomes a
+/// hundred-term phrase (times two fields). Longer words are truncated.
+pub const MAX_TOKENS_PER_WORD: usize = 16;
 /// Highest page number that may be requested.
 pub const MAX_PAGE: u32 = 50;
 /// Largest page size that may be requested.
@@ -186,10 +190,11 @@ pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
     let mut words = Vec::with_capacity(raw.len());
     let mut last_chars = 0usize;
     for w in raw {
-        let tokens = tokenizer.token_texts(&w.text);
+        let mut tokens = tokenizer.token_texts(&w.text);
         if tokens.is_empty() {
             continue;
         }
+        tokens.truncate(MAX_TOKENS_PER_WORD);
         if words.len() >= MAX_TERMS {
             return Err(QueryError::TooManyTerms {
                 terms: words.len().saturating_add(1),

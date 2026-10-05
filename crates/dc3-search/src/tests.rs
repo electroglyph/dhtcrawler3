@@ -209,6 +209,11 @@ fn parse_limits() {
         parse_query(&thirteen),
         Err(QueryError::TooManyTerms { .. })
     ));
+    // One long CJK word tokenizes to hundreds of bigrams: it is capped.
+    let long_cjk = "東".repeat(200);
+    let q = parse_query(&long_cjk).unwrap();
+    assert_eq!(q.words.len(), 1);
+    assert_eq!(q.words[0].tokens.len(), MAX_TOKENS_PER_WORD);
 }
 
 #[test]
@@ -700,6 +705,7 @@ proptest! {
             prop_assert!(q.words.len() <= MAX_TERMS);
             prop_assert!(q.positive().next().is_some());
             prop_assert!(q.words.iter().all(|w| !w.tokens.is_empty()));
+            prop_assert!(q.words.iter().all(|w| w.tokens.len() <= MAX_TOKENS_PER_WORD));
         }
     }
 

@@ -37,8 +37,9 @@ pub use index::{
     truncate_on_char_boundary,
 };
 pub use query::{
-    DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, PREFIX_MAX_EXPANSIONS,
-    PREFIX_MIN_CHARS, ParsedQuery, QueryError, QueryWord, SearchQuery, Sort, parse_query,
+    DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, MAX_TOKENS_PER_WORD,
+    PREFIX_MAX_EXPANSIONS, PREFIX_MIN_CHARS, ParsedQuery, QueryError, QueryWord, SearchQuery, Sort,
+    parse_query,
 };
 pub use tokenizer::{
     CJK1_TOKENIZER_NAME, Cjk1Tokenizer, Dc3TokenStream, Dc3Tokenizer, MAX_TOKEN_BYTES,
