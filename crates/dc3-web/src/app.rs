@@ -255,7 +255,35 @@ pub(crate) fn validate_base_url(url: &str) -> Result<(), String> {
             "web.base_url must be an origin such as https://search.example.org (no path), got {url:?}"
         ));
     }
+    if has_default_port(url, authority) {
+        return Err(format!(
+            "web.base_url must omit the default port, as browsers do (got {url:?})"
+        ));
+    }
     Ok(())
+}
+
+fn has_default_port(url: &str, authority: &str) -> bool {
+    let default_port = if url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://") {
+        443
+    } else {
+        80
+    };
+    let port_str = if let Some(inner) = authority.strip_prefix('[') {
+        let Some((_, after)) = inner.split_once(']') else {
+            return false;
+        };
+        match after.strip_prefix(':') {
+            Some(p) => p,
+            None => return false,
+        }
+    } else {
+        match authority.rsplit_once(':') {
+            Some((_, p)) => p,
+            None => return false,
+        }
+    };
+    port_str.parse::<u16>().is_ok_and(|p| p == default_port)
 }
 
 fn strip_scheme(url: &str) -> Option<&str> {
@@ -306,6 +334,8 @@ mod tests {
             "https://search.example.org/",
             "HTTPS://Search.Example.org",
             "http://[::1]:8080",
+            "https://example.com:8443",
+            "http://example.com:8080",
         ] {
             assert!(validate_base_url(ok).is_ok(), "{ok}");
         }
@@ -319,6 +349,11 @@ mod tests {
             "https://user@example.org",
             "https://exa mple.org",
             "https://example.org\r\nX: y",
+            "https://example.com:443",
+            "http://example.com:80",
+            "https://example.com:443/",
+            "https://[::1]:443",
+            "http://[::1]:80",
         ] {
             assert!(validate_base_url(bad).is_err(), "{bad:?}");
         }
