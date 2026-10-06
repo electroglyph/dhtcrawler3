@@ -114,6 +114,17 @@ fn regression_f06_digit_interleaved_short_seeds_match() {
 }
 
 #[test]
+fn regression_f07_raw_line_length_is_bounded() {
+    // F-07: the length gate measures the raw line, so a megabyte of
+    // comment text cannot slip past it.
+    let raw = format!("ab#{}", "x".repeat(1_000_000));
+    assert!(matches!(
+        TermMatcher::load(&raw),
+        Err(PolicyError::LineTooLong { .. })
+    ));
+}
+
+#[test]
 fn ordinary_names_not_blocked() {
     let m = seed();
     for name in [

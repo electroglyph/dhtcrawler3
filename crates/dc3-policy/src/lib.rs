@@ -72,17 +72,19 @@ impl TermMatcher {
         let mut seen_short: HashSet<String> = HashSet::new();
         for (i, line) in text.lines().enumerate() {
             let line_no = i.saturating_add(1);
+            // Bound the raw line: measuring after comment-stripping would
+            // let a megabyte of comment text past the gate.
+            if line.chars().count() > MAX_TERM_LINE_CHARS {
+                return Err(PolicyError::LineTooLong {
+                    line: line_no,
+                    max: MAX_TERM_LINE_CHARS,
+                });
+            }
             let content = line
                 .split_once(COMMENT_CHAR)
                 .map_or(line, |(before, _)| before);
             if content.trim().is_empty() {
                 continue;
-            }
-            if content.chars().count() > MAX_TERM_LINE_CHARS {
-                return Err(PolicyError::LineTooLong {
-                    line: line_no,
-                    max: MAX_TERM_LINE_CHARS,
-                });
             }
             let tokens = normalise(content);
             if tokens.len() > MAX_TERM_TOKENS {
