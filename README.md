@@ -92,7 +92,8 @@ create their own throwaway databases.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) to report a vulnerability.
+Report a vulnerability through the contact address in `/.well-known/security.txt`
+(served by the site, configured via `web.contact_email`).
 
 ## License
 
