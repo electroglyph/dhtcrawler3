@@ -14,7 +14,7 @@ use std::time::Duration;
 use dc3_dht::{DhtConfig, DhtStatsSnapshot, DhtTuning, Family, MIN_GOOD_NODES};
 use dc3_policy::TermMatcher;
 use tokio::sync::mpsc;
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
@@ -281,10 +281,11 @@ struct Supervised {
 }
 
 async fn supervise(mut s: Supervised) -> Result<(), CrawlError> {
-    let admission_ended = tokio::select! {
-        () = s.stop.cancelled() => false,
-        _ = &mut s.admission_task => true,
+    let admission_join: Option<Result<(), JoinError>> = tokio::select! {
+        () = s.stop.cancelled() => None,
+        joined = &mut s.admission_task => Some(joined),
     };
+    let admission_ended = admission_join.is_some();
     s.stop.cancel();
     s.ready.store(false, Ordering::Relaxed);
     tracing::info!("crawl role stopping");
@@ -317,10 +318,22 @@ async fn supervise(mut s: Supervised) -> Result<(), CrawlError> {
     s.ready.store(false, Ordering::Relaxed);
     s.dht.shutdown().await;
     tracing::info!("crawl role stopped");
-    if admission_ended {
-        return Err(CrawlError::Task("admission stopped unexpectedly".into()));
+    if let Some(joined) = admission_join {
+        return Err(admission_early_error(joined));
     }
     Ok(())
+}
+
+/// Builds the early-exit error when the admission task ends before `stop`,
+/// preserving the panic/cancellation cause instead of discarding it.
+fn admission_early_error(join: Result<(), JoinError>) -> CrawlError {
+    match join {
+        Ok(()) => CrawlError::Task("admission stopped unexpectedly".into()),
+        Err(e) => {
+            tracing::error!(error = %e, "the admission task failed");
+            CrawlError::Task(format!("admission stopped unexpectedly: {e}"))
+        }
+    }
 }
 
 /// Exports one DHT snapshot as the metrics in `docs/04-operations.md` §6.
@@ -409,6 +422,45 @@ async fn track_readiness<S: CrawlStore>(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn admission_early_exit_keeps_the_cause() {
+        let ok = tokio::spawn(async {}).await;
+        let err = admission_early_error(ok);
+        let CrawlError::Task(msg) = err else {
+            panic!("expected a Task error");
+        };
+        assert_eq!(msg, "admission stopped unexpectedly");
+
+        let panicked = tokio::spawn(async {
+            panic!("admission exploded");
+        })
+        .await;
+        assert!(panicked.is_err());
+        let err = admission_early_error(panicked);
+        let CrawlError::Task(msg) = err else {
+            panic!("expected a Task error");
+        };
+        assert!(
+            msg.starts_with("admission stopped unexpectedly: "),
+            "cause discarded: {msg}"
+        );
+        assert!(msg.contains("panicked"), "panic cause missing: {msg}");
+
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        handle.abort();
+        let cancelled = handle.await;
+        assert!(cancelled.is_err());
+        let err = admission_early_error(cancelled);
+        let CrawlError::Task(msg) = err else {
+            panic!("expected a Task error");
+        };
+        assert!(
+            msg.starts_with("admission stopped unexpectedly: "),
+            "cause discarded: {msg}"
+        );
+    }
     #[test]
     fn options_from_config() {
         let cfg = Config::default();
