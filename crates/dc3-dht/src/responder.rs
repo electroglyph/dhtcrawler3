@@ -120,8 +120,8 @@ pub(crate) fn answer(
             if *scrape
                 && let Some((sd, pe)) = store.filters(info_hash, ctx.transport, ctx.now)
             {
-                response.bf_sd = Some(sd.0);
-                response.bf_pe = Some(pe.0);
+                response.bf_sd = Some(Box::new(sd.0));
+                response.bf_pe = Some(Box::new(pe.0));
             }
             with_nodes(&mut response);
             event = Some(Discovered {

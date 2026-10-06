@@ -263,10 +263,14 @@ impl Lookup {
                     // A class the responder had no members of arrives as
                     // an empty (all-zero) filter estimating to 0; a missing
                     // half (never sent by our responder) counts the same.
-                    self.seed_filters
-                        .push(sd.unwrap_or([0u8; crate::bloom::BLOOM_LEN]));
-                    self.peer_filters
-                        .push(pe.unwrap_or([0u8; crate::bloom::BLOOM_LEN]));
+                    self.seed_filters.push(
+                        sd.map(|b| *b)
+                            .unwrap_or([0u8; crate::bloom::BLOOM_LEN]),
+                    );
+                    self.peer_filters.push(
+                        pe.map(|b| *b)
+                            .unwrap_or([0u8; crate::bloom::BLOOM_LEN]),
+                    );
                 }
             }
         }
@@ -644,8 +648,8 @@ mod tests {
         let mut sd = ScrapeBloom::empty();
         sd.insert_ip(&"9.9.9.9".parse::<IpAddr>().unwrap());
         let mut r = reply(NodeId([1; 20]), vec![]);
-        r.bf_sd = Some(sd.0);
-        r.bf_pe = Some([0u8; crate::bloom::BLOOM_LEN]);
+        r.bf_sd = Some(Box::new(sd.0));
+        r.bf_pe = Some(Box::new([0u8; crate::bloom::BLOOM_LEN]));
         assert!(!l.complete(batch[0].addr, Ok(r), best));
         // One unaware response (no filter keys) still counts as answered.
         assert!(!l.complete(batch[1].addr, Ok(reply(NodeId([2; 20]), vec![])), best));

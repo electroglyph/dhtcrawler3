@@ -152,10 +152,12 @@ pub struct Response {
     pub samples: Option<Vec<DhtKey>>,
     pub num: Option<i64>,
     pub interval: Option<i64>,
-    /// BEP 33 seeds filter (`BFsd`), exactly 256 bytes on the wire.
-    pub bf_sd: Option<[u8; crate::bloom::BLOOM_LEN]>,
+    /// BEP 33 seeds filter (`BFsd`), exactly 256 bytes on the wire. Boxed:
+    /// two inline 256-byte arrays would push `Body` over the
+    /// large-enum-variant threshold.
+    pub bf_sd: Option<Box<[u8; crate::bloom::BLOOM_LEN]>>,
     /// BEP 33 peers filter (`BFpe`), exactly 256 bytes on the wire.
-    pub bf_pe: Option<[u8; crate::bloom::BLOOM_LEN]>,
+    pub bf_pe: Option<Box<[u8; crate::bloom::BLOOM_LEN]>>,
 }
 
 /// A KRPC error (`y` = `e`).
@@ -332,7 +334,7 @@ fn decode_response(top: &Dict<'_>) -> Option<Response> {
         if b.len() == crate::bloom::BLOOM_LEN {
             let mut arr = [0u8; crate::bloom::BLOOM_LEN];
             arr.copy_from_slice(b);
-            Some(arr)
+            Some(Box::new(arr))
         } else {
             None
         }
@@ -341,7 +343,7 @@ fn decode_response(top: &Dict<'_>) -> Option<Response> {
         if b.len() == crate::bloom::BLOOM_LEN {
             let mut arr = [0u8; crate::bloom::BLOOM_LEN];
             arr.copy_from_slice(b);
-            Some(arr)
+            Some(Box::new(arr))
         } else {
             None
         }
@@ -771,8 +773,8 @@ mod tests {
         // Filters require exactly 256 B; other lengths decode as absent.
         let mut r = Response {
             id,
-            bf_sd: Some([7u8; crate::bloom::BLOOM_LEN]),
-            bf_pe: Some([9u8; crate::bloom::BLOOM_LEN]),
+            bf_sd: Some(Box::new([7u8; crate::bloom::BLOOM_LEN])),
+            bf_pe: Some(Box::new([9u8; crate::bloom::BLOOM_LEN])),
             ..Response::default()
         };
         round_trip(&msg(Body::Response(r.clone())));

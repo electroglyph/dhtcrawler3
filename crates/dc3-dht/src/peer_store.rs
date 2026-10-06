@@ -223,15 +223,14 @@ impl PeerStore {
         now: Instant,
     ) -> Option<(crate::bloom::ScrapeBloom, crate::bloom::ScrapeBloom)> {
         let slot = self.index.get(key).and_then(|pos| self.slots.get(*pos))?;
-        let mut live = slot
+        let live = slot
             .peers
             .iter()
             .filter(|(addr, exp, _)| *exp > now && Family::of(addr) == family);
-        if live.clone().next().is_none() {
-            return None;
-        }
-        let mut sd = crate::bloom::ScrapeBloom::empty();
-        let mut pe = crate::bloom::ScrapeBloom::empty();
+        // No live entries of this family: no filters (an empty class would
+        // otherwise estimate to 0 and look like a finished swarm).
+        live.clone().next()?;
+        let mut sd = crate::bloom::ScrapeBloom::empty();        let mut pe = crate::bloom::ScrapeBloom::empty();
         for (addr, _, seed) in live {
             if *seed {
                 sd.insert_ip(&addr.ip());

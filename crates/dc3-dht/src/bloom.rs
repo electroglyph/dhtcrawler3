@@ -53,11 +53,16 @@ impl ScrapeBloom {
     pub fn insert_ip_bytes(&mut self, ip: &[u8]) {
         let mut hasher = Sha1::new();
         hasher.update(ip);
-        let hash = hasher.finalize();
-        let i1 = (u16::from(hash[0]) | (u16::from(hash[1]) << 8)) as usize % BLOOM_BITS;
-        let i2 = (u16::from(hash[2]) | (u16::from(hash[3]) << 8)) as usize % BLOOM_BITS;
-        self.0[i1 / 8] |= 1 << (i1 % 8);
-        self.0[i2 / 8] |= 1 << (i2 % 8);
+        let hash: [u8; 20] = hasher.finalize().into();
+        let [b0, b1, b2, b3, ..] = hash;
+        let i1 = (u16::from(b0) | (u16::from(b1) << 8)) as usize % BLOOM_BITS;
+        let i2 = (u16::from(b2) | (u16::from(b3) << 8)) as usize % BLOOM_BITS;
+        if let Some(slot) = self.0.get_mut(i1 / 8) {
+            *slot |= 1 << (i1 % 8);
+        }
+        if let Some(slot) = self.0.get_mut(i2 / 8) {
+            *slot |= 1 << (i2 % 8);
+        }
     }
 
     /// Insert an IP address (v4 inserts 4 bytes, v6 inserts 16 bytes).
