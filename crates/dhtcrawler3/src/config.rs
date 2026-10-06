@@ -657,6 +657,13 @@ fn has_control(s: &str) -> bool {
     s.chars().any(char::is_control)
 }
 
+/// True when two listen addresses would claim the same socket: same port and
+/// equal IPs, or a wildcard on either side (a wildcard also overlaps the other
+/// family on dual-stack hosts, so any wildcard counts).
+fn listen_addrs_overlap(a: SocketAddr, b: SocketAddr) -> bool {
+    a.port() == b.port() && (a.ip() == b.ip() || a.ip().is_unspecified() || b.ip().is_unspecified())
+}
+
 impl Config {
     /// Checks every value the program depends on.
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -664,7 +671,9 @@ impl Config {
         self.validate_crawl()?;
         self.validate_index()?;
         self.validate_web()?;
-        if self.metrics.listen == self.web.listen && self.web.listen.port() != 0 {
+        if listen_addrs_overlap(self.metrics.listen, self.web.listen)
+            && self.web.listen.port() != 0
+        {
             return Err(invalid("metrics.listen and web.listen must differ"));
         }
         Ok(())
@@ -1312,6 +1321,27 @@ mod tests {
         assert!(matches!(err, ConfigError::Syntax { .. }), "{text}");
         assert!(text.contains("line 2"), "{text}");
         assert!(!text.contains("hunter2"), "{text}");
+    }
+
+    #[test]
+    fn overlapping_listen_addrs_are_rejected() {
+        let mut c = Config::default();
+        // Exact equality still rejected.
+        c.metrics.listen = "127.0.0.1:9100".parse().unwrap();
+        c.web.listen = "127.0.0.1:9100".parse().unwrap();
+        assert!(c.validate().is_err());
+        // Wildcard vs loopback on the same port overlaps.
+        c.metrics.listen = "0.0.0.0:9100".parse().unwrap();
+        c.web.listen = "127.0.0.1:9100".parse().unwrap();
+        assert!(c.validate().is_err());
+        // Distinct loopback IPs on the same port do not overlap.
+        c.metrics.listen = "127.0.0.1:9100".parse().unwrap();
+        c.web.listen = "127.0.0.2:9100".parse().unwrap();
+        assert!(c.validate().is_ok());
+        // Different ports are fine.
+        c.metrics.listen = "0.0.0.0:9100".parse().unwrap();
+        c.web.listen = "127.0.0.1:8080".parse().unwrap();
+        assert!(c.validate().is_ok());
     }
 
     #[test]
