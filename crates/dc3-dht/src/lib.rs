@@ -136,6 +136,9 @@ pub struct ScrapeReport {
     pub aware: usize,
     /// Responses without filter keys.
     pub unaware: usize,
+    /// Address families actually scraped (one pass per bound socket).
+    /// A dead verdict is only valid when both families were attempted.
+    pub families_attempted: usize,
 }
 
 impl ScrapeReport {
@@ -234,7 +237,9 @@ impl Dht {
         let mut peer_filters = Vec::new();
         let mut aware = 0usize;
         let mut unaware = 0usize;
+        let mut families_attempted = 0usize;
         for outcome in join_all(lookups).await {
+            families_attempted = families_attempted.saturating_add(1);
             for peer in outcome.peers {
                 if seen.insert(peer) {
                     peers.push(peer);
@@ -251,6 +256,7 @@ impl Dht {
             peer_filters,
             aware,
             unaware,
+            families_attempted,
         }
     }
 

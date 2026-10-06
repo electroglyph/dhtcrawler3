@@ -2677,3 +2677,20 @@ async fn removal_memory_blocks_then_clears_on_refetch(pool: PgPool) {
     s.note_removal(&long).await.unwrap();
     assert!(s.removal_cooldown_remaining(&k.0).await.unwrap() > Duration::ZERO);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn trim_removed_keys_keeps_the_newest(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    for n in 1..=3u8 {
+        s.note_removal(&key(n).0).await.unwrap();
+    }
+    assert_eq!(s.removed_keys_count().await.unwrap(), 3);
+    assert_eq!(s.trim_removed_keys(10).await.unwrap(), 0);
+    assert_eq!(s.trim_removed_keys(2).await.unwrap(), 1);
+    assert_eq!(s.removed_keys_count().await.unwrap(), 2);
+    // The oldest removal (key 1) was trimmed first.
+    assert_eq!(s.removal_cooldown_remaining(&key(1).0).await.unwrap(), Duration::ZERO);
+    assert!(s.removal_cooldown_remaining(&key(3).0).await.unwrap() > Duration::ZERO);
+    assert_eq!(s.trim_removed_keys(0).await.unwrap(), 2);
+    assert_eq!(s.removed_keys_count().await.unwrap(), 0);
+}

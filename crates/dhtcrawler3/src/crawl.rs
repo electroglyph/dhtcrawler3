@@ -22,6 +22,7 @@ use crate::admission::{Admission, AdmissionTuning, DISCOVERED_CHANNEL_CAPACITY, 
 use crate::config::{Config, ConfigError};
 use crate::fetch::{FetchLimitsConfig, FetchTuning, Fetcher};
 use crate::peers::PeerFilter;
+use crate::scrape::{ScrapeTuning, Scraper};
 use crate::stores::CrawlStore;
 
 /// How often DHT counters are exported.
@@ -54,6 +55,10 @@ pub struct CrawlOptions {
     pub filter: PeerFilter,
     pub admission: AdmissionTuning,
     pub fetch: FetchTuning,
+    /// BEP 33 scrape worker tunings; the worker count is `scrape_workers`.
+    pub scrape: ScrapeTuning,
+    /// Dedicated BEP 33 scrape workers (`crawl.scrape_workers`).
+    pub scrape_workers: usize,
     pub stats_interval: Duration,
     pub queue_depth_interval: Duration,
     pub readiness_interval: Duration,
@@ -83,6 +88,8 @@ impl CrawlOptions {
             filter,
             admission: AdmissionTuning::default(),
             fetch: FetchTuning::default(),
+            scrape: ScrapeTuning::default(),
+            scrape_workers: 1,
             stats_interval: DHT_STATS_INTERVAL,
             queue_depth_interval: QUEUE_DEPTH_INTERVAL,
             readiness_interval: READINESS_INTERVAL,
@@ -109,7 +116,7 @@ impl CrawlOptions {
             client_version: dc3_dht::DEFAULT_CLIENT_VERSION,
             tuning: DhtTuning::default(),
         };
-        Ok(Self::new(
+        let mut opts = Self::new(
             dht,
             c.max_pending,
             c.fetch_workers,
@@ -118,7 +125,10 @@ impl CrawlOptions {
                 max_metadata_bytes: c.max_metadata_bytes,
                 max_inflight_metadata_bytes: c.max_inflight_metadata_bytes,
             },
-        ))
+        );
+        opts.scrape = ScrapeTuning::from_config(c);
+        opts.scrape_workers = c.scrape_workers;
+        Ok(opts)
     }
 }
 
@@ -184,6 +194,10 @@ impl Crawler {
         let mut workers = JoinSet::new();
         for _ in 0..opts.fetch_workers {
             workers.spawn(Arc::clone(&fetcher).run_worker(stop.clone()));
+        }
+        let scraper = Arc::new(Scraper::new(store.clone(), dht.clone(), opts.scrape.clone()));
+        for _ in 0..opts.scrape_workers {
+            workers.spawn(Arc::clone(&scraper).run(stop.clone()));
         }
 
         let mut aux = JoinSet::new();

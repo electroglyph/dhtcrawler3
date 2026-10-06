@@ -5,10 +5,11 @@
 use std::future::Future;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use dc3_core::DhtKey;
 use dc3_store::{
     DenyOutcome, DenyReason, IndexRow, NewTorrent, Observation, ObserveOutcome, PendingItem,
-    Result, Store,
+    Result, ScrapeItem, Store,
 };
 
 /// What the crawl role needs from the database (the `dc3_crawler` user).
@@ -43,6 +44,35 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<DenyOutcome>> + Send;
     /// See [`Store::pending_depth`].
     fn pending_depth(&self) -> impl Future<Output = Result<i64>> + Send;
+    /// See [`Store::claim_scrape_due`].
+    fn claim_scrape_due(
+        &self,
+        limit: i64,
+        live_interval: Duration,
+        unknown_interval: Duration,
+    ) -> impl Future<Output = Result<Vec<ScrapeItem>>> + Send;
+    /// See [`Store::record_scrape`].
+    fn record_scrape(
+        &self,
+        id: i64,
+        seeders_est: Option<u32>,
+        scrape_failures: u32,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// See [`Store::tombstone_dead`].
+    fn tombstone_dead(
+        &self,
+        id: i64,
+        old_last_seen_at: DateTime<Utc>,
+        old_change_seq: i64,
+    ) -> impl Future<Output = Result<bool>> + Send;
+    /// See [`Store::purge_tombstoned`].
+    fn purge_tombstoned(&self, grace: Duration) -> impl Future<Output = Result<u64>> + Send;
+    /// See [`Store::trim_removed_keys`].
+    fn trim_removed_keys(&self, cap: i64) -> impl Future<Output = Result<u64>> + Send;
+    /// See [`Store::removed_keys_count`].
+    fn removed_keys_count(&self) -> impl Future<Output = Result<i64>> + Send;
+    /// See [`Store::is_denied`].
+    fn is_denied(&self, keys: &[&[u8]]) -> impl Future<Output = Result<bool>> + Send;
     /// See [`Store::ping`].
     fn ping(&self) -> impl Future<Output = Result<()>> + Send;
 }
@@ -92,6 +122,49 @@ impl CrawlStore for Store {
 
     fn pending_depth(&self) -> impl Future<Output = Result<i64>> + Send {
         Store::pending_depth(self)
+    }
+
+    fn claim_scrape_due(
+        &self,
+        limit: i64,
+        live_interval: Duration,
+        unknown_interval: Duration,
+    ) -> impl Future<Output = Result<Vec<ScrapeItem>>> + Send {
+        Store::claim_scrape_due(self, limit, live_interval, unknown_interval)
+    }
+
+    fn record_scrape(
+        &self,
+        id: i64,
+        seeders_est: Option<u32>,
+        scrape_failures: u32,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        Store::record_scrape(self, id, seeders_est, scrape_failures)
+    }
+
+    fn tombstone_dead(
+        &self,
+        id: i64,
+        old_last_seen_at: DateTime<Utc>,
+        old_change_seq: i64,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        Store::tombstone_dead(self, id, old_last_seen_at, old_change_seq)
+    }
+
+    fn purge_tombstoned(&self, grace: Duration) -> impl Future<Output = Result<u64>> + Send {
+        Store::purge_tombstoned(self, grace)
+    }
+
+    fn trim_removed_keys(&self, cap: i64) -> impl Future<Output = Result<u64>> + Send {
+        Store::trim_removed_keys(self, cap)
+    }
+
+    fn removed_keys_count(&self) -> impl Future<Output = Result<i64>> + Send {
+        Store::removed_keys_count(self)
+    }
+
+    fn is_denied(&self, keys: &[&[u8]]) -> impl Future<Output = Result<bool>> + Send {
+        Store::is_denied(self, keys)
     }
 
     fn ping(&self) -> impl Future<Output = Result<()>> + Send {

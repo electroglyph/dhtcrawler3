@@ -35,6 +35,7 @@ pub mod metrics_server;
 pub mod peers;
 pub mod policy;
 pub mod roles;
+pub mod scrape;
 pub mod signals;
 pub mod stores;
 pub mod web;

@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use dc3_core::DhtKey;
 use dc3_store::{
     DenyOutcome, DenyReason, MAX_FETCH_ATTEMPTS, NewTorrent, Observation, ObserveOutcome,
-    PendingItem, Result, StoreError,
+    PendingItem, Result, ScrapeItem, StoreError,
 };
 use tokio::time::Instant;
 
@@ -53,6 +54,30 @@ struct State {
     fails: HashMap<DhtKey, u32>,
     /// `None` means [`MEMORY_FAIL_BACKOFF`].
     fail_backoff: Option<Duration>,
+    scrapes: HashMap<DhtKey, MemScrape>,
+    tombstoned: HashMap<DhtKey, (Instant, i64)>,
+    removed: HashMap<[u8; DENY_PREFIX_LEN], RemovedEntry>,
+}
+
+/// Scrape bookkeeping of one stored torrent. `version` plays the role of
+/// both `last_seen_at` and `change_seq` in [`CrawlStore::tombstone_dead`]:
+/// every refresh bumps it, so a stale snapshot never matches.
+#[derive(Debug, Clone)]
+struct MemScrape {
+    id: i64,
+    est: Option<u32>,
+    failures: u32,
+    last_scraped: Option<Instant>,
+    seen_at: DateTime<Utc>,
+    version: u64,
+}
+
+/// Removal memory of one DHT key (see `removed_keys` in `dc3-store`).
+#[derive(Debug, Clone)]
+struct RemovedEntry {
+    removed_at: Instant,
+    removals: u32,
+    sightings: u32,
 }
 
 /// An in-memory crawl store. Clones share the same data.
@@ -185,6 +210,12 @@ impl CrawlStore for MemoryStore {
         for (key, (n, priority)) in merged {
             if state.torrents.contains_key(&key) {
                 out.known = out.known.saturating_add(1);
+                // A sighting refreshes the row: bump the scrape guard so a
+                // stale tombstone snapshot cannot match afterwards.
+                if let Some(sc) = state.scrapes.get_mut(&key) {
+                    sc.version = sc.version.saturating_add(1);
+                    sc.seen_at = Utc::now();
+                }
             } else if Self::is_denied(&state, &[key.as_bytes()]) {
                 out.denied = out.denied.saturating_add(1);
             } else if let Some(p) = state.pending.get_mut(&key) {
@@ -288,6 +319,21 @@ impl CrawlStore for MemoryStore {
             }
         };
         state.torrents.insert(*key, (id, t.clone()));
+        // A successful fetch refreshes the row and clears removal memory
+        // (positive liveness proof), and revives a tombstone.
+        let entry = state.scrapes.entry(*key).or_insert(MemScrape {
+            id,
+            est: None,
+            failures: 0,
+            last_scraped: None,
+            seen_at: Utc::now(),
+            version: 0,
+        });
+        entry.id = id;
+        entry.version = entry.version.saturating_add(1);
+        entry.seen_at = Utc::now();
+        state.tombstoned.remove(key);
+        state.removed.remove(&prefix(key.as_bytes()));
         Ok(id)
     }
 
@@ -363,6 +409,156 @@ impl CrawlStore for MemoryStore {
 
     async fn pending_depth(&self) -> Result<i64> {
         Ok(i64::try_from(self.lock().pending.len()).unwrap_or(i64::MAX))
+    }
+
+    async fn claim_scrape_due(
+        &self,
+        limit: i64,
+        live_interval: Duration,
+        unknown_interval: Duration,
+    ) -> Result<Vec<ScrapeItem>> {
+        let mut state = self.lock();
+        let now = Instant::now();
+        let mut due: Vec<(Option<Instant>, DhtKey)> = Vec::new();
+        for key in state.torrents.keys() {
+            if Self::is_denied(&state, &[key.as_bytes()]) {
+                continue;
+            }
+            let last = state.scrapes.get(key).and_then(|sc| sc.last_scraped);
+            let est = state.scrapes.get(key).and_then(|sc| sc.est);
+            let stale = match (last, est) {
+                (None, _) => true,
+                (Some(at), None) => now.saturating_duration_since(at) >= unknown_interval,
+                (Some(at), Some(_)) => now.saturating_duration_since(at) >= live_interval,
+            };
+            if stale {
+                due.push((last, *key));
+            }
+        }
+        due.sort();
+        let cap = usize::try_from(limit.max(0)).unwrap_or(0);
+        let mut out = Vec::new();
+        for (_, key) in due.into_iter().take(cap) {
+            let id = state.torrents.get(&key).map_or(0, |(id, _)| *id);
+            let sc = state.scrapes.entry(key).or_insert(MemScrape {
+                id,
+                est: None,
+                failures: 0,
+                last_scraped: None,
+                seen_at: Utc::now(),
+                version: 0,
+            });
+            sc.last_scraped = Some(now);
+            out.push(ScrapeItem {
+                id: sc.id,
+                dht_key: key,
+                seeders_est: sc.est,
+                scrape_failures: sc.failures,
+                last_seen_at: sc.seen_at,
+                change_seq: i64::try_from(sc.version).unwrap_or(i64::MAX),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn record_scrape(
+        &self,
+        id: i64,
+        seeders_est: Option<u32>,
+        scrape_failures: u32,
+    ) -> Result<bool> {
+        let mut state = self.lock();
+        match state.scrapes.values_mut().find(|sc| sc.id == id) {
+            Some(sc) => {
+                sc.est = seeders_est;
+                sc.failures = scrape_failures;
+                sc.last_scraped = Some(Instant::now());
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn tombstone_dead(
+        &self,
+        id: i64,
+        old_last_seen_at: DateTime<Utc>,
+        old_change_seq: i64,
+    ) -> Result<bool> {
+        let mut state = self.lock();
+        let key = state
+            .torrents
+            .iter()
+            .find(|(_, (tid, _))| *tid == id)
+            .map(|(k, _)| *k);
+        let Some(key) = key else {
+            return Ok(false);
+        };
+        let guarded = state.scrapes.get(&key).is_some_and(|sc| {
+            sc.seen_at == old_last_seen_at
+                && sc.version == u64::try_from(old_change_seq).unwrap_or(u64::MAX)
+        });
+        if !guarded {
+            return Ok(false);
+        }
+        state.torrents.remove(&key);
+        state.scrapes.remove(&key);
+        state.tombstoned.insert(key, (Instant::now(), id));
+        let entry = state.removed.entry(prefix(key.as_bytes())).or_insert(RemovedEntry {
+            removed_at: Instant::now(),
+            removals: 0,
+            sightings: 0,
+        });
+        entry.removed_at = Instant::now();
+        entry.removals = entry.removals.saturating_add(1);
+        entry.sightings = 0;
+        Ok(true)
+    }
+
+    async fn purge_tombstoned(&self, grace: Duration) -> Result<u64> {
+        let mut state = self.lock();
+        let now = Instant::now();
+        let doomed: Vec<DhtKey> = state
+            .tombstoned
+            .iter()
+            .filter(|(key, (at, _))| {
+                now.saturating_duration_since(*at) >= grace
+                    && !Self::is_denied(&state, &[key.as_bytes()])
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        let n = doomed.len();
+        for key in doomed {
+            state.tombstoned.remove(&key);
+        }
+        Ok(u64::try_from(n).unwrap_or(u64::MAX))
+    }
+
+    async fn trim_removed_keys(&self, cap: i64) -> Result<u64> {
+        let mut state = self.lock();
+        let len = state.removed.len();
+        let excess = len.saturating_sub(usize::try_from(cap.max(0)).unwrap_or(0));
+        if excess == 0 {
+            return Ok(0);
+        }
+        let mut oldest: Vec<(Instant, [u8; DENY_PREFIX_LEN])> = state
+            .removed
+            .iter()
+            .map(|(k, e)| (e.removed_at, *k))
+            .collect();
+        oldest.sort();
+        for (_, key) in oldest.into_iter().take(excess) {
+            state.removed.remove(&key);
+        }
+        Ok(u64::try_from(excess).unwrap_or(u64::MAX))
+    }
+
+    async fn removed_keys_count(&self) -> Result<i64> {
+        Ok(i64::try_from(self.lock().removed.len()).unwrap_or(i64::MAX))
+    }
+
+    async fn is_denied(&self, keys: &[&[u8]]) -> Result<bool> {
+        Ok(Self::is_denied(&self.lock(), keys))
     }
 
     async fn ping(&self) -> Result<()> {
@@ -491,5 +687,85 @@ mod tests {
             quick.claim(1, Duration::from_secs(1)).await.unwrap().len(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod scrape_tests {
+    use super::*;
+    use tokio::time::advance;
+
+    const LIVE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    const UNKNOWN: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+    fn key(n: u8) -> DhtKey {
+        DhtKey([n; 20])
+    }
+
+    fn torrent(k: DhtKey) -> NewTorrent {
+        NewTorrent {
+            dht_key: k,
+            info_hash_v1: Some(k),
+            info_hash_v2: None,
+            name: "x".into(),
+            total_size: 1,
+            file_count: 1,
+            files: vec![dc3_store::FileRow {
+                path: "x".into(),
+                size: 1,
+            }],
+            files_truncated: false,
+            piece_length: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scrape_state_round_trip() {
+        let s = MemoryStore::new();
+        let k = key(7);
+        let id = s.complete(&k, &torrent(k)).await.unwrap();
+
+        // Never scraped: due, and the claim holds the lease.
+        let items = s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, id);
+        assert_eq!(items[0].seeders_est, None);
+        let snap = items[0].clone();
+        assert!(s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap().is_empty());
+
+        // A dead scrape is recorded.
+        assert!(s.record_scrape(id, Some(0), 1).await.unwrap());
+        assert!(!s.record_scrape(9999, Some(0), 1).await.unwrap());
+
+        // A refresh bumps the guard: the stale snapshot cannot tombstone.
+        s.complete(&k, &torrent(k)).await.unwrap();
+        assert!(!s.tombstone_dead(id, snap.last_seen_at, snap.change_seq).await.unwrap());
+        assert!(s.torrent(&k).is_some());
+
+        // Past the unknown interval the row is due again; the fresh
+        // snapshot tombstones and notes the removal.
+        advance(UNKNOWN.saturating_add(Duration::from_secs(1))).await;
+        let items = s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap();
+        assert_eq!(items.len(), 1);
+        let fresh = items[0].clone();
+        assert_ne!((fresh.last_seen_at, fresh.change_seq), (snap.last_seen_at, snap.change_seq));
+        assert!(s.tombstone_dead(id, fresh.last_seen_at, fresh.change_seq).await.unwrap());
+        assert!(s.torrent(&k).is_none());
+        assert_eq!(s.removed_keys_count().await.unwrap(), 1);
+        assert!(!s.tombstone_dead(id, fresh.last_seen_at, fresh.change_seq).await.unwrap());
+
+        // A denied tombstone is never purged.
+        s.preload_denial(k.as_bytes(), DenyReason::Other);
+        assert!(s.is_denied(&[k.as_bytes()]).await.unwrap());
+        assert_eq!(s.purge_tombstoned(Duration::ZERO).await.unwrap(), 0);
+        // Claiming skips denied rows.
+        s.complete(&k, &torrent(k)).await.unwrap_err();
+        assert!(s.claim_scrape_due(10, Duration::ZERO, Duration::ZERO).await.unwrap().is_empty());
+
+        // Trimming keeps the newest rows up to the cap.
+        assert_eq!(s.trim_removed_keys(10).await.unwrap(), 0);
+        assert_eq!(s.trim_removed_keys(0).await.unwrap(), 1);
+        assert_eq!(s.removed_keys_count().await.unwrap(), 0);
     }
 }

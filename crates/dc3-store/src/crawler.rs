@@ -813,6 +813,24 @@ impl Store {
             .await?;
         Ok(n)
     }
+
+    /// Deletes the oldest `removed_keys` rows beyond `cap` (LRU over
+    /// `removed_at`), so a flap storm cannot grow the table forever.
+    /// Returns the number removed. The cap is approximate under concurrency.
+    pub async fn trim_removed_keys(&self, cap: i64) -> Result<u64> {
+        let n: i64 = self.removed_keys_count().await?.saturating_sub(cap.max(0));
+        if n <= 0 {
+            return Ok(0);
+        }
+        let res = sqlx::query(
+            "DELETE FROM removed_keys WHERE key IN \
+             (SELECT key FROM removed_keys ORDER BY removed_at ASC LIMIT $1)",
+        )
+        .bind(n)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 /// Cooldown for a key removed `removals` times in a row (§4a): 7d, then 30d,

@@ -147,6 +147,10 @@ pub const MAX_FETCH_ATTEMPTS: i32 = 6;
 /// estimate (`pg_class.reltuples`) instead of scanning the table.
 pub const EXACT_COUNT_THRESHOLD: i64 = 1_000_000;
 
+/// Most rows [`Store::trim_removed_keys`] keeps: removal memory is an LRU
+/// over `removed_at`, so a flap storm cannot grow `removed_keys` forever.
+pub const MAX_REMOVED_KEYS: i64 = 1_000_000;
+
 /// How long [`Store::high_water_mark`] waits for the change-feed lock.
 pub const HWM_LOCK_TIMEOUT: Duration = Duration::from_millis(200);
 /// `idle_in_transaction_session_timeout` of every store connection.
