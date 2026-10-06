@@ -101,7 +101,7 @@ impl CrawlOptions {
             bootstrap: c.bootstrap.clone(),
             state_file: cfg.dht_state_file(),
             max_packets_per_sec: c.max_packets_per_sec,
-            scrape_packets_per_sec: dc3_dht::DEFAULT_SCRAPE_PACKETS_PER_SEC,
+            scrape_packets_per_sec: c.scrape_packets_per_sec,
             sampler: true,
             sampler_concurrency: c.sampler_concurrency,
             read_only: c.read_only,

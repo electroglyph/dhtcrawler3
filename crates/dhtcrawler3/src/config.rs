@@ -191,6 +191,37 @@ pub struct CrawlConfig {
     pub max_metadata_bytes: usize,
     pub max_inflight_metadata_bytes: usize,
     pub max_pending: i64,
+    /// Dedicated BEP 33 scrape workers (1 by default).
+    pub scrape_workers: usize,
+    /// Minimum age of an estimate before a row is re-scraped.
+    pub scrape_interval_secs: u64,
+    /// Rows claimed per scrape round.
+    pub scrape_batch: usize,
+    /// Consecutive dead scrapes before a tombstone.
+    pub max_scrape_failures: u32,
+    /// A swarm is dead when its seeder estimate is at most this.
+    pub scrape_seeder_threshold: u32,
+    /// Per-RPC timeout of scrape queries.
+    pub scrape_query_timeout_secs: u64,
+    /// Overall deadline of one scrape lookup.
+    pub scrape_lookup_timeout_secs: u64,
+    /// In-flight scrape lookups per worker.
+    pub scrape_concurrency: usize,
+    /// Dedicated outbound packet budget for scrapes.
+    pub scrape_packets_per_sec: u32,
+    /// Base admission cooldown of a removed key, in days; repeats escalate
+    /// 7 -> 30 -> 90 days (capped, not a knob).
+    pub removal_cooldown_days: u64,
+    /// Grace before a tombstoned row is hard-purged, in hours.
+    pub tombstone_purge_hours: u64,
+    /// Interval of the purge sweep, in seconds.
+    pub scrape_sweep_secs: u64,
+    /// Re-scrape interval of rows whose swarm is still unknown, in seconds.
+    pub scrape_unknown_interval_secs: u64,
+    /// LRU size of the node-list cache reused as scrape start set; 0 disables.
+    pub scrape_node_cache_keys: usize,
+    /// Agreeing nonzero responses that end a traversal early (live-only).
+    pub scrape_early_exit_quorum: u32,
 }
 
 impl Default for CrawlConfig {
@@ -212,6 +243,21 @@ impl Default for CrawlConfig {
             max_metadata_bytes: dc3_peer::DEFAULT_MAX_METADATA,
             max_inflight_metadata_bytes: 256 * 1024 * 1024,
             max_pending: 5_000_000,
+            scrape_workers: 1,
+            scrape_interval_secs: 7 * 24 * 60 * 60,
+            scrape_batch: 64,
+            max_scrape_failures: 2,
+            scrape_seeder_threshold: 0,
+            scrape_query_timeout_secs: 10,
+            scrape_lookup_timeout_secs: 60,
+            scrape_concurrency: 3,
+            scrape_packets_per_sec: dc3_dht::DEFAULT_SCRAPE_PACKETS_PER_SEC,
+            removal_cooldown_days: 7,
+            tombstone_purge_hours: 1,
+            scrape_sweep_secs: 3600,
+            scrape_unknown_interval_secs: 30 * 24 * 60 * 60,
+            scrape_node_cache_keys: 4096,
+            scrape_early_exit_quorum: 3,
         }
     }
 }
@@ -716,6 +762,83 @@ impl Config {
             MAX_INFLIGHT_METADATA_BYTES,
         )?;
         check_range("crawl.max_pending", c.max_pending, 0, i64::MAX)?;
+        check_range("crawl.scrape_workers", c.scrape_workers, 1, 64)?;
+        check_range(
+            "crawl.scrape_interval_secs",
+            c.scrape_interval_secs,
+            3600,
+            90 * 24 * 60 * 60,
+        )?;
+        check_range("crawl.scrape_batch", c.scrape_batch, 1, 1000)?;
+        check_range("crawl.max_scrape_failures", c.max_scrape_failures, 1, 10)?;
+        check_range(
+            "crawl.scrape_seeder_threshold",
+            c.scrape_seeder_threshold,
+            0,
+            1000,
+        )?;
+        check_range(
+            "crawl.scrape_query_timeout_secs",
+            c.scrape_query_timeout_secs,
+            1,
+            60,
+        )?;
+        check_range(
+            "crawl.scrape_lookup_timeout_secs",
+            c.scrape_lookup_timeout_secs,
+            10,
+            300,
+        )?;
+        if c.scrape_lookup_timeout_secs <= c.scrape_query_timeout_secs {
+            return Err(invalid(
+                "crawl.scrape_lookup_timeout_secs must exceed crawl.scrape_query_timeout_secs \
+                 (overall deadline vs per-RPC timeout)",
+            ));
+        }
+        check_range("crawl.scrape_concurrency", c.scrape_concurrency, 1, 16)?;
+        check_range(
+            "crawl.scrape_packets_per_sec",
+            c.scrape_packets_per_sec,
+            1,
+            250,
+        )?;
+        check_range(
+            "crawl.removal_cooldown_days",
+            c.removal_cooldown_days,
+            1,
+            365,
+        )?;
+        check_range(
+            "crawl.tombstone_purge_hours",
+            c.tombstone_purge_hours,
+            0,
+            168,
+        )?;
+        check_range("crawl.scrape_sweep_secs", c.scrape_sweep_secs, 60, 86_400)?;
+        check_range(
+            "crawl.scrape_unknown_interval_secs",
+            c.scrape_unknown_interval_secs,
+            7 * 24 * 60 * 60,
+            90 * 24 * 60 * 60,
+        )?;
+        if c.scrape_unknown_interval_secs < c.scrape_interval_secs {
+            return Err(invalid(
+                "crawl.scrape_unknown_interval_secs must be at least crawl.scrape_interval_secs, \
+                 else unknown swarms are re-polled faster than live ones",
+            ));
+        }
+        check_range(
+            "crawl.scrape_node_cache_keys",
+            c.scrape_node_cache_keys,
+            0,
+            65_536,
+        )?;
+        check_range(
+            "crawl.scrape_early_exit_quorum",
+            c.scrape_early_exit_quorum,
+            2,
+            5,
+        )?;
         Ok(())
     }
 
@@ -1316,6 +1439,29 @@ mod tests {
             ("DC3_CRAWL__BIND_V4", "::"),
             ("DC3_CRAWL__BIND_V6", "0.0.0.0"),
             ("DC3_CRAWL__MAX_PENDING", "-1"),
+            ("DC3_CRAWL__SCRAPE_WORKERS", "0"),
+            ("DC3_CRAWL__SCRAPE_WORKERS", "65"),
+            ("DC3_CRAWL__SCRAPE_BATCH", "0"),
+            ("DC3_CRAWL__SCRAPE_BATCH", "1001"),
+            ("DC3_CRAWL__MAX_SCRAPE_FAILURES", "0"),
+            ("DC3_CRAWL__MAX_SCRAPE_FAILURES", "11"),
+            ("DC3_CRAWL__SCRAPE_SEEDER_THRESHOLD", "1001"),
+            ("DC3_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "0"),
+            ("DC3_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "61"),
+            ("DC3_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "9"),
+            ("DC3_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "301"),
+            ("DC3_CRAWL__SCRAPE_CONCURRENCY", "0"),
+            ("DC3_CRAWL__SCRAPE_CONCURRENCY", "17"),
+            ("DC3_CRAWL__SCRAPE_PACKETS_PER_SEC", "0"),
+            ("DC3_CRAWL__SCRAPE_PACKETS_PER_SEC", "251"),
+            ("DC3_CRAWL__REMOVAL_COOLDOWN_DAYS", "0"),
+            ("DC3_CRAWL__REMOVAL_COOLDOWN_DAYS", "366"),
+            ("DC3_CRAWL__TOMBSTONE_PURGE_HOURS", "169"),
+            ("DC3_CRAWL__SCRAPE_SWEEP_SECS", "59"),
+            ("DC3_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "86399"),
+            ("DC3_CRAWL__SCRAPE_NODE_CACHE_KEYS", "65537"),
+            ("DC3_CRAWL__SCRAPE_EARLY_EXIT_QUORUM", "1"),
+            ("DC3_CRAWL__SCRAPE_EARLY_EXIT_QUORUM", "6"),
             ("DC3_CRAWL__BOOTSTRAP", "no-port"),
             ("DC3_CRAWL__SAMPLER_CONCURRENCY", "1025"),
             ("DC3_CRAWL__SAMPLER_CONCURRENCY", "0"),
@@ -1370,6 +1516,50 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn scrape_intervals_are_ordered() {
+        // Equal is allowed (not faster); only strictly less is refused.
+        let ok = with_env(&[
+            ("DC3_CRAWL__SCRAPE_INTERVAL_SECS", "604800"),
+            ("DC3_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "604800"),
+        ]);
+        assert!(ok.is_ok(), "{ok:?}");
+        let err = with_env(&[
+            ("DC3_CRAWL__SCRAPE_INTERVAL_SECS", "1209600"),
+            ("DC3_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "604800"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("scrape_unknown_interval_secs"), "{err}");
+
+        // The overall lookup deadline must exceed the per-RPC timeout.
+        let err = with_env(&[
+            ("DC3_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "10"),
+            ("DC3_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "10"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("scrape_lookup_timeout_secs"), "{err}");
+    }
+
+    #[test]
+    fn scrape_defaults_match_the_spec() {
+        let c = Config::default().crawl;
+        assert_eq!(c.scrape_workers, 1);
+        assert_eq!(c.scrape_interval_secs, 604800);
+        assert_eq!(c.scrape_batch, 64);
+        assert_eq!(c.max_scrape_failures, 2);
+        assert_eq!(c.scrape_seeder_threshold, 0);
+        assert_eq!(c.scrape_query_timeout_secs, 10);
+        assert_eq!(c.scrape_lookup_timeout_secs, 60);
+        assert_eq!(c.scrape_concurrency, 3);
+        assert_eq!(c.scrape_packets_per_sec, 25);
+        assert_eq!(c.removal_cooldown_days, 7);
+        assert_eq!(c.tombstone_purge_hours, 1);
+        assert_eq!(c.scrape_sweep_secs, 3600);
+        assert_eq!(c.scrape_unknown_interval_secs, 2592000);
+        assert_eq!(c.scrape_node_cache_keys, 4096);
+        assert_eq!(c.scrape_early_exit_quorum, 3);
     }
 
     #[test]

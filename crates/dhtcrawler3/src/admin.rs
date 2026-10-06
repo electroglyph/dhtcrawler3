@@ -357,6 +357,11 @@ pub fn check_config(cfg: &Config, out: Out<'_>) -> Result<(), AdminError> {
         writeln!(out, "# database user for {label}: {user} ({password})")?;
     }
     let warnings = cfg.warnings();
+    writeln!(
+        out,
+        "# packet budgets: crawl {}/s + scrape {}/s (separate buckets)",
+        cfg.crawl.max_packets_per_sec, cfg.crawl.scrape_packets_per_sec
+    )?;
     if warnings.is_empty() {
         writeln!(out, "# no warnings")?;
     }

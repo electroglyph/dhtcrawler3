@@ -53,6 +53,43 @@ max_metadata_bytes = 8388608
 max_inflight_metadata_bytes = 268435456
 # Keys waiting for metadata. Above this, only sampled and announced keys are queued.
 max_pending = 5000000
+# BEP 33 seeder scrapes: dedicated workers re-poll stored torrents for their
+# current seeder count and tombstone dead swarms. Defaults keep up with ~100k
+# torrents; without the node-list cache a million torrents need a higher
+# scrape_packets_per_sec (see the sizing note in docs, bep33.md §6).
+scrape_workers = 1
+# Minimum age of an estimate before a row is re-scraped (7 days).
+scrape_interval_secs = 604800
+# Rows claimed per scrape round.
+scrape_batch = 64
+# Consecutive dead scrapes before a tombstone.
+max_scrape_failures = 2
+# A swarm is dead when its seeder estimate is at most this.
+scrape_seeder_threshold = 0
+# Per-RPC timeout of scrape queries (BEP 33 guidance).
+scrape_query_timeout_secs = 10
+# Overall deadline of one scrape lookup; must exceed the per-RPC timeout.
+scrape_lookup_timeout_secs = 60
+# In-flight scrape lookups per worker.
+scrape_concurrency = 3
+# Dedicated outbound packet budget for scrapes (burst: 1s).
+scrape_packets_per_sec = 25
+# Base admission cooldown of a removed key, in days; repeats escalate
+# 7 -> 30 -> 90 days (the cap is not a knob).
+removal_cooldown_days = 7
+# Grace before a tombstoned row is hard-purged, in hours.
+tombstone_purge_hours = 1
+# Interval of the tombstone-purge sweep, in seconds.
+scrape_sweep_secs = 3600
+# Re-scrape interval of rows whose swarm is still unknown (30 days): unknown
+# rows cost lookups without answers, so they are re-polled less often. Must
+# be at least scrape_interval_secs.
+scrape_unknown_interval_secs = 2592000
+# LRU size of the node-list cache reused as scrape start set; 0 disables.
+scrape_node_cache_keys = 4096
+# Agreeing nonzero responses that end a traversal early (live-only: a dead
+# verdict always requires the full traversal over both families).
+scrape_early_exit_quorum = 3
 
 [index]
 path = "/var/lib/dhtcrawler3/index"
