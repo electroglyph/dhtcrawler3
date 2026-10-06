@@ -32,9 +32,6 @@ tombstoned instead of lingering in the index:
   `dc3_purge_tombstoned_total`, `dc3_scrape_due_depth`,
   `dc3_removed_keys_count`.
 
-See [bep33.md](bep33.md) for the full plan and its audit trail; defaults
-(`scrape_interval_secs = 604800`, one worker, 25 scrape packets/s) keep up
-with ~100k torrents — raise `scrape_packets_per_sec` past a million.
 
 dhtcrawler3 replaces [dhtcrawler2](https://github.com/kevinlynx/dhtcrawler2) (Erlang,
 2013), the code published by the `btdig` GitHub organisation. It is a rewrite, not a
