@@ -1720,6 +1720,11 @@ fn removal_cooldown_escalates_and_caps() {
     assert_eq!(removal_cooldown_with_base(1, 2), days(4));
     assert_eq!(removal_cooldown_with_base(30, 2), days(90));
     assert_eq!(removal_cooldown_with_base(365, 1), days(90));
+    // A zero base disables the cooldown instead of becoming 1 day.
+    assert_eq!(removal_cooldown_with_base(0, 0), Duration::ZERO);
+    assert_eq!(removal_cooldown_with_base(0, 1), Duration::ZERO);
+    assert_eq!(removal_cooldown_with_base(0, 2), Duration::ZERO);
+    assert_eq!(removal_cooldown_with_base(0, 100), Duration::ZERO);
 }
 
 #[sqlx::test(migrations = "./migrations")]

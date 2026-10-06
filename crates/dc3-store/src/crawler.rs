@@ -997,7 +997,12 @@ const REMOVAL_COOLDOWN_CAP_DAYS: u32 = 90;
 /// configured `base_days`: the base, then ×4, then the 90d cap.
 pub(crate) fn removal_cooldown_with_base(base_days: u64, removals: i32) -> Duration {
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
-    let base = DAY.saturating_mul(u32::try_from(base_days.max(1)).unwrap_or(u32::MAX));
+    // A zero base means "no cooldown" (direct-API only: validated Config
+    // rejects 0); it must not be upgraded to a 1-day block.
+    if base_days == 0 {
+        return Duration::ZERO;
+    }
+    let base = DAY.saturating_mul(u32::try_from(base_days).unwrap_or(u32::MAX));
     let cap = DAY.saturating_mul(REMOVAL_COOLDOWN_CAP_DAYS);
     if removals <= 1 {
         base.min(cap)
