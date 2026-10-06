@@ -55,9 +55,9 @@ async fn search_json_has_exactly_the_documented_fields() {
     assert_eq!(json["query"], "example");
     assert_eq!(json["page"], 1);
     assert_eq!(json["per_page"], 3);
-    assert_eq!(json["total"], 3);
+    assert_eq!(json["total"], 2);
     let results = json["results"].as_array().unwrap();
-    // The hidden hit is skipped; the page is not refilled.
+    // The hidden hit is skipped, and the total counts visible matches only.
     assert_eq!(results.len(), 2);
     for result in results {
         assert_eq!(keys(result), set(&TORRENT_FIELDS));

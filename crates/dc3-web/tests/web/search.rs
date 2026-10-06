@@ -57,8 +57,8 @@ async fn results_follow_the_index_order_and_skip_missing_hits() {
         result_names(&r.body),
         ["Ubuntu 26.04 desktop amd64", "ubuntu server"]
     );
-    // The total comes from the index.
-    assert!(r.body.contains("3 torrents match your search."));
+    // The total counts visible matches, so the hidden hit is subtracted.
+    assert!(r.body.contains("2 torrents match your search."));
     assert!(
         r.body
             .contains(r#"<span title="5,000,000,000 bytes">4.7 GiB</span>"#)

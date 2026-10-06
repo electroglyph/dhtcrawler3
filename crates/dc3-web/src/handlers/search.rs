@@ -190,8 +190,12 @@ impl Failure {
     }
 }
 
-/// One page of results: the total number of matches, and the visible
+/// One page of results: the number of visible matches, and the visible
 /// torrents on the page in search-hit order.
+///
+/// `total` counts matches the database still shows; hits that were hidden,
+/// denied, deleted or policy-blocked during hydration are subtracted so the
+/// count cannot be compared against the page to reveal moderated hits.
 pub(crate) struct Found {
     pub total: u64,
     pub torrents: Vec<(TorrentRecord, Shown)>,
@@ -250,8 +254,13 @@ pub(crate) async fn execute<B: Backend>(
     };
     let scores: HashMap<i64, f32> = results.hits.iter().map(|hit| (hit.id, hit.score)).collect();
     order_page(&mut torrents, &scores, sort, st.seeder_freshness);
+    // Hits the database no longer shows (hidden, denied, deleted) or that
+    // contain a blocked term were skipped above; subtract them so `total`
+    // counts visible matches instead of leaking the moderated count.
+    let dropped = u64::try_from(results.hits.len().saturating_sub(torrents.len()))
+        .unwrap_or(u64::MAX);
     Ok(Found {
-        total: results.total,
+        total: results.total.saturating_sub(dropped),
         torrents,
     })
 }
