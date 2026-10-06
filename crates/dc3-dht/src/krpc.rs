@@ -87,6 +87,8 @@ pub enum Method {
     },
     GetPeers {
         info_hash: DhtKey,
+        /// BEP 33 `scrape=1`: ask for `BFsd`/`BFpe` filters.
+        scrape: bool,
     },
     /// `port` is meaningful only when `implied_port` is false.
     AnnouncePeer {
@@ -94,6 +96,8 @@ pub enum Method {
         port: u16,
         implied_port: bool,
         token: Vec<u8>,
+        /// BEP 33 `seed=1`: the announcer is a seed. Missing/`!=1` means peer.
+        seed: bool,
     },
     SampleInfohashes {
         target: NodeId,
@@ -126,12 +130,14 @@ impl Method {
             Method::FindNode { target }
             | Method::SampleInfohashes { target }
             | Method::Other { target, .. } => Some(*target),
-            Method::GetPeers { info_hash } => Some(NodeId::from(*info_hash)),
+            Method::GetPeers { info_hash, .. } => Some(NodeId::from(*info_hash)),
         }
     }
 }
 
 /// A response (`y` = `r`). `None` means the key was absent.
+/// `bf_sd`/`bf_pe` are BEP 33 scrape filters (256 B each); `None` means
+/// absent (responder has no entries, or the query was not a scrape).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Response {
     pub id: NodeId,
@@ -146,6 +152,10 @@ pub struct Response {
     pub samples: Option<Vec<DhtKey>>,
     pub num: Option<i64>,
     pub interval: Option<i64>,
+    /// BEP 33 seeds filter (`BFsd`), exactly 256 bytes on the wire.
+    pub bf_sd: Option<[u8; crate::bloom::BLOOM_LEN]>,
+    /// BEP 33 peers filter (`BFpe`), exactly 256 bytes on the wire.
+    pub bf_pe: Option<[u8; crate::bloom::BLOOM_LEN]>,
 }
 
 /// A KRPC error (`y` = `e`).
@@ -251,6 +261,7 @@ fn decode_query(top: &Dict<'_>) -> Result<Query, BadArg> {
                 b"info_hash",
                 "missing or invalid 'info_hash'",
             )?),
+            scrape: args.get_int(b"scrape") == Some(1),
         },
         b"announce_peer" => decode_announce(args)?,
         b"sample_infohashes" => Method::SampleInfohashes {
@@ -297,6 +308,7 @@ fn decode_announce(args: &Dict<'_>) -> Result<Method, BadArg> {
         port,
         implied_port,
         token,
+        seed: args.get_int(b"seed") == Some(1),
     })
 }
 
@@ -316,6 +328,24 @@ fn decode_want(v: &Value<'_>) -> Result<Want, BadArg> {
 fn decode_response(top: &Dict<'_>) -> Option<Response> {
     let r = top.get_dict(b"r")?;
     let id = r.get_bytes(b"id").and_then(NodeId::from_slice)?;
+    let bf_sd = r.get_bytes(b"BFsd").and_then(|b| {
+        if b.len() == crate::bloom::BLOOM_LEN {
+            let mut arr = [0u8; crate::bloom::BLOOM_LEN];
+            arr.copy_from_slice(b);
+            Some(arr)
+        } else {
+            None
+        }
+    });
+    let bf_pe = r.get_bytes(b"BFpe").and_then(|b| {
+        if b.len() == crate::bloom::BLOOM_LEN {
+            let mut arr = [0u8; crate::bloom::BLOOM_LEN];
+            arr.copy_from_slice(b);
+            Some(arr)
+        } else {
+            None
+        }
+    });
     Some(Response {
         id,
         nodes: r
@@ -332,6 +362,8 @@ fn decode_response(top: &Dict<'_>) -> Option<Response> {
         samples: r.get_bytes(b"samples").and_then(decode_samples),
         num: r.get_int(b"num"),
         interval: r.get_int(b"interval"),
+        bf_sd,
+        bf_pe,
     })
 }
 
@@ -436,14 +468,18 @@ fn query_args(q: &Query) -> BTreeMap<Vec<u8>, OwnedValue> {
         | Method::Other { target, .. } => {
             a.insert(key(b"target"), OwnedValue::bytes(target.0.to_vec()));
         }
-        Method::GetPeers { info_hash } => {
+        Method::GetPeers { info_hash, scrape } => {
             a.insert(key(b"info_hash"), OwnedValue::bytes(info_hash.0.to_vec()));
+            if *scrape {
+                a.insert(key(b"scrape"), OwnedValue::Int(1));
+            }
         }
         Method::AnnouncePeer {
             info_hash,
             port,
             implied_port,
             token,
+            seed,
         } => {
             a.insert(key(b"info_hash"), OwnedValue::bytes(info_hash.0.to_vec()));
             a.insert(key(b"port"), OwnedValue::Int(i64::from(*port)));
@@ -452,6 +488,9 @@ fn query_args(q: &Query) -> BTreeMap<Vec<u8>, OwnedValue> {
                 OwnedValue::Int(i64::from(*implied_port)),
             );
             a.insert(key(b"token"), OwnedValue::bytes(token.clone()));
+            if *seed {
+                a.insert(key(b"seed"), OwnedValue::Int(1));
+            }
         }
     }
     a
@@ -494,6 +533,12 @@ fn response_fields(r: &Response) -> BTreeMap<Vec<u8>, OwnedValue> {
     }
     if let Some(interval) = r.interval {
         d.insert(key(b"interval"), OwnedValue::Int(interval));
+    }
+    if let Some(bf) = &r.bf_sd {
+        d.insert(key(b"BFsd"), OwnedValue::bytes(bf.to_vec()));
+    }
+    if let Some(bf) = &r.bf_pe {
+        d.insert(key(b"BFpe"), OwnedValue::bytes(bf.to_vec()));
     }
     d
 }
@@ -638,19 +683,17 @@ mod tests {
             Method::FindNode {
                 target: NodeId([3; 20]),
             },
-            Method::GetPeers { info_hash: key },
+            Method::GetPeers { info_hash: key, scrape: false },
             Method::AnnouncePeer {
                 info_hash: key,
                 port: 6881,
                 implied_port: false,
-                token: b"tok".to_vec(),
-            },
+                token: b"tok".to_vec(), seed: false },
             Method::AnnouncePeer {
                 info_hash: key,
                 port: 0,
                 implied_port: true,
-                token: vec![0; 8],
-            },
+                token: vec![0; 8], seed: false },
             Method::SampleInfohashes {
                 target: NodeId([4; 20]),
             },
@@ -683,6 +726,62 @@ mod tests {
     }
 
     #[test]
+    fn bep33_scrape_seed_and_filters_round_trip() {
+        let id = NodeId([1; 20]);
+        let key = DhtKey([2; 20]);
+        // scrape=1 / seed=1 survive a round trip; missing means false.
+        let q = msg(Body::Query(Query {
+            id,
+            want: None,
+            method: Method::GetPeers {
+                info_hash: key,
+                scrape: true,
+            },
+        }));
+        let back = decode(&encode(&q).unwrap()).unwrap();
+        let Body::Query(q2) = back.body else {
+            panic!("not a query")
+        };
+        assert_eq!(
+            q2.method,
+            Method::GetPeers {
+                info_hash: key,
+                scrape: true,
+            }
+        );
+        let q = msg(Body::Query(Query {
+            id,
+            want: None,
+            method: Method::AnnouncePeer {
+                info_hash: key,
+                port: 6881,
+                implied_port: false,
+                token: b"tok".to_vec(),
+                seed: true,
+            },
+        }));
+        let back = decode(&encode(&q).unwrap()).unwrap();
+        let Body::Query(q2) = back.body else {
+            panic!("not a query")
+        };
+        assert!(matches!(
+            q2.method,
+            Method::AnnouncePeer { seed: true, .. }
+        ));
+        // Filters require exactly 256 B; other lengths decode as absent.
+        let mut r = Response {
+            id,
+            bf_sd: Some([7u8; crate::bloom::BLOOM_LEN]),
+            bf_pe: Some([9u8; crate::bloom::BLOOM_LEN]),
+            ..Response::default()
+        };
+        round_trip(&msg(Body::Response(r.clone())));
+        r.bf_sd = None;
+        r.bf_pe = None;
+        round_trip(&msg(Body::Response(r)));
+    }
+
+    #[test]
     fn response_and_error_round_trips() {
         let nodes = vec![CompactNode {
             id: NodeId([9; 20]),
@@ -701,6 +800,7 @@ mod tests {
             samples: Some(vec![DhtKey([1; 20]), DhtKey([2; 20])]),
             num: Some(2),
             interval: Some(21600),
+            ..Response::default()
         };
         round_trip(&msg(Body::Response(full)));
         round_trip(&msg(Body::Response(Response {

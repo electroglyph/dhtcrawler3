@@ -243,9 +243,7 @@ async fn ask(
 ) -> (SocketAddr, Result<Response, QueryError>) {
     let method = match kind {
         Kind::FindNode => Method::FindNode { target },
-        Kind::GetPeers => Method::GetPeers {
-            info_hash: DhtKey::from(target),
-        },
+        Kind::GetPeers => Method::GetPeers { info_hash: DhtKey::from(target), scrape: false },
     };
     (
         node.addr,
@@ -376,8 +374,7 @@ pub(crate) async fn announce(
             info_hash: key,
             port,
             implied_port: false,
-            token,
-        };
+            token, seed: false };
         inner.query(sock, node.addr, method, Some(node.id))
     }))
     .await;
