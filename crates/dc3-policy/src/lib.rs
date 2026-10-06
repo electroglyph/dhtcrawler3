@@ -200,7 +200,7 @@ impl TermMatcher {
         // Digit-interleaved seeds: `p1thc` is one token in every variant
         // (leet maps `1` to `i`, giving `pithc`), so neither the plain nor
         // the leet form contains the seed. Stripping digits recovers it.
-        variants
+        if variants
             .all()
             .iter()
             .flat_map(|tokens| tokens.iter())
@@ -213,6 +213,26 @@ impl TermMatcher {
                 !stripped.is_empty()
                     && self.short.iter().any(|seed| stripped.contains(seed.as_str()))
             })
+        {
+            return true;
+        }
+        // Combined evasion: separators fragment AND digits interleave
+        // (`p.1.t.h.c` compacts to `p1thc`, which no single check above
+        // catches). Stripping digits from each variant's joined tokens
+        // recovers the seed.
+        variants.all().iter().any(|tokens| {
+            if tokens.is_empty() {
+                return false;
+            }
+            let compact: String = tokens.concat();
+            if !compact.chars().any(|c| c.is_numeric()) {
+                return false;
+            }
+            let stripped: String =
+                compact.chars().filter(|c| !c.is_numeric()).collect();
+            !stripped.is_empty()
+                && self.short.iter().any(|seed| stripped.contains(seed.as_str()))
+        })
     }
 
     /// Number of distinct terms.

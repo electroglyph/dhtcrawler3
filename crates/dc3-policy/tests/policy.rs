@@ -114,6 +114,18 @@ fn regression_f06_digit_interleaved_short_seeds_match() {
 }
 
 #[test]
+fn regression_f06_combined_separator_and_digit_evasion_matches() {
+    // F-06 follow-up: separators fragmenting AND digits interleaving at
+    // once (`p.1.t.h.c` compacts to `p1thc`) must not evade either.
+    let m = TermMatcher::load("pthc\n").unwrap();
+    for text in ["p.1t-h_c", "p 1 t h c", "p.1.t.h.c"] {
+        assert!(m.matches_affixed(text), "missed: {text:?}");
+    }
+    assert!(!m.matches_affixed("clean holiday photos"));
+    assert!(!m.matches_affixed("clean movie 2024"));
+}
+
+#[test]
 fn regression_f07_raw_line_length_is_bounded() {
     // F-07: the length gate measures the raw line, so a megabyte of
     // comment text cannot slip past it.

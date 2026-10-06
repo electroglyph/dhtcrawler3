@@ -205,9 +205,21 @@ impl<S: CrawlStore> Scraper<S> {
             });
         }
         let mut batch = Vec::new();
-        while let Some(done) = in_flight.next().await {
-            if let Some(done) = done {
-                batch.push(done);
+        // The drain respects `stop`: on cancellation the remaining
+        // in-flight scrapes are dropped (their futures are cancelled) and
+        // the completed prefix is still recorded, so shutdown never waits
+        // for a full batch or a 60s lookup timeout.
+        loop {
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => break,
+                done = in_flight.next() => {
+                    match done {
+                        Some(Some(done)) => batch.push(done),
+                        Some(None) => {}
+                        None => break,
+                    }
+                }
             }
         }
         self.finish(batch).await;

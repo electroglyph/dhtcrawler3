@@ -7,9 +7,10 @@
 //! 1. **It cannot crash.** Decoding is iterative with an explicit stack, so
 //!    nesting depth can never exhaust the thread stack during decoding, and
 //!    every limit in [`Limits`] is checked before memory is committed.
-//!    `Value`/`OwnedValue` drop/clone/`to_owned_value` recurse; keep
-//!    `max_depth` small or use the iterative [`Value::drop_deep`] /
-//!    [`OwnedValue::drop_deep`] / [`Value::to_owned_value`] helpers.
+//!    `Value`/`OwnedValue` `Drop` and `Clone` recurse (the compiler-generated
+//!    impls); keep `max_depth` small or tear values down with the iterative
+//!    [`Value::drop_deep`] / [`OwnedValue::drop_deep`] helpers.
+//!    [`Value::to_owned_value`] is iterative and stack-safe.
 //! 2. **It is strict where strictness matters.** Leading zeros, `-0`, empty
 //!    integers, integers outside `i64`, non-string keys, duplicate keys and
 //!    trailing bytes are errors.
@@ -177,13 +178,22 @@ impl<'a> Value<'a> {
                 },
                 Work::PushKey(k) => keys.push(k),
                 Work::CollectList(n) => {
-                    let start = results.len().saturating_sub(n);
+                    let start = results
+                        .len()
+                        .checked_sub(n)
+                        .expect("to_owned_value list underflow");
                     let items: Vec<OwnedValue> = results.drain(start..).collect();
                     results.push(OwnedValue::List(items));
                 }
                 Work::CollectDict(n) => {
-                    let vstart = results.len().saturating_sub(n);
-                    let kstart = keys.len().saturating_sub(n);
+                    let vstart = results
+                        .len()
+                        .checked_sub(n)
+                        .expect("to_owned_value dict value underflow");
+                    let kstart = keys
+                        .len()
+                        .checked_sub(n)
+                        .expect("to_owned_value dict key underflow");
                     let vals: Vec<OwnedValue> = results.drain(vstart..).collect();
                     let ks: Vec<Vec<u8>> = keys.drain(kstart..).collect();
                     let mut map = BTreeMap::new();
