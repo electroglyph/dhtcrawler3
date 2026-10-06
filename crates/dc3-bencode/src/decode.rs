@@ -125,15 +125,22 @@ impl<'a> Decoder<'a> {
                 continue;
             }
 
-            // A value begins here.
+            // A value begins here. Containers push a frame; scalars are gated
+            // by the same depth (their depth is stack.len() + 1).
             let start = self.pos;
             let value = match self.peek()? {
                 b'i' => {
+                    if stack.len() >= self.limits.max_depth {
+                        return self.err(ErrorKind::TooDeep);
+                    }
                     let v = self.parse_int()?;
                     self.count_item()?;
                     Value::Int(v)
                 }
                 b'0'..=b'9' => {
+                    if stack.len() >= self.limits.max_depth {
+                        return self.err(ErrorKind::TooDeep);
+                    }
                     let b = self.parse_bytes()?;
                     self.count_item()?;
                     Value::Bytes(b)
