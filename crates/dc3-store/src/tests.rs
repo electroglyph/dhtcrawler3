@@ -2438,6 +2438,7 @@ async fn schema_constraints(pool: PgPool) {
         "torrents_info_hash_v2_key",
         "pending_ready",
         "pending_gave_up",
+        "pending_seeders",
         "denylist_prefix",
         "reports_open",
         "reports_torrent",
@@ -2639,8 +2640,8 @@ async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
         .await
         .unwrap();
 
-    assert_eq!(s.purge_tombstoned(days(1)).await.unwrap(), 0);
-    assert_eq!(s.purge_tombstoned(Duration::from_secs(3600)).await.unwrap(), 1);
+    assert_eq!(s.purge_tombstoned(days(1), 1000).await.unwrap(), 0);
+    assert_eq!(s.purge_tombstoned(Duration::from_secs(3600), 1000).await.unwrap(), 1);
     assert!(raw_torrent(&pool, idb).await.deleted_at.is_some());
     let denied_id: i64 = sqlx::query_scalar("SELECT id FROM torrents WHERE dht_key = $1")
         .bind(c.0.as_slice())
@@ -2694,3 +2695,58 @@ async fn trim_removed_keys_keeps_the_newest(pool: PgPool) {
     assert_eq!(s.trim_removed_keys(0).await.unwrap(), 2);
     assert_eq!(s.removed_keys_count().await.unwrap(), 0);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn purge_tombstoned_takes_biggest_first_under_limit(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    for (n, size) in [(61u8, 10i64), (62, 30), (63, 20)] {
+        let k = key(n);
+        let id = s.complete(&k, &torrent(k, "sized")).await.unwrap();
+        let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+        let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+        assert!(s.tombstone_dead(id, item.last_seen_at, item.change_seq).await.unwrap());
+        sqlx::query(
+            "UPDATE torrents SET deleted_at = now() - interval '2 hours', total_size = $2 \
+              WHERE id = $1",
+        )
+        .bind(id)
+        .bind(size)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // Limit 2 removes the two biggest (30, 20); size 10 stays tombstoned.
+    assert_eq!(s.purge_tombstoned(Duration::ZERO, 2).await.unwrap(), 2);
+    let left: Vec<i64> = sqlx::query_scalar("SELECT total_size FROM torrents WHERE deleted_at IS NOT NULL")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, vec![10]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn fetch_queue_prefers_lively_keys(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // Three queued keys: one with an estimate, two without.
+    for n in [71u8, 72, 73] {
+        s.observe(
+            &[Observation { key: key(n), sightings: 1, priority: false }],
+            NO_LIMIT,
+        )
+        .await
+        .unwrap();
+    }
+    let ka = key(71);
+    s.note_fetch_estimate(&ka, 50).await.unwrap();
+    // The estimated key claims first despite a later next_attempt_at:
+    // UPDATE..RETURNING order is unspecified, so claim one row at a time
+    // (as the fetch workers do with CLAIM_BATCH=1).
+    let one = s.claim(1, Duration::from_secs(120)).await.unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].dht_key, ka);
+    // The two NULL estimates follow (NULLS LAST), oldest attempt first.
+    let rest = s.claim(3, Duration::from_secs(120)).await.unwrap();
+    assert_eq!(rest.len(), 2);
+    assert!(rest.iter().all(|i| i.dht_key != ka));
+}
+

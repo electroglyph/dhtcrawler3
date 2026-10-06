@@ -53,6 +53,12 @@ SELECT DISTINCT substring(d.key FROM 1 FOR 20) AS k
  WHERE substring(d.key FROM 1 FOR 20) = ANY($1::bytea[])";
 
 /// Queues new keys and counts sightings of keys already queued.
+///
+/// No `seeders_est` backfill here: a queued key has no `torrents` row by
+/// construction (a matching row counts as known and is bumped instead), so
+/// there is nothing to join. Retries learn liveness through
+/// [`Store::note_fetch_estimate`] instead (LB-21): first attempts are
+/// always NULL, ordering helps retries.
 const OBSERVE_QUEUE_SQL: &str = "\
 INSERT INTO pending AS p (dht_key, seen_count)
 SELECT k, n FROM unnest($1::bytea[], $2::bigint[]) AS i(k, n)
@@ -75,7 +81,7 @@ UPDATE pending p
         WHERE NOT q.gave_up
           AND q.next_attempt_at <= now()
           AND (q.lease_until IS NULL OR q.lease_until < now())
-        ORDER BY q.next_attempt_at
+        ORDER BY q.seeders_est DESC NULLS LAST, q.next_attempt_at
         LIMIT $1
           FOR UPDATE SKIP LOCKED)
 RETURNING p.dht_key, p.attempts, p.seen_count";
@@ -181,9 +187,13 @@ UPDATE torrents
 /// tombstones (the block record) forever.
 const PURGE_TOMBSTONED_SQL: &str = "\
 DELETE FROM torrents
- WHERE deleted_at IS NOT NULL
-   AND deleted_at < now() - make_interval(secs => $1)
-   AND NOT dc3_key_denied(dht_key, info_hash_v1, info_hash_v2)";
+ WHERE id IN (
+        SELECT t.id FROM torrents t
+         WHERE t.deleted_at IS NOT NULL
+           AND t.deleted_at < now() - make_interval(secs => $1)
+           AND NOT dc3_key_denied(t.dht_key, t.info_hash_v1, t.info_hash_v2)
+         ORDER BY t.total_size DESC
+         LIMIT $2)";
 
 /// Upserts removal memory: a new row starts at one consecutive removal, an
 /// existing one escalates while its sighting counter restarts.
@@ -742,17 +752,35 @@ impl Store {
         Ok(true)
     }
 
-    /// Deletes scrape tombstones older than `grace`, so their keys may be
-    /// re-admitted if still sampled. Denylist tombstones are never purged:
-    /// they are the block record. Returns the number removed. The grace
-    /// lets the indexer observably drop the document first (it sees
-    /// `visible=false` through the change feed).
-    pub async fn purge_tombstoned(&self, grace: Duration) -> Result<u64> {
+    /// Deletes up to `limit` scrape tombstones older than `grace`, biggest
+    /// first, so each sweep frees the most disk (win 5). Denylist tombstones
+    /// are never purged: they are the block record. Returns the number
+    /// removed. The grace lets the indexer observably drop the document
+    /// first (it sees `visible=false` through the change feed).
+    pub async fn purge_tombstoned(&self, grace: Duration, limit: i64) -> Result<u64> {
         let res = sqlx::query(PURGE_TOMBSTONED_SQL)
             .bind(secs(grace))
+            .bind(limit.max(0))
             .execute(&self.pool)
             .await?;
         Ok(res.rows_affected())
+    }
+
+    /// Records a seeder estimate observed for free by a fetch scrape lookup
+    /// (§8 piggyback): sets `pending.seeders_est` for the next retry's
+    /// liveness ordering. Best-effort by design; the caller logs failures.
+    /// Unaware lookups must not call this (NULL means unscraped, 0 means
+    /// measured dead).
+    pub async fn note_fetch_estimate(&self, key: &DhtKey, seeders_est: u32) -> Result<()> {
+        let est = i32::try_from(seeders_est).map_err(|_| {
+            StoreError::Invalid(format!("seeders_est {seeders_est} exceeds i32"))
+        })?;
+        sqlx::query("UPDATE pending SET seeders_est = $2 WHERE dht_key = $1")
+            .bind(key.as_bytes().as_slice())
+            .bind(est)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Notes a removal in `removed_keys` outside [`Store::tombstone_dead`]

@@ -948,6 +948,9 @@ mod tests {
             async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
                 Vec::new()
             }
+            async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
+                dc3_dht::ScrapeReport::default()
+            }
             fn own_ips(&self) -> Vec<IpAddr> {
                 Vec::new()
             }

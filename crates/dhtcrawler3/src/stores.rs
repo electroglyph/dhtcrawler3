@@ -66,7 +66,17 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
         old_change_seq: i64,
     ) -> impl Future<Output = Result<bool>> + Send;
     /// See [`Store::purge_tombstoned`].
-    fn purge_tombstoned(&self, grace: Duration) -> impl Future<Output = Result<u64>> + Send;
+    fn purge_tombstoned(
+        &self,
+        grace: Duration,
+        limit: i64,
+    ) -> impl Future<Output = Result<u64>> + Send;
+    /// See [`Store::note_fetch_estimate`].
+    fn note_fetch_estimate(
+        &self,
+        key: &DhtKey,
+        seeders_est: u32,
+    ) -> impl Future<Output = Result<()>> + Send;
     /// See [`Store::trim_removed_keys`].
     fn trim_removed_keys(&self, cap: i64) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::removed_keys_count`].
@@ -151,8 +161,20 @@ impl CrawlStore for Store {
         Store::tombstone_dead(self, id, old_last_seen_at, old_change_seq)
     }
 
-    fn purge_tombstoned(&self, grace: Duration) -> impl Future<Output = Result<u64>> + Send {
-        Store::purge_tombstoned(self, grace)
+    fn purge_tombstoned(
+        &self,
+        grace: Duration,
+        limit: i64,
+    ) -> impl Future<Output = Result<u64>> + Send {
+        Store::purge_tombstoned(self, grace, limit)
+    }
+
+    fn note_fetch_estimate(
+        &self,
+        key: &DhtKey,
+        seeders_est: u32,
+    ) -> impl Future<Output = Result<()>> + Send {
+        Store::note_fetch_estimate(self, key, seeders_est)
     }
 
     fn trim_removed_keys(&self, cap: i64) -> impl Future<Output = Result<u64>> + Send {

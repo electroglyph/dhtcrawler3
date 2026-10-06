@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use dc3_core::DhtKey;
 use dc3_dht::compact::canonical_addr;
+use dc3_dht::ScrapeReport;
 
 /// What the crawler needs from a DHT node. Implemented by [`dc3_dht::Dht`];
 /// tests may substitute their own.
@@ -21,6 +22,14 @@ pub trait PeerSource: Clone + Send + Sync + 'static {
         key: DhtKey,
         timeout: Duration,
     ) -> impl Future<Output = Vec<SocketAddr>> + Send;
+    /// Peers for `key` plus the BEP 33 scrape filters the traversal saw
+    /// (§8 piggyback: the traversal is already paid for by the fetch, so
+    /// the filters are free liveness data for the queue's ordering).
+    fn scrape_peers(
+        &self,
+        key: DhtKey,
+        timeout: Duration,
+    ) -> impl Future<Output = ScrapeReport> + Send;
     /// Our own IP addresses (bound and externally voted).
     fn own_ips(&self) -> Vec<IpAddr>;
     /// Our own bound socket addresses.
@@ -34,6 +43,14 @@ impl PeerSource for dc3_dht::Dht {
         timeout: Duration,
     ) -> impl Future<Output = Vec<SocketAddr>> + Send {
         dc3_dht::Dht::get_peers(self, key, timeout)
+    }
+
+    fn scrape_peers(
+        &self,
+        key: DhtKey,
+        timeout: Duration,
+    ) -> impl Future<Output = ScrapeReport> + Send {
+        dc3_dht::Dht::scrape(self, key, timeout)
     }
 
     fn own_ips(&self) -> Vec<IpAddr> {

@@ -599,7 +599,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                 queue.push_back(peer);
             }
         }
-        let lookup = self.peers.get_peers(key, self.tuning.get_peers_timeout);
+        let lookup = self.peers.scrape_peers(key, self.tuning.get_peers_timeout);
         tokio::pin!(lookup);
         let mut lookup_done = false;
         let mut attempts = 0usize;
@@ -624,10 +624,20 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                 break;
             }
             tokio::select! {
-                peers = &mut lookup, if !lookup_done => {
+                report = &mut lookup, if !lookup_done => {
                     lookup_done = true;
                     own = OwnAddrs::of(&self.peers);
-                    for peer in peers {
+                    // §8 piggyback: the traversal was already paid for, so
+                    // its estimate is free liveness data for the queue's
+                    // ordering. Unaware (None) leaves NULL, never 0.
+                    // Best-effort: a lost write only costs ordering.
+                    if let Some(est) = report.seeders_est()
+                        && let Ok(est) = u32::try_from(est)
+                        && let Err(e) = self.store.note_fetch_estimate(&key, est).await
+                    {
+                        tracing::debug!(error = %e, "note_fetch_estimate failed");
+                    }
+                    for peer in report.peers {
                         if let Some(peer) = self.filter.accept(peer, &own)
                             && seen.insert(peer)
                         {
@@ -1126,6 +1136,12 @@ mod tests {
         async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
             self.0.clone()
         }
+        async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
+            dc3_dht::ScrapeReport {
+                peers: self.0.clone(),
+                ..dc3_dht::ScrapeReport::default()
+            }
+        }
         fn own_ips(&self) -> Vec<IpAddr> {
             vec![ip("127.0.0.1")]
         }
@@ -1146,7 +1162,7 @@ mod tests {
         }
     }
 
-    fn fetcher(store: &MemoryStore, peers: FixedPeers) -> Arc<Fetcher<MemoryStore, FixedPeers>> {
+    fn fetcher<P: PeerSource>(store: &MemoryStore, peers: P) -> Arc<Fetcher<MemoryStore, P>> {
         let filter = PeerFilter {
             allow_private: true,
             by_endpoint: true,
@@ -1330,5 +1346,46 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    /// A lookup that finds no peers but carries one seed's filter (§8: the
+    /// traversal was paid for, the estimate is free).
+    #[derive(Clone)]
+    struct FilteredPeers;
+
+    impl PeerSource for FilteredPeers {
+        async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+        fn own_ips(&self) -> Vec<IpAddr> {
+            Vec::new()
+        }
+        fn own_endpoints(&self) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+        async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
+            let mut sd = dc3_dht::bloom::ScrapeBloom::empty();
+            sd.insert_ip(&"127.0.0.1".parse().unwrap());
+            dc3_dht::ScrapeReport {
+                peers: Vec::new(),
+                seed_filters: vec![sd.0],
+                peer_filters: vec![[0u8; dc3_dht::bloom::BLOOM_LEN]],
+                aware: 1,
+                unaware: 0,
+                families_attempted: 2,
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_piggyback_records_the_free_estimate() {
+        let store = MemoryStore::new();
+        let k = DhtKey([7; 20]);
+        store.enqueue(k);
+        let f = fetcher(&store, FilteredPeers);
+        // No peers, so the fetch fails — but the free estimate is kept for
+        // the retry's liveness ordering.
+        assert_eq!(f.process(&item(k)).await, FetchOutcome::NoPeers);
+        assert_eq!(store.pending_seeders(&k), Some(1));
     }
 }

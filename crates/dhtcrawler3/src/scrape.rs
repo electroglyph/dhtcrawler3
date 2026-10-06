@@ -37,6 +37,9 @@ pub const SCRAPE_IDLE_MIN: Duration = Duration::from_secs(60);
 pub const SCRAPE_IDLE_MAX: Duration = Duration::from_secs(600);
 /// Cap of `removed_keys` rows (bep33.md §4a: ~1M LRU).
 pub const SCRAPE_REMOVED_KEYS_CAP: i64 = dc3_store::MAX_REMOVED_KEYS;
+/// Most tombstones one sweep deletes (bounds one sweep's write load; the
+/// rest go on the next sweep, biggest first).
+pub const MAX_PURGE_BATCH: i64 = 10_000;
 
 const METRIC_SCRAPES: &str = "dc3_scrapes_total";
 const METRIC_TOMBSTONES: &str = "dc3_scrape_tombstones_total";
@@ -277,7 +280,7 @@ impl<S: CrawlStore> Scraper<S> {
 
     /// Purges old scrape tombstones and trims removal memory.
     async fn sweep(&self) {
-        match self.store.purge_tombstoned(self.tuning.purge_grace).await {
+        match self.store.purge_tombstoned(self.tuning.purge_grace, MAX_PURGE_BATCH).await {
             Ok(n) => {
                 if n > 0 {
                     metrics::counter!(METRIC_PURGED).increment(n);

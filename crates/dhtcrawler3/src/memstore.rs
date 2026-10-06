@@ -39,6 +39,8 @@ struct Pending {
     next_attempt: Instant,
     lease_until: Option<Instant>,
     gave_up: bool,
+    /// Last piggybacked seeder estimate (`None` means unscraped).
+    seeders: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -55,7 +57,7 @@ struct State {
     /// `None` means [`MEMORY_FAIL_BACKOFF`].
     fail_backoff: Option<Duration>,
     scrapes: HashMap<DhtKey, MemScrape>,
-    tombstoned: HashMap<DhtKey, (Instant, i64)>,
+    tombstoned: HashMap<DhtKey, (Instant, i64, u64)>,
     removed: HashMap<[u8; DENY_PREFIX_LEN], RemovedEntry>,
 }
 
@@ -157,6 +159,7 @@ impl MemoryStore {
             next_attempt: Instant::now(),
             lease_until: None,
             gave_up: false,
+            seeders: None,
         });
     }
 
@@ -183,6 +186,11 @@ impl MemoryStore {
     /// Number of `fail` and `give_up` calls for `key`.
     pub fn failures(&self, key: &DhtKey) -> u32 {
         self.lock().fails.get(key).copied().unwrap_or(0)
+    }
+
+    /// The piggybacked seeder estimate queued for `key`, if any.
+    pub fn pending_seeders(&self, key: &DhtKey) -> Option<u32> {
+        self.lock().pending.get(key).and_then(|p| p.seeders)
     }
 
     fn is_denied(state: &State, keys: &[&[u8]]) -> bool {
@@ -231,6 +239,7 @@ impl CrawlStore for MemoryStore {
                         next_attempt: now,
                         lease_until: None,
                         gave_up: false,
+                        seeders: None,
                     },
                 );
                 out.queued = out.queued.saturating_add(1);
@@ -244,17 +253,28 @@ impl CrawlStore for MemoryStore {
         let mut state = self.lock();
         let now = Instant::now();
         let limit = usize::try_from(n.max(0)).unwrap_or(0);
-        let mut due: Vec<(Instant, DhtKey)> = state
+        // Liveness first (known-live keys), then oldest attempt: mirrors
+        // CLAIM_SQL's ORDER BY seeders_est DESC NULLS LAST, next_attempt_at.
+        let mut due: Vec<(Option<u32>, Instant, DhtKey)> = state
             .pending
             .iter()
             .filter(|(_, p)| {
                 !p.gave_up && p.next_attempt <= now && p.lease_until.is_none_or(|l| l < now)
             })
-            .map(|(k, p)| (p.next_attempt, *k))
+            .map(|(k, p)| (p.seeders, p.next_attempt, *k))
             .collect();
-        due.sort();
+        due.sort_by(|a, b| {
+            match (a.0, b.0) {
+                (Some(x), Some(y)) => y.cmp(&x),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+        });
         let mut out = Vec::new();
-        for (_, key) in due.into_iter().take(limit) {
+        for (_, _, key) in due.into_iter().take(limit) {
             if let Some(p) = state.pending.get_mut(&key) {
                 p.lease_until = Some(now + lease);
                 out.push(PendingItem {
@@ -501,9 +521,10 @@ impl CrawlStore for MemoryStore {
         if !guarded {
             return Ok(false);
         }
+        let size = state.torrents.get(&key).map_or(0, |(_, t)| t.total_size);
         state.torrents.remove(&key);
         state.scrapes.remove(&key);
-        state.tombstoned.insert(key, (Instant::now(), id));
+        state.tombstoned.insert(key, (Instant::now(), id, size));
         let entry = state.removed.entry(prefix(key.as_bytes())).or_insert(RemovedEntry {
             removed_at: Instant::now(),
             removals: 0,
@@ -515,23 +536,35 @@ impl CrawlStore for MemoryStore {
         Ok(true)
     }
 
-    async fn purge_tombstoned(&self, grace: Duration) -> Result<u64> {
+    async fn purge_tombstoned(&self, grace: Duration, limit: i64) -> Result<u64> {
         let mut state = self.lock();
         let now = Instant::now();
-        let doomed: Vec<DhtKey> = state
+        // Biggest first under the cap (win 5): each sweep frees the most disk.
+        let mut doomed: Vec<(u64, DhtKey)> = state
             .tombstoned
             .iter()
-            .filter(|(key, (at, _))| {
+            .filter(|(key, (at, _, _))| {
                 now.saturating_duration_since(*at) >= grace
                     && !Self::is_denied(&state, &[key.as_bytes()])
             })
-            .map(|(key, _)| *key)
+            .map(|(key, (_, _, size))| (*size, *key))
             .collect();
-        let n = doomed.len();
-        for key in doomed {
+        doomed.sort();
+        doomed.reverse();
+        let cap = usize::try_from(limit.max(0)).unwrap_or(0);
+        let n = doomed.len().min(cap);
+        for (_, key) in doomed.into_iter().take(n) {
             state.tombstoned.remove(&key);
         }
         Ok(u64::try_from(n).unwrap_or(u64::MAX))
+    }
+
+    async fn note_fetch_estimate(&self, key: &DhtKey, seeders_est: u32) -> Result<()> {
+        let mut state = self.lock();
+        if let Some(p) = state.pending.get_mut(key) {
+            p.seeders = Some(seeders_est);
+        }
+        Ok(())
     }
 
     async fn trim_removed_keys(&self, cap: i64) -> Result<u64> {
@@ -758,7 +791,7 @@ mod scrape_tests {
         // A denied tombstone is never purged.
         s.preload_denial(k.as_bytes(), DenyReason::Other);
         assert!(s.is_denied(&[k.as_bytes()]).await.unwrap());
-        assert_eq!(s.purge_tombstoned(Duration::ZERO).await.unwrap(), 0);
+        assert_eq!(s.purge_tombstoned(Duration::ZERO, 1000).await.unwrap(), 0);
         // Claiming skips denied rows.
         s.complete(&k, &torrent(k)).await.unwrap_err();
         assert!(s.claim_scrape_due(10, Duration::ZERO, Duration::ZERO).await.unwrap().is_empty());
