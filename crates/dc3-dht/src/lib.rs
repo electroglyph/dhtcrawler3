@@ -55,9 +55,10 @@ use tokio_util::sync::DropGuard;
 
 pub use compact::{Family, is_dialable};
 pub use config::{
-    DEFAULT_BOOTSTRAP, DEFAULT_CLIENT_VERSION, DEFAULT_MAX_PACKETS_PER_SEC, DEFAULT_PORT,
-    DEFAULT_RESPONDER_BYTES_PER_SEC, DEFAULT_RESPONDER_REPLIES_PER_SEC,
-    DEFAULT_SAMPLER_CONCURRENCY, DhtConfig, DhtTuning, MAX_SAMPLER_CONCURRENCY,
+    DEFAULT_BOOTSTRAP, DEFAULT_CLIENT_VERSION, DEFAULT_MAX_PACKETS_PER_SEC,
+    DEFAULT_PORT, DEFAULT_RESPONDER_BYTES_PER_SEC, DEFAULT_RESPONDER_REPLIES_PER_SEC,
+    DEFAULT_SAMPLER_CONCURRENCY, DEFAULT_SCRAPE_PACKETS_PER_SEC, DhtConfig, DhtTuning,
+    MAX_SAMPLER_CONCURRENCY,
 };
 pub use node::MIN_GOOD_NODES;
 pub use node_id::NodeId;
@@ -120,11 +121,37 @@ pub struct Discovered {
     pub from: IpAddr,
 }
 
+/// A BEP 33 scrape result for one infohash, merged over the node's
+/// address families.
+#[derive(Clone, Debug, Default)]
+pub struct ScrapeReport {
+    /// Distinct dialable peers found (as in [`Dht::get_peers`]).
+    pub peers: Vec<std::net::SocketAddr>,
+    /// `BFsd` (seed) filters, one per aware response.
+    pub seed_filters: Vec<[u8; crate::bloom::BLOOM_LEN]>,
+    /// `BFpe` (peer) filters, one per aware response (sanity/dedup only,
+    /// never stored).
+    pub peer_filters: Vec<[u8; crate::bloom::BLOOM_LEN]>,
+    /// Responses that carried filter keys.
+    pub aware: usize,
+    /// Responses without filter keys.
+    pub unaware: usize,
+}
+
+impl ScrapeReport {
+    /// Estimated seeders: the BEP counting formula over the OR-union of
+    /// all aware `BFsd` filters. `None` means UNKNOWN — zero aware
+    /// responses, or a saturated union. An empty union (aware responses,
+    /// no seeds) estimates to `Some(0)`.
+    pub fn seeders_est(&self) -> Option<u64> {
+        crate::bloom::estimate_or(&self.seed_filters)
+    }
+}
+
 /// A running DHT node. Cheap to clone; the node stops when
 /// [`shutdown`](Dht::shutdown) is called or the last handle is dropped.
 #[derive(Clone)]
-pub struct Dht {
-    inner: Arc<Inner>,
+pub struct Dht {    inner: Arc<Inner>,
     _stop_on_drop: Arc<DropGuard>,
 }
 
@@ -185,6 +212,46 @@ impl Dht {
             .await
             .into_iter()
             .fold(0, usize::saturating_add)
+    }
+
+    /// BEP 33 scrape for `key` on every address family: iterative
+    /// `get_peers` traversals with `scrape=1` on the dedicated scrape
+    /// budget. Filters from all aware responses (both families) are kept
+    /// for OR-union by the caller; see [`ScrapeReport::seeders_est`].
+    ///
+    /// The sibling of [`get_peers`](Dht::get_peers): `get_peers` keeps its
+    /// signature so existing callers are untouched.
+    pub async fn scrape(&self, key: DhtKey, timeout: Duration) -> ScrapeReport {
+        let deadline = after(Instant::now(), timeout);
+        let lookups = self
+            .inner
+            .sockets
+            .iter()
+            .map(|sock| lookup::scrape(&self.inner, sock, key, deadline));
+        let mut peers = Vec::new();
+        let mut seen = HashSet::new();
+        let mut seed_filters = Vec::new();
+        let mut peer_filters = Vec::new();
+        let mut aware = 0usize;
+        let mut unaware = 0usize;
+        for outcome in join_all(lookups).await {
+            for peer in outcome.peers {
+                if seen.insert(peer) {
+                    peers.push(peer);
+                }
+            }
+            seed_filters.extend(outcome.seed_filters);
+            peer_filters.extend(outcome.peer_filters);
+            aware = aware.saturating_add(outcome.aware);
+            unaware = unaware.saturating_add(outcome.unaware);
+        }
+        ScrapeReport {
+            peers,
+            seed_filters,
+            peer_filters,
+            aware,
+            unaware,
+        }
     }
 
     /// Current counters and sizes.

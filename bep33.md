@@ -5,7 +5,7 @@ bounding disk on small machines. Prioritizes unchecked torrents first, then
 stalest recheck. Torrents with no seeders are removed (re-added later by the
 normal pipeline if they become live).
 
-Status: in implementation (2026-10-06). Done: §0 bloom filter + estimator (`dc3-dht/src/bloom.rs`). Next: §2 krpc scrape/seed wire fields. Everything in §1 was re-verified against
+Status: in implementation (2026-10-06). Done: §0 bloom filter + estimator (`dc3-dht/src/bloom.rs`); §2 krpc scrape/seed wire fields (`krpc.rs`: `GetPeers{scrape}`, `AnnouncePeer{seed}`, `BFsd`/`BFpe` 256 B strict); §2+§5 answer-half (`peer_store.rs` seed flag + per-family `BFsd`/`BFpe`, `responder.rs` scrape answers with 532 B headroom, `lookup.rs` scrape traversal + `ScrapeOutcome` OR-union estimator, `node.rs` dedicated scrape bucket + `query_scrape`, `Dht::scrape` sibling API, `scrape_packets_per_sec`/`scrape_query_timeout` knobs). Next: §3 schema migration + store methods. Everything in §1 was re-verified against
 the tree on 2026-10-06 (exact `file:line` throughout); §10 logs what the
 double-check corrected. §11 adds executable proofs (scripts in
 `/tmp/opencode/bep33proof/` plus `/tmp/bep33_check_vectors.py`,

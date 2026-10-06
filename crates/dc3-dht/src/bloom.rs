@@ -123,6 +123,22 @@ pub fn estimate_from_zeros(zeros: usize) -> Option<f64> {
     Some((z / M).ln() / (K * denom))
 }
 
+/// Estimated set size of the OR-union of raw 256-byte filters, rounded
+/// down. `None` when there are no filters (UNKNOWN: no aware response,
+/// §3) or the union is saturated (UNKNOWN, §0). An empty union (aware
+/// responses, no members of the class) estimates to `Some(0)`.
+#[must_use]
+pub fn estimate_or(filters: &[[u8; BLOOM_LEN]]) -> Option<u64> {
+    if filters.is_empty() {
+        return None;
+    }
+    let mut union = ScrapeBloom::empty();
+    for f in filters {
+        union.union_into(&ScrapeBloom(*f));
+    }
+    union.estimate().map(|n| n.floor() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

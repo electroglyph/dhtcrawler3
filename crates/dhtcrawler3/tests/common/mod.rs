@@ -76,6 +76,7 @@ pub fn node_config(bootstrap: &[SocketAddr], sampler: bool) -> DhtConfig {
         bootstrap: bootstrap.iter().map(ToString::to_string).collect(),
         state_file: None,
         max_packets_per_sec: 2000,
+        scrape_packets_per_sec: 2000,
         sampler,
         sampler_concurrency: 8,
         read_only: false,

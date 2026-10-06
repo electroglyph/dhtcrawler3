@@ -64,6 +64,7 @@ fn config(bootstrap: &[SocketAddr]) -> DhtConfig {
         bootstrap: bootstrap.iter().map(ToString::to_string).collect(),
         state_file: None,
         max_packets_per_sec: 2000,
+        scrape_packets_per_sec: 2000,
         sampler: false,
         sampler_concurrency: 8,
         read_only: false,
@@ -402,6 +403,7 @@ async fn private_network_inner() {
         port: 7000,
         implied_port: false,
         token: b"not-a-token".to_vec(),
+        seed: false,
     };
     let reply = client.call(target_addr, bad).await;
     match &reply.body {
@@ -410,7 +412,7 @@ async fn private_network_inner() {
     }
     assert!(target.stats().errors_sent > errors_before);
     let lookup = client
-        .call(target_addr, Method::GetPeers { info_hash: key })
+        .call(target_addr, Method::GetPeers { info_hash: key, scrape: false })
         .await;
     let r = response(&lookup);
     assert_eq!(r.values, None, "an announce with a bad token was stored");
@@ -423,11 +425,12 @@ async fn private_network_inner() {
         port: 1,
         implied_port: true,
         token,
+        seed: false,
     };
     let ok = client.call(target_addr, good).await;
     assert_eq!(response(&ok).id, target.node_ids()[0]);
     let lookup = client
-        .call(target_addr, Method::GetPeers { info_hash: key })
+        .call(target_addr, Method::GetPeers { info_hash: key, scrape: false })
         .await;
     assert_eq!(response(&lookup).values, Some(vec![client.addr()]));
     // The target reported both queries, with the client as the source.
@@ -846,6 +849,7 @@ async fn full_sink_drops_and_counts() {
                 addr(&node),
                 Method::GetPeers {
                     info_hash: random_key(),
+                    scrape: false,
                 },
             )
             .await;

@@ -101,11 +101,27 @@ pub(crate) fn answer(
     match &query.method {
         Method::Ping => {}
         Method::FindNode { .. } | Method::Other { .. } => with_nodes(&mut response),
-        Method::GetPeers { info_hash, .. } => {
+        Method::GetPeers { info_hash, scrape } => {
             response.token = Some(tokens.issue(ctx.src.ip()).to_vec());
-            let values = store.peers(info_hash, ctx.transport, MAX_VALUES_PER_REPLY, ctx.now);
+            // For scrape=1 reserve 532 B up front for BFsd/BFpe (2x256 B
+            // payload + 20 B bencode keys/overhead, §5): fewer values now so
+            // the filters still fit after values-first trim.
+            let max_values = if *scrape {
+                MAX_VALUES_PER_REPLY.min(20)
+            } else {
+                MAX_VALUES_PER_REPLY
+            };
+            let values = store.peers(info_hash, ctx.transport, max_values, ctx.now);
             if !values.is_empty() {
                 response.values = Some(values);
+            }
+            // BEP 33: scrape=1 with local entries gains BFsd/BFpe; without
+            // entries the response carries no filters (§0).
+            if *scrape
+                && let Some((sd, pe)) = store.filters(info_hash, ctx.transport, ctx.now)
+            {
+                response.bf_sd = Some(sd.0);
+                response.bf_pe = Some(pe.0);
             }
             with_nodes(&mut response);
             event = Some(Discovered {
@@ -120,6 +136,7 @@ pub(crate) fn answer(
             port,
             implied_port,
             token,
+            seed,
             ..
         } => {
             if !tokens.verify(ctx.src.ip(), token) {
@@ -148,7 +165,7 @@ pub(crate) fn answer(
                 };
             }
             // A refused announce is answered like any other, but not reported.
-            if store.announce(*info_hash, peer, ctx.now) == Announced::Stored {
+            if store.announce(*info_hash, peer, *seed, ctx.now) == Announced::Stored {
                 event = Some(Discovered {
                     key: *info_hash,
                     source: Source::Announce,
@@ -456,7 +473,7 @@ mod tests {
             })
             .collect();
         for peer in v4.iter().chain(&v6) {
-            f.store.announce(key, *peer, f.now);
+            f.store.announce(key, *peer, false, f.now);
         }
         let all4: HashSet<SocketAddr> = v4.iter().copied().collect();
         let all6: HashSet<SocketAddr> = v6.iter().copied().collect();
@@ -530,6 +547,61 @@ mod tests {
     }
 
     #[test]
+    fn scrape_answers_carry_filters_only_with_entries() {
+        let mut f = Fixture::new();
+        let key = DhtKey([7; 20]);
+        // No local entries: a scrape carries no filters (§0).
+        let (reply, _) = f
+            .ask(
+                src(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: true,
+                }),
+            )
+            .unwrap();
+        let r = response(&reply);
+        assert_eq!(r.bf_sd, None);
+        assert_eq!(r.bf_pe, None);
+        // One seed + one leecher from distinct dialable IPs.
+        f.store
+            .announce(key, "8.8.1.1:6881".parse().unwrap(), true, f.now);
+        f.store
+            .announce(key, "8.8.2.2:6881".parse().unwrap(), false, f.now);
+        // A plain get_peers never carries filters.
+        let (reply, _) = f
+            .ask(
+                src(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: false,
+                }),
+            )
+            .unwrap();
+        let r = response(&reply);
+        assert_eq!(r.bf_sd, None);
+        assert_eq!(r.bf_pe, None);
+        // A scrape does: both filters are 256 B and survive the wire.
+        let (reply, _) = f
+            .ask(
+                src(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: true,
+                }),
+            )
+            .unwrap();
+        let r = response(&reply);
+        assert_eq!(r.bf_sd.as_ref().map(|b| b.len()), Some(256));
+        assert_eq!(r.bf_pe.as_ref().map(|b| b.len()), Some(256));
+        assert_ne!(r.bf_sd, r.bf_pe);
+        let back = krpc::decode(&krpc::encode(&reply).unwrap()).unwrap();
+        let r = response(&back);
+        assert_eq!(r.bf_sd.as_ref().map(|b| b.len()), Some(256));
+        assert_eq!(r.bf_pe.as_ref().map(|b| b.len()), Some(256));
+    }
+
+    #[test]
     fn sample_infohashes() {
         let mut f = Fixture::new();
         let (reply, _) = f
@@ -547,7 +619,7 @@ mod tests {
         assert_eq!(r.nodes.as_ref().map(Vec::len), Some(K));
         for i in 0..30u8 {
             let peer = SocketAddr::from(([8, i, 4, 4], 1));
-            f.store.announce(DhtKey([i; 20]), peer, f.now);
+            f.store.announce(DhtKey([i; 20]), peer, false, f.now);
         }
         let (reply, _) = f
             .ask(

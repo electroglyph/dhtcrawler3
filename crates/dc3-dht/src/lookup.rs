@@ -38,6 +38,9 @@ pub(crate) const MAX_LOOKUP_PEERS: usize = 1024;
 enum Kind {
     FindNode,
     GetPeers,
+    /// BEP 33 scrape: a `get_peers` traversal with `scrape=1` that also
+    /// collects `BFsd`/`BFpe` filters from aware responses.
+    Scrape,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +66,44 @@ pub(crate) struct Outcome {
     pub(crate) peers: Vec<SocketAddr>,
 }
 
+/// What a scrape traversal found: like [`Outcome`] plus the BEP 33
+/// filters of every aware response (one entry per response that carried
+/// filter keys) and the aware/unaware response counts.
+pub(crate) struct ScrapeOutcome {
+    /// Dialable peers from `values`, IPv4-mapped ones as IPv4.
+    pub(crate) peers: Vec<SocketAddr>,
+    /// `BFsd` filters of aware responses (seeds).
+    pub(crate) seed_filters: Vec<[u8; crate::bloom::BLOOM_LEN]>,
+    /// `BFpe` filters of aware responses (peers).
+    pub(crate) peer_filters: Vec<[u8; crate::bloom::BLOOM_LEN]>,
+    /// Responses that carried filter keys.
+    pub(crate) aware: usize,
+    /// Responses without filter keys.
+    pub(crate) unaware: usize,
+}
+
+impl ScrapeOutcome {
+    /// OR-union of all `BFsd` filters; `None` when no response was aware
+    /// (UNKNOWN, §3) or the union is saturated (UNKNOWN, §0).
+    pub fn seeders_union(&self) -> Option<crate::bloom::ScrapeBloom> {
+        if self.aware == 0 {
+            return None;
+        }
+        let mut union = crate::bloom::ScrapeBloom::empty();
+        for f in &self.seed_filters {
+            union.union_into(&crate::bloom::ScrapeBloom(*f));
+        }
+        Some(union)
+    }
+
+    /// Estimated seeders from the OR-union of all aware `BFsd` filters:
+    /// `None` means UNKNOWN (no aware response, or a saturated union).
+    /// An empty union (live entries but no seeds seen) estimates to `0`.
+    pub fn seeders_est(&self) -> Option<u64> {
+        crate::bloom::estimate_or(&self.seed_filters)
+    }
+}
+
 /// The pure bookkeeping of one lookup.
 struct Lookup {
     target: NodeId,
@@ -77,6 +118,14 @@ struct Lookup {
     seen_ids: HashSet<NodeId>,
     peers: Vec<SocketAddr>,
     peer_set: HashSet<SocketAddr>,
+    /// `BFsd` filters of aware scrape responses (one per response).
+    seed_filters: Vec<[u8; crate::bloom::BLOOM_LEN]>,
+    /// `BFpe` filters of aware scrape responses (one per response).
+    peer_filters: Vec<[u8; crate::bloom::BLOOM_LEN]>,
+    /// Scrape responses that carried filter keys.
+    aware: usize,
+    /// Scrape responses without filter keys.
+    unaware: usize,
 }
 
 impl Lookup {
@@ -99,6 +148,10 @@ impl Lookup {
             seen_ids: HashSet::new(),
             peers: Vec::new(),
             peer_set: HashSet::new(),
+            seed_filters: Vec::new(),
+            peer_filters: Vec::new(),
+            aware: 0,
+            unaware: 0,
         }
     }
 
@@ -189,7 +242,7 @@ impl Lookup {
         };
         cand.state = CandState::Responded;
         cand.token = response.token;
-        if self.kind == Kind::GetPeers {
+        if self.kind == Kind::GetPeers || self.kind == Kind::Scrape {
             for peer in response.values.unwrap_or_default() {
                 if self.peers.len() >= MAX_LOOKUP_PEERS {
                     break;
@@ -197,6 +250,23 @@ impl Lookup {
                 let peer = canonical_addr(peer);
                 if self.policy.dialable(&peer) && self.peer_set.insert(peer) {
                     self.peers.push(peer);
+                }
+            }
+        }
+        if self.kind == Kind::Scrape {
+            match (response.bf_sd, response.bf_pe) {
+                (None, None) => {
+                    self.unaware = self.unaware.saturating_add(1);
+                }
+                (sd, pe) => {
+                    self.aware = self.aware.saturating_add(1);
+                    // A class the responder had no members of arrives as
+                    // an empty (all-zero) filter estimating to 0; a missing
+                    // half (never sent by our responder) counts the same.
+                    self.seed_filters
+                        .push(sd.unwrap_or([0u8; crate::bloom::BLOOM_LEN]));
+                    self.peer_filters
+                        .push(pe.unwrap_or([0u8; crate::bloom::BLOOM_LEN]));
                 }
             }
         }
@@ -232,6 +302,16 @@ impl Lookup {
             peers: self.peers,
         }
     }
+
+    fn scrape_outcome(self) -> ScrapeOutcome {
+        ScrapeOutcome {
+            peers: self.peers,
+            seed_filters: self.seed_filters,
+            peer_filters: self.peer_filters,
+            aware: self.aware,
+            unaware: self.unaware,
+        }
+    }
 }
 
 async fn ask(
@@ -241,14 +321,37 @@ async fn ask(
     kind: Kind,
     target: NodeId,
 ) -> (SocketAddr, Result<Response, QueryError>) {
-    let method = match kind {
-        Kind::FindNode => Method::FindNode { target },
-        Kind::GetPeers => Method::GetPeers { info_hash: DhtKey::from(target), scrape: false },
-    };
-    (
-        node.addr,
-        inner.query(sock, node.addr, method, Some(node.id)).await,
-    )
+    match kind {
+        Kind::FindNode => {
+            let method = Method::FindNode { target };
+            (
+                node.addr,
+                inner.query(sock, node.addr, method, Some(node.id)).await,
+            )
+        }
+        Kind::GetPeers => {
+            let method = Method::GetPeers {
+                info_hash: DhtKey::from(target),
+                scrape: false,
+            };
+            (
+                node.addr,
+                inner.query(sock, node.addr, method, Some(node.id)).await,
+            )
+        }
+        Kind::Scrape => {
+            let method = Method::GetPeers {
+                info_hash: DhtKey::from(target),
+                scrape: true,
+            };
+            (
+                node.addr,
+                inner
+                    .query_scrape(sock, node.addr, method, Some(node.id))
+                    .await,
+            )
+        }
+    }
 }
 
 async fn run(
@@ -258,7 +361,7 @@ async fn run(
     kind: Kind,
     seeds: Vec<CompactNode>,
     deadline: Instant,
-) -> Outcome {
+) -> Lookup {
     let tuning = &inner.cfg.tuning;
     let now = Instant::now();
     let mut lookup = Lookup::new(target, kind, sock.family, inner.policy, inner.own());
@@ -321,18 +424,7 @@ async fn run(
             final_sweep = true;
         }
     }
-    lookup.outcome()
-}
-
-/// Iterative `find_node` towards `target`, starting from the routing table plus `seeds`.
-pub(crate) async fn find_node(
-    inner: &Inner,
-    sock: &SocketNode,
-    target: NodeId,
-    seeds: Vec<CompactNode>,
-    deadline: Instant,
-) -> Outcome {
-    run(inner, sock, target, Kind::FindNode, seeds, deadline).await
+    lookup
 }
 
 /// Iterative `get_peers` for `key`.
@@ -351,6 +443,41 @@ pub(crate) async fn get_peers(
         deadline,
     )
     .await
+    .outcome()
+}
+
+/// Iterative BEP 33 scrape for `key`: a `get_peers` traversal with
+/// `scrape=1` on the dedicated scrape budget. Unions and estimation
+/// happen in the caller via [`ScrapeOutcome`].
+pub(crate) async fn scrape(
+    inner: &Inner,
+    sock: &SocketNode,
+    key: DhtKey,
+    deadline: Instant,
+) -> ScrapeOutcome {
+    run(
+        inner,
+        sock,
+        NodeId::from(key),
+        Kind::Scrape,
+        Vec::new(),
+        deadline,
+    )
+    .await
+    .scrape_outcome()
+}
+
+/// Iterative `find_node` towards `target`, starting from the routing table plus `seeds`.
+pub(crate) async fn find_node(
+    inner: &Inner,
+    sock: &SocketNode,
+    target: NodeId,
+    seeds: Vec<CompactNode>,
+    deadline: Instant,
+) -> Outcome {
+    run(inner, sock, target, Kind::FindNode, seeds, deadline)
+        .await
+        .outcome()
 }
 
 /// `get_peers` for `key`, then `announce_peer` to the (up to K) closest nodes
@@ -499,5 +626,46 @@ mod tests {
             .map(|(n, t)| (n.id.0[0], t.clone()))
             .collect();
         assert_eq!(closest, vec![(2, Some(b"tok".to_vec())), (3, None)]);
+    }
+
+    #[test]
+    fn scrape_collects_filters_and_estimates_seeders() {
+        use crate::bloom::ScrapeBloom;
+        use std::net::IpAddr;
+
+        let target = NodeId([0; 20]);
+        let mut l = lookup(target, Kind::Scrape, OwnAddrs::default());
+        for i in 1..=3u8 {
+            l.add(node(i, NodeId([i; 20])));
+        }
+        let batch = l.pick(ALPHA);
+        let best = l.best_live();
+        // One aware response: one seed IP in BFsd, empty BFpe.
+        let mut sd = ScrapeBloom::empty();
+        sd.insert_ip(&"9.9.9.9".parse::<IpAddr>().unwrap());
+        let mut r = reply(NodeId([1; 20]), vec![]);
+        r.bf_sd = Some(sd.0);
+        r.bf_pe = Some([0u8; crate::bloom::BLOOM_LEN]);
+        assert!(!l.complete(batch[0].addr, Ok(r), best));
+        // One unaware response (no filter keys) still counts as answered.
+        assert!(!l.complete(batch[1].addr, Ok(reply(NodeId([2; 20]), vec![])), best));
+        let out = l.scrape_outcome();
+        assert_eq!(out.aware, 1);
+        assert_eq!(out.unaware, 1);
+        assert_eq!(out.seed_filters.len(), 1);
+        assert_eq!(out.peer_filters.len(), 1);
+        // One seed across the union estimates to 1; the empty peer
+        // union estimates to 0, never UNKNOWN.
+        assert_eq!(out.seeders_est(), Some(1));
+        assert_eq!(crate::bloom::estimate_or(&out.peer_filters), Some(0));
+        // No aware response at all is UNKNOWN.
+        let empty = ScrapeOutcome {
+            peers: Vec::new(),
+            seed_filters: Vec::new(),
+            peer_filters: Vec::new(),
+            aware: 0,
+            unaware: 3,
+        };
+        assert_eq!(empty.seeders_est(), None);
     }
 }

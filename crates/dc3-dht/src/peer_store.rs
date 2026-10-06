@@ -50,8 +50,9 @@ pub(crate) enum Announced {
 
 struct Slot {
     key: DhtKey,
-    /// Peer endpoint and the instant its announce expires.
-    peers: Vec<(SocketAddr, Instant)>,
+    /// Peer endpoint, the instant its announce expires, and whether it
+    /// announced with `seed=1` (BEP 33; re-announces update the flag).
+    peers: Vec<(SocketAddr, Instant, bool)>,
 }
 
 pub(crate) struct PeerStore {
@@ -99,7 +100,16 @@ impl PeerStore {
     }
 
     /// Records that `peer` announced `key`; the peer's address is its source.
-    pub(crate) fn announce(&mut self, key: DhtKey, peer: SocketAddr, now: Instant) -> Announced {
+    /// `seed` is the BEP 33 `seed` flag (`seed=1` iff the announcer claims
+    /// to be a seeder). A re-announce from the same IP refreshes the entry
+    /// and may change the port and the seed flag.
+    pub(crate) fn announce(
+        &mut self,
+        key: DhtKey,
+        peer: SocketAddr,
+        seed: bool,
+        now: Instant,
+    ) -> Announced {
         let expires = after(now, self.ttl);
         let policy = self.policy;
         let pos = match self.index.get(&key) {
@@ -128,22 +138,23 @@ impl PeerStore {
         let Some(slot) = self.slots.get_mut(pos) else {
             return Announced::Refused;
         };
-        // One entry per IP: a re-announce refreshes it and may change the port.
+        // One entry per IP: a re-announce refreshes it and may change the port
+        // and the seed flag.
         let ip_key = policy.key(&peer);
         if let Some(entry) = slot
             .peers
             .iter_mut()
-            .find(|(addr, _)| policy.key(addr) == ip_key)
+            .find(|(addr, _, _)| policy.key(addr) == ip_key)
         {
-            *entry = (peer, expires);
+            *entry = (peer, expires, seed);
             return Announced::Stored;
         }
-        slot.peers.retain(|(_, exp)| *exp > now);
+        slot.peers.retain(|(_, exp, _)| *exp > now);
         let host = policy.host_key(&peer);
         let from_host = slot
             .peers
             .iter()
-            .filter(|(addr, _)| policy.host_key(addr) == host)
+            .filter(|(addr, _, _)| policy.host_key(addr) == host)
             .count();
         let victim = if from_host >= MAX_PEERS_PER_HOST {
             oldest_where(&slot.peers, |addr| policy.host_key(addr) == host)
@@ -152,7 +163,7 @@ impl PeerStore {
             // that one network cannot push out everyone else.
             // Ties go to the subnet with the oldest announce.
             let mut counts: HashMap<AddrKey, (usize, Instant)> = HashMap::new();
-            for (addr, exp) in &slot.peers {
+            for (addr, exp, _) in &slot.peers {
                 let e = counts.entry(policy.subnet_key(addr)).or_insert((0, *exp));
                 *e = (e.0.saturating_add(1), e.1.min(*exp));
             }
@@ -165,9 +176,9 @@ impl PeerStore {
             None
         };
         if let Some(entry) = victim.and_then(|i| slot.peers.get_mut(i)) {
-            *entry = (peer, expires);
+            *entry = (peer, expires, seed);
         } else if slot.peers.len() < max_peers {
-            slot.peers.push((peer, expires));
+            slot.peers.push((peer, expires, seed));
         } else {
             return Announced::Refused;
         }
@@ -188,13 +199,47 @@ impl PeerStore {
         let mut live: Vec<SocketAddr> = slot
             .peers
             .iter()
-            .filter(|(addr, exp)| *exp > now && Family::of(addr) == family)
-            .map(|(addr, _)| *addr)
+            .filter(|(addr, exp, _)| *exp > now && Family::of(addr) == family)
+            .map(|(addr, _, _)| *addr)
             .collect();
         let mut rng = rand::rng();
         live.shuffle(&mut rng);
         live.truncate(max);
         live
+    }
+
+    /// BEP 33 scrape filters for `key`: `(BFsd, BFpe)` built from the live
+    /// entries of `family` (IP bytes only, no ports). `BFsd` holds the
+    /// entries that announced with `seed=1`, `BFpe` the rest.
+    ///
+    /// Returns `None` when the key holds no live entry of `family`
+    /// (a scrape to a node without local entries carries no filters, §0).
+    /// A class without members yields an empty (all-zero) filter, which
+    /// estimates to `0`, never UNKNOWN.
+    pub(crate) fn filters(
+        &self,
+        key: &DhtKey,
+        family: Family,
+        now: Instant,
+    ) -> Option<(crate::bloom::ScrapeBloom, crate::bloom::ScrapeBloom)> {
+        let slot = self.index.get(key).and_then(|pos| self.slots.get(*pos))?;
+        let mut live = slot
+            .peers
+            .iter()
+            .filter(|(addr, exp, _)| *exp > now && Family::of(addr) == family);
+        if live.clone().next().is_none() {
+            return None;
+        }
+        let mut sd = crate::bloom::ScrapeBloom::empty();
+        let mut pe = crate::bloom::ScrapeBloom::empty();
+        for (addr, _, seed) in live {
+            if *seed {
+                sd.insert_ip(&addr.ip());
+            } else {
+                pe.insert_ip(&addr.ip());
+            }
+        }
+        Some((sd, pe))
     }
 
     /// Up to `n` distinct random keys.
@@ -214,7 +259,7 @@ impl PeerStore {
             pos = pos.saturating_sub(1);
             let empty = match self.slots.get_mut(pos) {
                 Some(slot) => {
-                    slot.peers.retain(|(_, exp)| *exp > now);
+                    slot.peers.retain(|(_, exp, _)| *exp > now);
                     slot.peers.is_empty()
                 }
                 None => false,
@@ -244,14 +289,14 @@ impl PeerStore {
 
 /// Position of the entry that expires soonest among those whose address matches.
 fn oldest_where(
-    peers: &[(SocketAddr, Instant)],
+    peers: &[(SocketAddr, Instant, bool)],
     matches: impl Fn(&SocketAddr) -> bool,
 ) -> Option<usize> {
     peers
         .iter()
         .enumerate()
-        .filter(|(_, (addr, _))| matches(addr))
-        .min_by_key(|(_, (_, exp))| *exp)
+        .filter(|(_, (addr, _, _))| matches(addr))
+        .min_by_key(|(_, (_, exp, _))| *exp)
         .map(|(i, _)| i)
 }
 
@@ -285,10 +330,10 @@ mod tests {
         let t0 = Instant::now();
         let mut s = PeerStore::new(TTL);
         let v6: SocketAddr = "[2a00::1]:5".parse().unwrap();
-        s.announce(key(1), peer(1), t0);
-        s.announce(key(1), peer(2), t0);
-        s.announce(key(1), peer(1), t0);
-        s.announce(key(1), v6, t0);
+        s.announce(key(1), peer(1), false, t0);
+        s.announce(key(1), peer(2), false, t0);
+        s.announce(key(1), peer(1), false, t0);
+        s.announce(key(1), v6, false, t0);
         assert_eq!(s.len(), 1);
         let got: HashSet<_> = s.peers(&key(1), Family::V4, 10, t0).into_iter().collect();
         assert_eq!(got, HashSet::from([peer(1), peer(2)]));
@@ -301,8 +346,8 @@ mod tests {
     fn announces_expire() {
         let t0 = Instant::now();
         let mut s = PeerStore::new(TTL);
-        s.announce(key(1), peer(1), t0);
-        s.announce(key(2), peer(2), t0 + Duration::from_secs(600));
+        s.announce(key(1), peer(1), false, t0);
+        s.announce(key(2), peer(2), false, t0 + Duration::from_secs(600));
         let late = t0 + TTL + Duration::from_secs(1);
         assert!(s.peers(&key(1), Family::V4, 10, late).is_empty());
         assert_eq!(s.peers(&key(2), Family::V4, 10, late), vec![peer(2)]);
@@ -310,7 +355,7 @@ mod tests {
         assert_eq!(s.len(), 1);
         check_index(&s);
         // Re-announcing refreshes the expiry.
-        s.announce(key(2), peer(2), late);
+        s.announce(key(2), peer(2), false, late);
         s.expire(t0 + TTL + Duration::from_secs(900));
         assert_eq!(s.len(), 1);
         s.expire(late + TTL);
@@ -322,7 +367,7 @@ mod tests {
         let t0 = Instant::now();
         let mut s = PeerStore::with_limits(TTL, 50, 3);
         for i in 0..200 {
-            s.announce(key(i), peer(i * 256), t0);
+            s.announce(key(i), peer(i * 256), false, t0);
             check_index(&s);
         }
         assert_eq!(s.len(), 50);
@@ -332,6 +377,7 @@ mod tests {
             s.announce(
                 key(0),
                 peer(1000 + i),
+                false,
                 t0 + Duration::from_secs(u64::from(i)),
             );
         }
@@ -353,10 +399,10 @@ mod tests {
         let t1 = t0 + Duration::from_secs(1);
         let mut s = PeerStore::new(TTL);
         for i in 0..50u8 {
-            s.announce(key(1), global([9, i, 0, 1], 6881), t0);
+            s.announce(key(1), global([9, i, 0, 1], 6881), false, t0);
         }
         for port in 1..=200 {
-            s.announce(key(1), global([6, 6, 6, 6], port), t1);
+            s.announce(key(1), global([6, 6, 6, 6], port), false, t1);
         }
         let peers = s.peers(&key(1), Family::V4, 200, t1);
         let attacker = peers
@@ -372,7 +418,7 @@ mod tests {
         let t0 = Instant::now();
         let mut s = PeerStore::new(TTL);
         for i in 0..60 {
-            s.announce(key(i), global([6, 6, 6, 6], 6881), t0);
+            s.announce(key(i), global([6, 6, 6, 6], 6881), false, t0);
         }
         assert!(s.len() <= 20, "{} keys from one IP", s.len());
         // Rotating addresses inside one IPv6 /64 does not help.
@@ -382,7 +428,7 @@ mod tests {
                 std::net::Ipv6Addr::new(0x2a01, 0x4f8, 1, 2, i, 0, 0, 1).into(),
                 6881,
             );
-            s.announce(key(100 + u32::from(i)), addr, t0);
+            s.announce(key(100 + u32::from(i)), addr, false, t0);
         }
         assert!(
             s.len() - before <= 20,
@@ -392,7 +438,7 @@ mod tests {
         // Nor do many IPv4 addresses in one /24.
         let before = s.len();
         for i in 0..200u32 {
-            s.announce(key(1000 + i), global([7, 7, 7, (i % 250) as u8], 6881), t0);
+            s.announce(key(1000 + i), global([7, 7, 7, (i % 250) as u8], 6881), false, t0);
         }
         assert!(
             s.len() - before <= 50,
@@ -406,12 +452,34 @@ mod tests {
         let t0 = Instant::now();
         let mut s = PeerStore::with_limits(TTL, 50, 3);
         for i in 0..50 {
-            s.announce(key(i), global([9, 0, i as u8, 1], 6881), t0);
+            s.announce(key(i), global([9, 0, i as u8, 1], 6881), false, t0);
         }
-        s.announce(key(999), global([9, 1, 0, 1], 6881), t0);
+        s.announce(key(999), global([9, 1, 0, 1], 6881), false, t0);
         assert_eq!(s.len(), 50);
         assert!(!s.index.contains_key(&key(999)));
         assert!((0..50).all(|i| s.index.contains_key(&key(i))));
+    }
+
+    #[test]
+    fn seed_flag_is_stored_and_filters_split_seeds_from_peers() {
+        let t0 = Instant::now();
+        let mut s = PeerStore::new(TTL);
+        assert!(s.filters(&key(1), Family::V4, t0).is_none());
+        s.announce(key(1), peer(1), true, t0);
+        s.announce(key(1), peer(2), false, t0);
+        let (sd, pe) = s.filters(&key(1), Family::V4, t0).expect("entries exist");
+        let seeds = sd.estimate().expect("not saturated");
+        let peers = pe.estimate().expect("not saturated");
+        assert!((seeds - 1.0).abs() < 0.1, "one seed, got {seeds}");
+        assert!((peers - 1.0).abs() < 0.1, "one peer, got {peers}");
+        // A re-announce from the same IP flips the flag.
+        s.announce(key(1), peer(1), false, t0);
+        let (sd, pe) = s.filters(&key(1), Family::V4, t0).expect("entries exist");
+        assert_eq!(sd.estimate(), Some(0.0));
+        let peers = pe.estimate().expect("not saturated");
+        assert!((peers - 2.0).abs() < 0.2, "two peers, got {peers}");
+        // Filters are per family: no IPv6 entries here.
+        assert!(s.filters(&key(1), Family::V6, t0).is_none());
     }
 
     #[test]
@@ -420,12 +488,12 @@ mod tests {
         let mut s = PeerStore::new(TTL);
         assert!(s.sample(20).is_empty());
         for i in 0..5 {
-            s.announce(key(i), peer(i), t0);
+            s.announce(key(i), peer(i), false, t0);
         }
         let all: HashSet<_> = s.sample(20).into_iter().collect();
         assert_eq!(all.len(), 5);
         for i in 5..100 {
-            s.announce(key(i), peer(i), t0);
+            s.announce(key(i), peer(i), false, t0);
         }
         let some = s.sample(20);
         assert_eq!(some.len(), 20);

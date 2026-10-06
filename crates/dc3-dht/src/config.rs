@@ -22,6 +22,8 @@ pub const DEFAULT_BOOTSTRAP: [&str; 4] = [
     "router.bt.ouinet.work:6881",
     "router.bittorrent.com:6881",
 ];
+/// Default BEP 33 scrape budget in packets per second (§2: 250/s crawl + 25/s scrape).
+pub const DEFAULT_SCRAPE_PACKETS_PER_SEC: u32 = 25;
 /// Upper bound on `sampler_concurrency`.
 pub const MAX_SAMPLER_CONCURRENCY: usize = 1024;
 /// Default responder budget in replies per second (design §3).
@@ -48,6 +50,9 @@ pub struct DhtConfig {
     pub state_file: Option<PathBuf>,
     /// Global budget for outgoing queries per second.
     pub max_packets_per_sec: u32,
+    /// Dedicated BEP 33 scrape budget in packets per second: scrape
+    /// traversals charge this bucket, never the crawl bucket above.
+    pub scrape_packets_per_sec: u32,
     /// Run the BEP 51 sampler, which emits `Discovered { source: Sample }`.
     pub sampler: bool,
     /// Number of concurrent `sample_infohashes` queries.
@@ -71,6 +76,7 @@ impl Default for DhtConfig {
             bootstrap: DEFAULT_BOOTSTRAP.iter().map(|s| (*s).to_owned()).collect(),
             state_file: None,
             max_packets_per_sec: DEFAULT_MAX_PACKETS_PER_SEC,
+            scrape_packets_per_sec: DEFAULT_SCRAPE_PACKETS_PER_SEC,
             sampler: true,
             sampler_concurrency: DEFAULT_SAMPLER_CONCURRENCY,
             read_only: false,
@@ -100,6 +106,11 @@ impl DhtConfig {
                 "max_packets_per_sec must be at least 1".into(),
             ));
         }
+        if self.scrape_packets_per_sec == 0 {
+            return Err(Error::Config(
+                "scrape_packets_per_sec must be at least 1".into(),
+            ));
+        }
         if self.sampler_concurrency > MAX_SAMPLER_CONCURRENCY {
             return Err(Error::Config(format!(
                 "sampler_concurrency must be at most {MAX_SAMPLER_CONCURRENCY}"
@@ -115,6 +126,9 @@ impl DhtConfig {
 pub struct DhtTuning {
     /// How long to wait for the reply to one query. There are no retries (BEP 5). Production: 4 s.
     pub query_timeout: Duration,
+    /// How long to wait for the reply to one BEP 33 scrape query: the more
+    /// lenient per-RPC direction from the BEP's 10 s guidance. Production: 10 s.
+    pub scrape_query_timeout: Duration,
     /// After this long a lookup stops waiting for a query and moves on; a
     /// later reply is still used. Production: 2 s.
     pub query_slow_after: Duration,
@@ -188,6 +202,7 @@ impl Default for DhtTuning {
     fn default() -> Self {
         Self {
             query_timeout: Duration::from_secs(4),
+            scrape_query_timeout: Duration::from_secs(10),
             query_slow_after: Duration::from_secs(2),
             lookup_timeout: Duration::from_secs(30),
             max_send_wait: Duration::from_secs(4),
@@ -226,6 +241,7 @@ impl DhtTuning {
     fn validate(&self) -> Result<(), Error> {
         let positive = [
             ("query_timeout", self.query_timeout),
+            ("scrape_query_timeout", self.scrape_query_timeout),
             ("query_slow_after", self.query_slow_after),
             ("lookup_timeout", self.lookup_timeout),
             ("max_send_wait", self.max_send_wait),
@@ -303,6 +319,7 @@ mod tests {
         );
         assert_eq!(c.state_file, None);
         assert_eq!(c.max_packets_per_sec, 250);
+        assert_eq!(c.scrape_packets_per_sec, 25);
         assert!(c.sampler);
         assert_eq!(c.sampler_concurrency, 32);
         assert!(!c.read_only);
@@ -310,6 +327,7 @@ mod tests {
         assert_eq!(&c.client_version, b"DC\x00\x01");
         let t = &c.tuning;
         assert_eq!(t.query_timeout, Duration::from_secs(4));
+        assert_eq!(t.scrape_query_timeout, Duration::from_secs(10));
         assert_eq!(t.per_address_query_spacing, Duration::from_secs(1));
         assert_eq!((t.inbound_rate, t.inbound_burst), (4, 8));
         assert_eq!(t.responder_replies_per_sec, 500);
