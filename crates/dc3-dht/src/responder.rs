@@ -457,7 +457,7 @@ mod tests {
             seed: true,
         };
         let (_, event) = f.ask(src(), &query(seeding)).unwrap();
-        assert_eq!(event.unwrap().seed, true);
+        assert!(event.unwrap().seed);
 
         let (reply, _) = f
             .ask(src(), &query(Method::GetPeers { info_hash: key, scrape: false }))

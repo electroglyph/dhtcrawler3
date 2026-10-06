@@ -188,6 +188,10 @@ pub struct DhtTuning {
     pub sample_timeout_skip: Duration,
     /// Pause of a sampler worker that found nothing to sample. Production: 1 s.
     pub sampler_idle_wait: Duration,
+    /// Agreeing nonzero scrape responses that end the traversal early
+    /// (live-only, bep33.md §4b win 2; 0 disables). A dead verdict always
+    /// needs the full both-families traversal. Production: 3.
+    pub scrape_early_exit_quorum: usize,
     /// TEST ONLY. Key the per-IP rules on IP:port instead of IP: one routing
     /// entry per IP, the /24 and /64 bucket rule, the inbound and outbound
     /// per-IP rate limits, external-IP vote diversity and the "our own
@@ -232,6 +236,7 @@ impl Default for DhtTuning {
             sample_unsupported_skip: HOUR.saturating_mul(6),
             sample_timeout_skip: HOUR,
             sampler_idle_wait: Duration::from_secs(1),
+            scrape_early_exit_quorum: 3,
             limits_by_endpoint: false,
         }
     }
@@ -340,6 +345,7 @@ mod tests {
         assert_eq!(t.sample_min_resample, Duration::from_secs(300));
         assert_eq!(t.sample_unsupported_skip, Duration::from_secs(6 * 3600));
         assert_eq!(t.sample_timeout_skip, Duration::from_secs(3600));
+        assert_eq!(t.scrape_early_exit_quorum, 3);
         assert!(!t.limits_by_endpoint);
         assert!(c.validate().is_ok());
     }

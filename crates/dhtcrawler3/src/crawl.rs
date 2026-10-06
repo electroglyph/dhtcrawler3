@@ -102,7 +102,7 @@ impl CrawlOptions {
     pub fn from_config(cfg: &Config) -> Result<Self, ConfigError> {
         let c = &cfg.crawl;
         let (bind_v4, bind_v6) = cfg.dht_binds()?;
-        let dht = DhtConfig {
+        let mut dht = DhtConfig {
             bind_v4,
             bind_v6,
             bootstrap: c.bootstrap.clone(),
@@ -116,6 +116,8 @@ impl CrawlOptions {
             client_version: dc3_dht::DEFAULT_CLIENT_VERSION,
             tuning: DhtTuning::default(),
         };
+        dht.tuning.scrape_early_exit_quorum =
+            usize::try_from(c.scrape_early_exit_quorum).unwrap_or(usize::MAX);
         let mut opts = Self::new(
             dht,
             c.max_pending,
@@ -418,6 +420,10 @@ mod tests {
         assert!(o.dht.validate().is_ok());
         assert_eq!(o.filter, PeerFilter::PRODUCTION);
         assert_eq!(o.fetch_workers, 64);
+        assert_eq!(o.dht.scrape_packets_per_sec, 25);
+        assert_eq!(o.dht.tuning.scrape_early_exit_quorum, 3);
+        assert_eq!(o.scrape_workers, 1);
+        assert_eq!(o.scrape.threshold, 0);
         assert_eq!(o.max_pending, 5_000_000);
         assert_eq!(o.limits.max_connections, 256);
         assert_eq!(o.limits.max_inflight_metadata_bytes, 268_435_456);

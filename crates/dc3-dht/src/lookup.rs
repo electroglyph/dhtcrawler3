@@ -85,7 +85,7 @@ pub(crate) struct ScrapeOutcome {
 impl ScrapeOutcome {
     /// OR-union of all `BFsd` filters; `None` when no response was aware
     /// (UNKNOWN, §3) or the union is saturated (UNKNOWN, §0).
-    pub fn seeders_union(&self) -> Option<crate::bloom::ScrapeBloom> {
+    fn seeders_union(&self) -> Option<crate::bloom::ScrapeBloom> {
         if self.aware == 0 {
             return None;
         }
@@ -99,8 +99,10 @@ impl ScrapeOutcome {
     /// Estimated seeders from the OR-union of all aware `BFsd` filters:
     /// `None` means UNKNOWN (no aware response, or a saturated union).
     /// An empty union (live entries but no seeds seen) estimates to `0`.
-    pub fn seeders_est(&self) -> Option<u64> {
-        crate::bloom::estimate_or(&self.seed_filters)
+    fn seeders_est(&self) -> Option<u64> {
+        self.seeders_union()?
+            .estimate()
+            .map(|n| n.floor() as u64)
     }
 }
 
@@ -126,6 +128,10 @@ struct Lookup {
     aware: usize,
     /// Scrape responses without filter keys.
     unaware: usize,
+    /// Aware scrape responses whose own `BFsd` estimates nonzero (one live
+    /// proof each, §4b win 2). Only these may end the traversal early; a
+    /// dead verdict always needs the full traversal.
+    live_proofs: usize,
 }
 
 impl Lookup {
@@ -152,6 +158,7 @@ impl Lookup {
             peer_filters: Vec::new(),
             aware: 0,
             unaware: 0,
+            live_proofs: 0,
         }
     }
 
@@ -263,6 +270,17 @@ impl Lookup {
                     // A class the responder had no members of arrives as
                     // an empty (all-zero) filter estimating to 0; a missing
                     // half (never sent by our responder) counts the same.
+                    // A response whose own seeds filter estimates nonzero
+                    // is one live proof for the early exit (win 2); zeros
+                    // and saturated filters prove nothing and never count.
+                    let live = sd
+                        .as_deref()
+                        .and_then(|b| crate::bloom::ScrapeBloom::from_bytes(b))
+                        .and_then(|f| f.estimate())
+                        .is_some_and(|e| e > 0.0);
+                    if live {
+                        self.live_proofs = self.live_proofs.saturating_add(1);
+                    }
                     self.seed_filters.push(
                         sd.map(|b| *b)
                             .unwrap_or([0u8; crate::bloom::BLOOM_LEN]),
@@ -378,7 +396,17 @@ async fn run(
     let mut in_flight = FuturesUnordered::new();
     let mut rounds = 0usize;
     let mut final_sweep = false;
-    loop {
+    // Live-only early exit (§4b win 2): a quorum of agreeing nonzero
+    // responses proves the swarm live, so the traversal may stop and the
+    // caller stores the partial-union lower bound. Zeros never stop early:
+    // a dead verdict always needs the full traversal (LB-28).
+    let quorum = if kind == Kind::Scrape {
+        tuning.scrape_early_exit_quorum
+    } else {
+        0
+    };
+    let exited_early = |lookup: &Lookup| quorum > 0 && lookup.live_proofs >= quorum;
+    'rounds: loop {
         if Instant::now() >= deadline || inner.cancel.is_cancelled() {
             break;
         }
@@ -392,6 +420,9 @@ async fn run(
             match next {
                 Some((addr, result)) => {
                     lookup.complete(addr, result, None);
+                    if exited_early(&lookup) {
+                        break 'rounds;
+                    }
                     continue;
                 }
                 None => break,
@@ -420,6 +451,9 @@ async fn run(
                 }
             }
             improved |= lookup.complete(addr, result, best_before);
+            if exited_early(&lookup) {
+                break 'rounds;
+            }
         }
         if final_sweep || rounds >= MAX_ROUNDS {
             break;
@@ -671,5 +705,48 @@ mod tests {
             unaware: 3,
         };
         assert_eq!(empty.seeders_est(), None);
+    }
+
+    #[test]
+    fn scrape_counts_live_proofs_for_the_early_exit() {
+        use crate::bloom::ScrapeBloom;
+        use std::net::IpAddr;
+
+        let target = NodeId([0; 20]);
+        let mut l = lookup(target, Kind::Scrape, OwnAddrs::default());
+        for i in 1..=5u8 {
+            l.add(node(i, NodeId([i; 20])));
+        }
+        let batch = l.pick(ALPHA);
+        let best = l.best_live();
+        // An aware response for candidate `n`, with `ip` in its seeds
+        // filter (empty string: an all-zero filter).
+        let aware = |n: u8, ip: &str| {
+            let mut sd = ScrapeBloom::empty();
+            if !ip.is_empty() {
+                sd.insert_ip(&ip.parse::<IpAddr>().unwrap());
+            }
+            let mut r = reply(NodeId([n; 20]), vec![]);
+            r.bf_sd = Some(Box::new(sd.0));
+            r.bf_pe = Some(Box::new([0u8; crate::bloom::BLOOM_LEN]));
+            r
+        };
+        // Two nonzero proofs and one empty (zero) filter: only the
+        // nonzero proofs count toward the quorum.
+        assert!(!l.complete(batch[0].addr, Ok(aware(1, "9.9.9.9")), best));
+        assert!(!l.complete(batch[1].addr, Ok(aware(2, "8.8.8.8")), best));
+        assert!(!l.complete(batch[2].addr, Ok(aware(3, "")), best));
+        assert_eq!(l.live_proofs, 2);
+        assert_eq!(l.aware, 3);
+        // A saturated filter proves nothing either.
+        let mut saturated = ScrapeBloom::empty();
+        saturated.0 = [0xff; crate::bloom::BLOOM_LEN];
+        let mut r = reply(NodeId([4; 20]), vec![]);
+        r.bf_sd = Some(Box::new(saturated.0));
+        r.bf_pe = Some(Box::new([0u8; crate::bloom::BLOOM_LEN]));
+        let batch = l.pick(2);
+        assert!(!l.complete(batch[0].addr, Ok(r), best));
+        assert_eq!(l.live_proofs, 2);
+        assert_eq!(l.aware, 4);
     }
 }
