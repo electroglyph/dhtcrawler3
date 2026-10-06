@@ -253,7 +253,12 @@ impl Lookup {
                     break;
                 }
                 let peer = canonical_addr(peer);
-                if self.policy.dialable(&peer) && self.peer_set.insert(peer) {
+                // A response on this socket's family must not seed the
+                // traversal with the other family's peers.
+                if Family::of(&peer) == self.family
+                    && self.policy.dialable(&peer)
+                    && self.peer_set.insert(peer)
+                {
                     self.peers.push(peer);
                 }
             }
@@ -810,4 +815,31 @@ mod tests {
         assert_eq!(out.seeders_est(), None);
     }
 
+    #[test]
+    fn values_of_the_other_family_are_ignored() {
+        let target = NodeId([0; 20]);
+        let mut l = lookup(target, Kind::GetPeers, OwnAddrs::default());
+        l.add(node(1, NodeId([1; 20])));
+        let batch = l.pick(1);
+        let best = l.best_live();
+        let mut r = reply(NodeId([1; 20]), vec![]);
+        r.values = Some(
+            [
+                "8.8.8.8:6881",
+                "[2a00:1450::1]:6881",
+                "[::ffff:9.9.9.9]:6882",
+            ]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect(),
+        );
+        l.complete(batch[0].addr, Ok(r), best);
+        let out = l.outcome();
+        // The native V4 peer and the mapped V4 peer stay; the V6 peer goes.
+        let expected: Vec<SocketAddr> = ["8.8.8.8:6881", "9.9.9.9:6882"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        assert_eq!(out.peers, expected);
+    }
 }
