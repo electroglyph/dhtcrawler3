@@ -167,7 +167,6 @@ async fn fetch_inner(
                 total_size,
                 payload,
             } => {
-                assembly.validate(piece, total_size, payload)?;
                 budget.acquire(payload.len()).await?;
                 assembly.accept(piece, total_size, payload)?;
                 if assembly.is_complete() {
