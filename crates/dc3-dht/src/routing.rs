@@ -1153,6 +1153,22 @@ mod tests {
     }
 
     #[test]
+    fn bep42_exempt_private_nodes_are_not_parked() {
+        // `bep42=false` from a non-global IP is exempt on both the park
+        // and promote paths, so it becomes a member immediately. Needs a
+        // local-test table: production tables do not admit private addrs
+        // at all (`admissible` fails before BEP42 is consulted).
+        let now = Instant::now();
+        let mut t =
+            RoutingTable::new(NodeId([0x55; 20]), now, config(Family::V4, LOCAL_TEST));
+        let own = t.own_id();
+        let id = own.random_with_prefix(0, true);
+        assert!(t.on_response(id, sa("10.0.0.1:6881"), false, now));
+        assert!(t.member(&id).is_some());
+        check(&t);
+    }
+
+    #[test]
     fn bep42_invalid_public_senders_wait_in_replacements() {
         let now = Instant::now();
         let mut t = table(now);

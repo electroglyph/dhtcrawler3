@@ -31,7 +31,7 @@ use std::collections::HashSet;
 /// Resource limits for one decode call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Maximum nesting depth of lists and dictionaries (the top-level value is depth 1).
+    /// Maximum nesting depth of values (the top-level value is depth 1).
     pub max_depth: usize,
     /// Maximum total number of values (scalars and containers) in the input.
     pub max_items: usize,

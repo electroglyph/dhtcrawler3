@@ -130,6 +130,28 @@ fn v1_empty_pieces_is_zero_length_torrent() {
 }
 
 #[test]
+fn v1_short_pieces_is_not_a_torrent() {
+    // Non-empty pieces must be a whole number of SHA-1 hashes.
+    for len in [1, 5, 19, 21] {
+        let v = d([
+            ("name", b("x")),
+            ("length", i(100)),
+            ("piece length", i(16384)),
+            ("pieces", O::bytes(vec![0u8; len])),
+        ]);
+        assert_eq!(parse(&v), Err(ParseError::NotATorrent), "len {len}");
+    }
+    // Two whole hashes still parse.
+    let v = d([
+        ("name", b("x")),
+        ("length", i(100)),
+        ("piece length", i(16384)),
+        ("pieces", O::bytes(vec![0u8; 40])),
+    ]);
+    assert!(parse(&v).is_ok());
+}
+
+#[test]
 fn v1_multi_file_prefers_utf8_variants() {
     let files = vec![
         v1_file(10, &["b", "file.txt"]),

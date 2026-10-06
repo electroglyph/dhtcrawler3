@@ -195,6 +195,10 @@ fn trailing_ignored_word_does_not_open_prefix() {
     assert!(!parse_query("foo !!!").unwrap().words[0].prefix);
     assert!(!parse_query("foo *").unwrap().words[0].prefix);
     assert!(!parse_query("foo bar !!!").unwrap().words[1].prefix);
+    // Dangling split-level empties must behave like trailing ignored words.
+    assert!(!parse_query("foo -").unwrap().words[0].prefix);
+    assert!(!parse_query("foo \"\"").unwrap().words[0].prefix);
+    assert!(!parse_query("foo \"").unwrap().words[0].prefix);
 }
 
 #[test]
@@ -213,6 +217,11 @@ fn prefix_gate_uses_folded_token_length() {
         ligature.words[0].prefix,
         parse_query("fi").unwrap().words[0].prefix
     );
+    // Multi-token words keep their phrase prefix: total folded length
+    // gates, so `22.0` (tokens `22`,`0`) still qualifies.
+    assert!(parse_query("22.0").unwrap().words[0].prefix);
+    // Single folded chars still do not qualify.
+    assert!(!parse_query("é").unwrap().words[0].prefix);
 }
 
 #[test]

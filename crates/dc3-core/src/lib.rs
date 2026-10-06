@@ -290,10 +290,25 @@ mod tests {
         assert_eq!(s.chars().count(), 40);
         assert_eq!(s.len(), 41);
         assert_eq!(s.parse::<DhtKey>(), Err(KeyParseError::BadHex));
-        // 40 chars / 41 bytes reports the true char count path, not bytes.
+        // 64 chars / 65 bytes reports the true char count path, not bytes.
         let v2 = format!("{}é{}", "b".repeat(63), "");
         assert_eq!(v2.chars().count(), 64);
         assert_eq!(v2.parse::<InfoHashV2>(), Err(KeyParseError::BadHex));
+        // AnyKey dispatches on char count too: 40-char multibyte hits the
+        // hex arm, not the length error.
+        assert_eq!(s.parse::<AnyKey>(), Err(KeyParseError::BadHex));
+        // 32-char base32 arm uses char count: 32 multibyte chars (64 bytes)
+        // hit the base32 arm, not the length error.
+        let b32multi = "é".repeat(32);
+        assert_eq!(b32multi.chars().count(), 32);
+        assert_eq!(b32multi.len(), 64);
+        assert_eq!(b32multi.parse::<DhtKey>(), Err(KeyParseError::BadBase32));
+        // Non-64-char multibyte on the v2 path reports chars, not bytes.
+        let v2short = "é".repeat(32);
+        assert_eq!(
+            v2short.parse::<InfoHashV2>(),
+            Err(KeyParseError::BadV2Length(32))
+        );
     }
 
     #[test]

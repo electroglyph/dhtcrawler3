@@ -177,6 +177,16 @@ fn depth_limit_gates_scalars_at_every_level() {
         decode(b"d1:ai1ee", &one).unwrap_err().kind,
         ErrorKind::TooDeep
     );
+    // Same predicate gates byte strings at every level.
+    assert_eq!(
+        decode(b"l1:ae", &one).unwrap_err().kind,
+        ErrorKind::TooDeep
+    );
+    assert_eq!(
+        decode(b"d1:a1:be", &one).unwrap_err().kind,
+        ErrorKind::TooDeep
+    );
+    assert!(decode(b"1:a", &one).is_ok());
 }
 
 /// Dropping a deeply nested `Value` recurses in the compiler-generated drop
