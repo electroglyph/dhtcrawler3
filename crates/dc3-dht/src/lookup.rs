@@ -29,6 +29,10 @@ pub(crate) const ALPHA: usize = 3;
 pub(crate) const MAX_ROUNDS: usize = 8;
 /// Candidates remembered per lookup.
 const MAX_CANDIDATES: usize = 128;
+/// Candidates admitted from one /24 (IPv4) or /64 (IPv6): without a cap,
+/// one responder returning distinct (ID, same-IP:port) pairs could occupy
+/// a large fraction of [`MAX_CANDIDATES`] over rounds.
+const MAX_CANDIDATES_PER_SUBNET: usize = 8;
 /// Nodes taken from one response.
 const MAX_NODES_PER_RESPONSE: usize = 16;
 /// Peers collected per lookup.
@@ -171,6 +175,16 @@ impl Lookup {
             || self.own.contains(&node.addr, self.policy)
             || self.seen_addrs.contains(&node.addr)
             || self.seen_ids.contains(&node.id)
+        {
+            return None;
+        }
+        let subnet = self.policy.subnet_key(&node.addr);
+        if self
+            .cands
+            .iter()
+            .filter(|c| self.policy.subnet_key(&c.node.addr) == subnet)
+            .count()
+            >= MAX_CANDIDATES_PER_SUBNET
         {
             return None;
         }
@@ -626,6 +640,35 @@ mod tests {
         }
         assert!(l.cands.len() <= MAX_CANDIDATES);
         assert!(l.cands.windows(2).all(|w| w[0].dist <= w[1].dist));
+    }
+
+    #[test]
+    fn one_subnet_cannot_fill_the_candidates() {
+        let target = NodeId([0; 20]);
+        let mut l = lookup(target, Kind::FindNode, OwnAddrs::default());
+        let mut admitted = 0;
+        for i in 0..16u8 {
+            let mut id = [0xaa; 20];
+            id[19] = i;
+            let admitted_now = l
+                .add(CompactNode {
+                    id: NodeId(id),
+                    addr: SocketAddr::from(([1, 2, 3, 4], 1000 + u16::from(i))),
+                })
+                .is_some();
+            admitted += usize::from(admitted_now);
+        }
+        assert_eq!(admitted, MAX_CANDIDATES_PER_SUBNET);
+        // Other subnets are unaffected.
+        let mut other = [0xbb; 20];
+        other[19] = 0xff;
+        assert!(
+            l.add(CompactNode {
+                id: NodeId(other),
+                addr: SocketAddr::from(([9, 9, 9, 9], 1000)),
+            })
+            .is_some()
+        );
     }
 
     #[test]
