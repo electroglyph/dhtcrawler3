@@ -244,6 +244,40 @@ impl DestDenied {
             DestDenied::Full => "map_full",
         }
     }
+
+    /// Whether the peer deserves another chance later in the same obtain.
+    /// `Busy`, `RateLimited` and `Full` are momentary (budget frees up as
+    /// attempts finish); a live negative-cache entry stays failed until it
+    /// expires, so requeueing it could only spin.
+    fn retryable(self) -> bool {
+        !matches!(self, DestDenied::NegativeCache)
+    }
+}
+
+/// Peers the destination limiter refused, held for one retry per progress
+/// step within the same obtain instead of being dropped for the key.
+///
+/// `progress` counts completed work (finished attempts, finished lookups);
+/// requeueing only when it advanced guarantees a permanently-refused peer
+/// waits for real time to pass instead of spinning, and terminates because
+/// progress steps are bounded by the attempt budget plus one lookup.
+#[derive(Debug, Default)]
+struct Deferred {
+    peers: Vec<SocketAddr>,
+    requeued_at: usize,
+}
+
+impl Deferred {
+    fn push(&mut self, peer: SocketAddr) {
+        self.peers.push(peer);
+    }
+
+    fn requeue(&mut self, queue: &mut VecDeque<SocketAddr>, progress: usize) {
+        if !self.peers.is_empty() && progress != self.requeued_at {
+            queue.extend(self.peers.drain(..));
+            self.requeued_at = progress;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -604,7 +638,12 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         let mut lookup_done = false;
         let mut attempts = 0usize;
         let mut running = FuturesUnordered::new();
+        let mut deferred = Deferred::default();
+        let mut progress = 0usize;
         loop {
+            if queue.is_empty() {
+                deferred.requeue(&mut queue, progress);
+            }
             while running.len() < self.tuning.parallel_attempts
                 && attempts < self.tuning.max_attempts
             {
@@ -617,6 +656,9 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                     Err(denied) => {
                         metrics::counter!(METRIC_DESTINATION_SKIPPED, "reason" => denied.as_str())
                             .increment(1);
+                        if denied.retryable() {
+                            deferred.push(peer);
+                        }
                     }
                 }
             }
@@ -626,6 +668,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
             tokio::select! {
                 report = &mut lookup, if !lookup_done => {
                     lookup_done = true;
+                    progress = progress.saturating_add(1);
                     own = OwnAddrs::of(&self.peers);
                     // §8 piggyback: the traversal was already paid for, so
                     // its estimate is free liveness data for the queue's
@@ -646,6 +689,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                     }
                 }
                 Some(result) = running.next(), if !running.is_empty() => {
+                    progress = progress.saturating_add(1);
                     match result {
                         Ok(info) => return Obtained::Metadata(info),
                         Err(e) => tracing::debug!(reason = e.label(), "peer fetch failed"),
@@ -959,6 +1003,34 @@ mod tests {
                 "store_error"
             ]
         );
+    }
+
+    #[test]
+    fn only_momentary_denials_are_retried() {
+        assert!(DestDenied::Busy.retryable());
+        assert!(DestDenied::RateLimited.retryable());
+        assert!(DestDenied::Full.retryable());
+        assert!(!DestDenied::NegativeCache.retryable());
+    }
+
+    #[test]
+    fn deferred_peers_retry_once_per_progress_step() {
+        let mut queue = VecDeque::from([dest("9.9.9.9")]);
+        let mut deferred = Deferred::default();
+        deferred.push(queue.pop_front().unwrap());
+        assert!(queue.is_empty());
+        // No progress yet: no requeue, so a still-busy peer cannot spin.
+        deferred.requeue(&mut queue, 0);
+        assert!(queue.is_empty());
+        // After other work finished, the peer gets another chance.
+        deferred.requeue(&mut queue, 1);
+        assert_eq!(queue.len(), 1);
+        // ...but only one chance per progress step: a repeat denial waits.
+        deferred.push(queue.pop_front().unwrap());
+        deferred.requeue(&mut queue, 1);
+        assert!(queue.is_empty());
+        deferred.requeue(&mut queue, 2);
+        assert_eq!(queue.len(), 1);
     }
 
     /// SHA-1 (FIPS 180-4), to key test data that does not parse.
