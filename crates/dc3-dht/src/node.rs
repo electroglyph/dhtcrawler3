@@ -39,7 +39,7 @@ use crate::sampler::Sampler;
 use crate::state::{self, FamilyState, MAX_SAVED_NODES, STATE_VERSION, SavedNode, StateFile};
 use crate::stats::{Counters, DhtStatsSnapshot, DropReason, incr};
 use crate::token::TokenSecrets;
-use crate::util::{after, lock, remaining_budget};
+use crate::util::{after, after_skip, lock, remaining_budget};
 use crate::{Discovered, Error};
 use lru::LruCache;
 
@@ -493,7 +493,7 @@ impl Inner {
                 }
                 budget.wait_time(now)
             };
-            let wake = after(now, wait.max(MIN_BUDGET_WAIT));
+            let wake = after_skip(now, wait.max(MIN_BUDGET_WAIT));
             if wake > give_up {
                 return false;
             }
@@ -515,7 +515,7 @@ impl Inner {
                 }
                 budget.wait_time(now)
             };
-            let wake = after(now, wait.max(MIN_BUDGET_WAIT));
+            let wake = after_skip(now, wait.max(MIN_BUDGET_WAIT));
             if wake > give_up {
                 return false;
             }

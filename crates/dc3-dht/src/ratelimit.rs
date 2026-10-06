@@ -12,7 +12,7 @@ use lru::LruCache;
 use tokio::time::Instant;
 
 use crate::compact::{AddrKey, AddrPolicy, Family, canonical_addr};
-use crate::util::after;
+use crate::util::{after, after_skip};
 
 /// Capacity of the per-address maps (design §3).
 pub(crate) const RATE_MAP_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(99_999);
@@ -276,7 +276,7 @@ impl QuerySpacing {
                 _ => return None,
             }
         }
-        self.next_free.put(key, after(send_at, self.spacing));
+        self.next_free.put(key, after_skip(send_at, self.spacing));
         Some(wait)
     }
 

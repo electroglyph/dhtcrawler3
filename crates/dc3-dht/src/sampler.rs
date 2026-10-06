@@ -44,7 +44,7 @@ use crate::node::{FlagGuard, Inner, QueryError, SocketNode};
 use crate::node_id::NodeId;
 use crate::ratelimit::{RATE_MAP_CAPACITY, WindowQuota};
 use crate::stats::{add, incr};
-use crate::util::{after, lock};
+use crate::util::{after, after_skip, lock};
 use crate::{Discovered, Source};
 
 /// Candidate nodes waiting to be sampled, per family (design §3).
@@ -437,7 +437,7 @@ impl TicketGuard<'_> {
 impl Drop for TicketGuard<'_> {
     fn drop(&mut self) {
         if let Some(ticket) = self.ticket.take() {
-            let next_at = after(Instant::now(), self.fallback);
+            let next_at = after_skip(Instant::now(), self.fallback);
             lock(self.frontier).finish(ticket, None, next_at);
         }
     }
@@ -539,7 +539,7 @@ async fn sample_one(inner: &Inner, sampler: &Sampler, sock: &SocketNode, ticket:
         }
         Err(_) => (None, tuning.sample_min_resample),
     };
-    guard.finish(answered_as, after(Instant::now(), skip));
+    guard.finish(answered_as, after_skip(Instant::now(), skip));
 }
 
 /// Refills the frontier from the routing table, or by walking towards a
