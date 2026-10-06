@@ -264,7 +264,16 @@ impl<'a> Decoder<'a> {
     }
 
     fn parse_bytes(&mut self) -> Result<&'a [u8], Error> {
-        let len = self.parse_digits(b':', ErrorKind::InvalidLength)?;
+        let len = self.parse_digits(b':', ErrorKind::InvalidLength).map_err(|e| {
+            if e.kind == ErrorKind::IntegerOverflow {
+                Error {
+                    kind: ErrorKind::StringTooLong,
+                    pos: e.pos,
+                }
+            } else {
+                e
+            }
+        })?;
         self.advance(1); // ':'
         let len = usize::try_from(len).map_err(|_| Error {
             kind: ErrorKind::StringTooLong,

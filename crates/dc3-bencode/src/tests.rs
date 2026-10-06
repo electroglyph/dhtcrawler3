@@ -57,7 +57,7 @@ fn invalid_strings() {
     assert_eq!(kind(b":"), ErrorKind::UnexpectedByte(b':'));
     assert_eq!(
         kind(b"99999999999999999999999:x"),
-        ErrorKind::IntegerOverflow
+        ErrorKind::StringTooLong
     );
     let small = Limits {
         max_string_len: 3,
@@ -265,6 +265,26 @@ fn regression_f01_drop_deep_handles_dicts() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn regression_f03_length_digit_overflow_is_string_too_long() {
+    // F-03: huge length digits overflowing u64 report StringTooLong,
+    // same as in-range huge lengths, so callers matching only
+    // StringTooLong catch both.
+    assert_eq!(
+        kind(b"99999999999999999999999:x"),
+        ErrorKind::StringTooLong
+    );
+    assert_eq!(
+        kind(b"18446744073709551615:x"),
+        ErrorKind::StringTooLong
+    );
+    // Genuine integer overflow (i...e) still reports IntegerOverflow.
+    assert_eq!(
+        kind(b"i99999999999999999999999e"),
+        ErrorKind::IntegerOverflow
+    );
 }
 
 #[test]
