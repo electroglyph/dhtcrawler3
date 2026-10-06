@@ -53,6 +53,7 @@ struct State {
     observe_calls: usize,
     observed: Vec<Observation>,
     failing_observes: usize,
+    failing_completes: usize,
     renewals: usize,
     fails: HashMap<DhtKey, u32>,
     /// `None` means [`MEMORY_FAIL_BACKOFF`].
@@ -209,6 +210,12 @@ impl MemoryStore {
         self.lock().failing_observes = n;
     }
 
+    /// Makes the next `n` `complete` calls fail transiently (as if the
+    /// database hiccuped mid-write).
+    pub fn fail_next_completes(&self, n: usize) {
+        self.lock().failing_completes = n;
+    }
+
     /// Number of successful lease renewals.
     pub fn renewals(&self) -> usize {
         self.lock().renewals
@@ -353,6 +360,10 @@ impl CrawlStore for MemoryStore {
             return Err(StoreError::Invalid("size exceeds i64".into()));
         }
         let mut state = self.lock();
+        if state.failing_completes > 0 {
+            state.failing_completes = state.failing_completes.saturating_sub(1);
+            return Err(StoreError::Corrupt("injected complete failure".into()));
+        }
         state.pending.remove(key);
         let v1 = t.info_hash_v1.map(|k| k.0);
         let v2 = t.info_hash_v2.map(|h| h.0);

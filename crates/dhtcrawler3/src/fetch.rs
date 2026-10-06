@@ -769,7 +769,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "storing a fetched torrent failed");
-                        FetchOutcome::StoreError
+                        self.give_back(key, FetchOutcome::StoreError).await
                     }
                 }
             }
@@ -1392,6 +1392,24 @@ mod tests {
             // Given up: never claimed again.
             assert!(!store.pending_keys().contains(&k), "{expected:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn transient_store_error_records_a_failure() {
+        let store = MemoryStore::new();
+        let good = info_dict("transient test", &["a.txt"], false);
+        let k = key_of(&good);
+        store.enqueue(k);
+        // The database hiccups mid-write: `complete` fails transiently.
+        store.fail_next_completes(1);
+        let f = fetcher(&store, FixedPeers(vec![seeder(&good).await]));
+        assert_eq!(f.process(&item(k)).await, FetchOutcome::StoreError);
+        assert!(store.torrent(&k).is_none());
+        // The failure went through `fail`, so `attempts` advances toward
+        // `MAX_FETCH_ATTEMPTS` instead of stalling until lease expiry.
+        assert_eq!(store.failures(&k), 1);
+        // Still queued for retry, not given up.
+        assert!(store.pending_keys().contains(&k));
     }
 
     #[tokio::test]
