@@ -26,6 +26,7 @@
 
 pub mod compact;
 mod config;
+pub mod bloom;
 pub mod krpc;
 mod lookup;
 mod net;
