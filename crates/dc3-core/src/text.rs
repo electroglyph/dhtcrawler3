@@ -39,10 +39,20 @@ pub fn is_unwanted(c: char) -> bool {
 /// to one space, trims, and truncates to at most `max_chars` characters on a
 /// character boundary.
 pub fn sanitize_display(s: &str, max_chars: usize) -> String {
+    sanitize_display_inner(s, max_chars, false)
+}
+
+fn sanitize_display_inner(s: &str, max_chars: usize, map_separators: bool) -> String {
     let mut out = String::with_capacity(s.len().min(max_chars.saturating_mul(4)));
     let mut count = 0usize;
     let mut pending_space = false;
-    for c in s.nfc() {
+    for mut c in s.nfc() {
+        // Fuse path-separator replacement into the display pass. `/` and `\`
+        // are ASCII and NFC-stable (never a composition source or target),
+        // so mapping after NFC equals mapping before it — one walk, one alloc.
+        if map_separators && (c == '/' || c == '\\') {
+            c = '_';
+        }
         if is_unwanted(c) {
             continue;
         }
@@ -78,11 +88,7 @@ pub const PATH_COMPONENT_MAX_CHARS: usize = 255;
 /// and `..` (directory traversal, BEP 52). Separators inside a component are
 /// replaced so a single component can never introduce extra path levels.
 pub fn sanitize_path_component(s: &str) -> Option<String> {
-    let replaced: String = s
-        .chars()
-        .map(|c| if c == '/' || c == '\\' { '_' } else { c })
-        .collect();
-    let clean = sanitize_display(&replaced, PATH_COMPONENT_MAX_CHARS);
+    let clean = sanitize_display_inner(s, PATH_COMPONENT_MAX_CHARS, true);
     match clean.as_str() {
         "" | "." | ".." => None,
         _ => Some(clean),
