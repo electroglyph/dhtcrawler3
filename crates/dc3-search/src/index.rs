@@ -545,6 +545,12 @@ impl SearchIndex {
     /// the content policy to prefix expansions, which whole-token gates
     /// cannot see.
     pub fn prefix_expansions(&self, prefix: &str) -> Result<Vec<String>> {
+        if prefix.is_empty() {
+            // An empty prefix matches every indexed term; callers only ever
+            // pass a real trailing token, so refuse instead of disclosing
+            // up to 400 vocabulary terms.
+            return Ok(Vec::new());
+        }
         let searcher = self.reader.searcher();
         let mut found = BTreeSet::new();
         for field in [self.fields.name, self.fields.files] {

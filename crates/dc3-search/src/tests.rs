@@ -382,6 +382,8 @@ fn prefix_expansions_lists_what_a_trailing_word_matches() {
     assert_eq!(got, ["pthc"]);
     // No indexed term starts here.
     assert!(index.prefix_expansions("zzz").unwrap().is_empty());
+    // An empty prefix must not enumerate the term dictionary.
+    assert!(index.prefix_expansions("").unwrap().is_empty());
 }
 
 #[test]
