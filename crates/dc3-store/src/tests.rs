@@ -1030,14 +1030,18 @@ async fn deny_tombstones_by_each_key_type(pool: PgPool) {
         .deny(a.as_bytes(), DenyReason::Other, None, "admin")
         .await
         .unwrap();
+    // A repeat deny is a no-op for indexed content: no re-tombstone, no
+    // change_seq bump.
+    let seq_before = change_seq_of(&pool, ia).await;
     assert_eq!(
         out,
         DenyOutcome {
             newly_denied: false,
-            tombstoned: 1
+            tombstoned: 0
         },
         "idempotent"
     );
+    assert_eq!(change_seq_of(&pool, ia).await, seq_before);
     assert_eq!(
         s.deny(b_v1.as_bytes(), DenyReason::Csam, None, "admin")
             .await

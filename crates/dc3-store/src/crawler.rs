@@ -1172,10 +1172,18 @@ pub(crate) async fn deny_in_tx(
     .rows_affected()
         > 0;
 
-    let ids: Vec<i64> = sqlx::query_scalar(TOMBSTONE_SQL)
-        .bind(p)
-        .fetch_all(&mut *conn)
-        .await?;
+    // A repeat deny must be a no-op for indexed content: re-running the
+    // tombstone would bump change_seq again and churn the indexer feed.
+    // (The pending cleanup below stays unconditional so a repeat deny
+    // still clears rows that arrived after the first deny.)
+    let ids: Vec<i64> = if newly_denied {
+        sqlx::query_scalar(TOMBSTONE_SQL)
+            .bind(p)
+            .fetch_all(&mut *conn)
+            .await?
+    } else {
+        Vec::new()
+    };
     sqlx::query("DELETE FROM pending WHERE dht_key = $1")
         .bind(p)
         .execute(&mut *conn)
