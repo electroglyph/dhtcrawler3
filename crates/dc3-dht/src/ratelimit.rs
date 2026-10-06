@@ -79,11 +79,15 @@ impl TokenBucket {
     }
 
     /// How long until a token is available (zero if one is available now).
+    /// On overflow (only possible with absurd stored state) it returns
+    /// `Duration::MAX`, failing closed: callers wait out their budget
+    /// instead of treating the bucket as immediately available. The token
+    /// itself stays gated: `take` returns `None` on the same overflow.
     pub(crate) fn wait_time(&self, now: Instant) -> Duration {
         let next = self.tat.max(now).checked_add(self.emission);
         match (next, now.checked_add(self.capacity)) {
             (Some(next), Some(limit)) => next.saturating_duration_since(limit),
-            _ => Duration::ZERO,
+            _ => Duration::MAX,
         }
     }
 }
@@ -337,6 +341,20 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 20);
+    }
+
+    #[test]
+    fn wait_time_overflow_is_fail_closed() {
+        let t0 = Instant::now();
+        // Absurd stored state (saturated capacity): `now + capacity`
+        // overflows, so no wait can be computed. The bucket must report a
+        // long wait, not "available now".
+        let b = TokenBucket {
+            emission: Duration::from_secs(1),
+            capacity: Duration::MAX,
+            tat: t0,
+        };
+        assert_eq!(b.wait_time(t0), Duration::MAX);
     }
 
     #[test]
