@@ -10,7 +10,7 @@
 
 mod normalise;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use normalise::Variants;
 pub use normalise::{MAX_NORMALISE_PASSES, normalise};
@@ -68,6 +68,8 @@ impl TermMatcher {
     /// Duplicate terms are kept once.
     pub fn load(text: &str) -> Result<TermMatcher, PolicyError> {
         let mut matcher = TermMatcher::empty();
+        let mut seen_terms: HashSet<Vec<String>> = HashSet::new();
+        let mut seen_short: HashSet<String> = HashSet::new();
         for (i, line) in text.lines().enumerate() {
             let line_no = i.saturating_add(1);
             let content = line
@@ -101,7 +103,7 @@ impl TermMatcher {
                 _ => None,
             };
             let bucket = matcher.index.entry(first).or_default();
-            if bucket.contains(&tokens) {
+            if !seen_terms.insert(tokens.clone()) {
                 continue;
             }
             if matcher.len >= MAX_TERMS {
@@ -109,7 +111,7 @@ impl TermMatcher {
             }
             bucket.push(tokens);
             if let Some(seed) = short_seed {
-                if !matcher.short.contains(&seed) {
+                if seen_short.insert(seed.clone()) {
                     matcher.short.push(seed);
                 }
             }
@@ -130,6 +132,10 @@ impl TermMatcher {
             return false;
         }
         let variants = Variants::of(text);
+        self.matches_variants(&variants)
+    }
+
+    fn matches_variants(&self, variants: &Variants) -> bool {
         variants
             .all()
             .iter()
@@ -154,13 +160,19 @@ impl TermMatcher {
     /// where whole-token matching cannot see them; the
     /// [`MAX_AFFIX_SEED_CHARS`] bound keeps everyday words searchable.
     pub fn matches_affixed(&self, text: &str) -> bool {
-        if self.matches(text) {
+        if self.index.is_empty() && self.short.is_empty() {
+            return false;
+        }
+        // One unicode fold shared by both checks; `matches` on clean text
+        // paid it twice before (b003: 1.9-2.0x).
+        let variants = Variants::of(text);
+        if self.matches_variants(&variants) {
             return true;
         }
         if self.short.is_empty() {
             return false;
         }
-        Variants::of(text)
+        variants
             .all()
             .iter()
             .flat_map(|tokens| tokens.iter())
