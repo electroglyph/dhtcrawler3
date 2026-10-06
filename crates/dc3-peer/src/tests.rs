@@ -273,11 +273,18 @@ fn metadata_messages() {
         wire::parse_metadata_message(b"d8:msg_typei9e5:piecei3ee"),
         Ok(MetadataMessage::Unknown(9))
     );
-    // An unknown type without a piece is malformed, not ignorable.
-    assert!(matches!(
+    // Unknown types are ignored whatever shape they arrive in (BEP 9):
+    // a future extension may omit `piece` or append payload bytes.
+    assert_eq!(
         wire::parse_metadata_message(b"d8:msg_typei9ee"),
-        Err(FetchError::Protocol(_))
-    ));
+        Ok(MetadataMessage::Unknown(9))
+    );
+    let mut trailing_unknown = b"d8:msg_typei9e5:piecei3ee".to_vec();
+    trailing_unknown.extend_from_slice(b"junk");
+    assert_eq!(
+        wire::parse_metadata_message(&trailing_unknown),
+        Ok(MetadataMessage::Unknown(9))
+    );
     // Trailing bytes are rejected on non-data messages ...
     let mut trailing = wire::metadata_request_body(4);
     trailing.extend_from_slice(b"junk");

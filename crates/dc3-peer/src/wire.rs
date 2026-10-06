@@ -360,8 +360,9 @@ pub(crate) enum MetadataMessage<'a> {
 }
 
 /// Parses a `ut_metadata` message body: exactly one dictionary for
-/// request and reject messages (unknown types must name a piece too),
-/// a dictionary followed by raw piece bytes for data messages.
+/// request and reject messages, a dictionary followed by raw piece bytes
+/// for data messages. Unknown `msg_type` values are ignored whatever
+/// shape they arrive in, per BEP 9.
 pub(crate) fn parse_metadata_message(body: &[u8]) -> Result<MetadataMessage<'_>, FetchError> {
     let (dict, used) = decode_dict_prefix(body)?;
     let msg_type = dict
@@ -401,12 +402,10 @@ pub(crate) fn parse_metadata_message(body: &[u8]) -> Result<MetadataMessage<'_>,
             Ok(reject)
         }
         other => {
-            // Unknown types are still ignored, but they must be shaped
-            // like the known ones: one dictionary naming a piece.
-            let unknown = MetadataMessage::Unknown(other);
-            let _ = piece()?;
-            no_trailing("ut_metadata message")?;
-            Ok(unknown)
+            // Unknown types are ignored per BEP 9, whatever shape they
+            // arrive in: a future extension may omit `piece` or append
+            // payload bytes, and neither must fail the fetch.
+            Ok(MetadataMessage::Unknown(other))
         }
     }
 }
