@@ -267,7 +267,8 @@ pub async fn policy_rescan(
         after = last.id;
         for row in &rows {
             summary.scanned = summary.scanned.saturating_add(1);
-            let matched = policy.matches(&row.name) || row.paths.iter().any(|p| policy.matches(p));
+            let matched = policy.matches_affixed(&row.name)
+                || row.paths.iter().any(|p| policy.matches_affixed(p));
             if !matched {
                 continue;
             }

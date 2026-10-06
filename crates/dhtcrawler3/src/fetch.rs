@@ -419,7 +419,7 @@ pub fn inspect(key: &DhtKey, info: &[u8], policy: &TermMatcher) -> Inspection {
     }
     let mut blocked = false;
     let parsed = dc3_torrent::parse_info_visit(info, &mut |text| {
-        if !blocked && policy.matches(text) {
+        if !blocked && policy.matches_affixed(text) {
             blocked = true;
         }
     });
@@ -1104,6 +1104,17 @@ mod tests {
         let both = info_dict_sized("clean", &[("pthc.txt", 5), ("b.txt", -1)], false);
         assert_eq!(
             inspect(&DhtKey(sha1(&both)), &both, &policy),
+            Inspection::Blocked
+        );
+        // Short seeds hidden in affixes block too, matching display.
+        let affixed_name = info_dict("xpthc movie", &["ok.txt"], false);
+        assert_eq!(
+            inspect(&key_of(&affixed_name), &affixed_name, &policy),
+            Inspection::Blocked
+        );
+        let affixed_path = info_dict("holiday", &["xpthc/a.jpg"], false);
+        assert_eq!(
+            inspect(&key_of(&affixed_path), &affixed_path, &policy),
             Inspection::Blocked
         );
     }

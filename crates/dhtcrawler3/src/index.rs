@@ -96,9 +96,14 @@ where
         .map_err(|e| IndexError::Task(e.to_string()))?
 }
 
-/// True if the row's name or any of its stored paths matches `policy`.
+/// True if the row's name or any of its stored paths matches `policy`,
+/// including short seeds hidden inside longer tokens.
 pub fn blocked_by_policy(policy: &TermMatcher, row: &IndexRow) -> bool {
-    policy.matches(&row.name) || row.files_text.lines().any(|line| policy.matches(line))
+    policy.matches_affixed(&row.name)
+        || row
+            .files_text
+            .lines()
+            .any(|line| policy.matches_affixed(line))
 }
 
 /// The search document for a row.
@@ -686,11 +691,15 @@ mod tests {
         feed.put(1, "debian", "a/pthc/b.iso\nc.txt", true);
         feed.put(2, "PTHC video", "", true);
         feed.put(3, "debian", "iso/debian.iso", true);
+        feed.put(4, "xpthc movie", "ok.txt", true);
+        feed.put(5, "holiday", "xpthc/a.jpg", true);
         let rows = feed.inner.lock().unwrap().rows.clone();
         let p = policy();
         assert!(blocked_by_policy(&p, &rows[0]));
         assert!(blocked_by_policy(&p, &rows[1]));
         assert!(!blocked_by_policy(&p, &rows[2]));
+        assert!(blocked_by_policy(&p, &rows[3]));
+        assert!(blocked_by_policy(&p, &rows[4]));
         let doc = index_doc(&rows[2]);
         assert_eq!(doc.id, 3);
         assert_eq!(doc.created, 1_700_000_000);
