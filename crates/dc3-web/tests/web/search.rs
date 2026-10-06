@@ -79,10 +79,9 @@ async fn results_follow_the_index_order_and_skip_missing_hits() {
         r.body
             .contains(r#"<span aria-current="true">Largest</span>"#)
     );
-    assert!(
-        r.body
-            .contains(r#"<a href="/search?q=ubuntu&#38;p=1&#38;sort=newest&#38;per_page=20">Newest</a>"#)
-    );
+    assert!(r.body.contains(
+        r#"<a href="/search?q=ubuntu&#38;p=1&#38;sort=newest&#38;per_page=20">Newest</a>"#
+    ));
     // The query is shown in the heading and the search box.
     assert!(r.body.contains("Results for <bdi>ubuntu</bdi>"));
     assert!(r.body.contains(r#"value="ubuntu""#));
@@ -254,7 +253,11 @@ async fn short_prefixes_of_blocked_terms_are_blocked() {
     let _serial = serial().await;
     // Clean name, blocked term only in the files: reachable only through
     // prefix expansion.
-    let app = app(vec![torrent(1, "holiday photos", &[("zzforbiddenzz/a.jpg", 1)])]);
+    let app = app(vec![torrent(
+        1,
+        "holiday photos",
+        &[("zzforbiddenzz/a.jpg", 1)],
+    )]);
     let blocked = metrics().counter("dc3_blocked_queries_total");
     let searches = metrics().histogram_count("dc3_search_seconds");
     for q in ["zz", "zzforbiddenz"] {
@@ -267,11 +270,7 @@ async fn short_prefixes_of_blocked_terms_are_blocked() {
         );
         assert!(!r.body.contains("result-title"), "{q}");
         // The blocked query is searched never and shown nowhere.
-        let r = send(
-            &app.router,
-            get(&format!("/api/v1/search?q={}", enc(q))),
-        )
-        .await;
+        let r = send(&app.router, get(&format!("/api/v1/search?q={}", enc(q)))).await;
         assert_eq!(r.status, StatusCode::OK, "{q}");
         let json = r.json();
         assert_eq!(json["blocked"], true, "{q}");

@@ -281,7 +281,11 @@ async fn every_kind_of_response_has_the_security_headers() {
     assert_security_headers(&r, true);
     assert_eq!(r.header("cache-control"), "no-store");
     let big = format!("reason=other&message={}", "a".repeat(40_000));
-    let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, &big, CLIENT)).await;
+    let r = send(
+        &app.router,
+        report_post(&key, &SAME_ORIGIN_HEADERS, &big, CLIENT),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_security_headers(&r, true);
 

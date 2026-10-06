@@ -772,9 +772,8 @@ impl Store {
     /// Unaware lookups must not call this (NULL means unscraped, 0 means
     /// measured dead).
     pub async fn note_fetch_estimate(&self, key: &DhtKey, seeders_est: u32) -> Result<()> {
-        let est = i32::try_from(seeders_est).map_err(|_| {
-            StoreError::Invalid(format!("seeders_est {seeders_est} exceeds i32"))
-        })?;
+        let est = i32::try_from(seeders_est)
+            .map_err(|_| StoreError::Invalid(format!("seeders_est {seeders_est} exceeds i32")))?;
         sqlx::query("UPDATE pending SET seeders_est = $2 WHERE dht_key = $1")
             .bind(key.as_bytes().as_slice())
             .bind(est)
@@ -862,10 +861,12 @@ impl Store {
             return Ok(0);
         }
         let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
-        let res = sqlx::query("UPDATE removed_keys SET sightings = sightings + 1 WHERE key = ANY($1::bytea[])")
-            .bind(&raw)
-            .execute(&self.pool)
-            .await?;
+        let res = sqlx::query(
+            "UPDATE removed_keys SET sightings = sightings + 1 WHERE key = ANY($1::bytea[])",
+        )
+        .bind(&raw)
+        .execute(&self.pool)
+        .await?;
         Ok(res.rows_affected())
     }
 

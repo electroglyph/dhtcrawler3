@@ -95,9 +95,7 @@ impl TermMatcher {
                 return Err(PolicyError::EmptyTerm { line: line_no });
             };
             let short_seed = match tokens.as_slice() {
-                [only]
-                    if (1..=MAX_AFFIX_SEED_CHARS).contains(&only.chars().count()) =>
-                {
+                [only] if (1..=MAX_AFFIX_SEED_CHARS).contains(&only.chars().count()) => {
                     Some(only.clone())
                 }
                 _ => None,

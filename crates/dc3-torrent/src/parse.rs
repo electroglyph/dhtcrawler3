@@ -355,8 +355,7 @@ fn sanitised_path_components<'a>(
             let mut comps = Vec::with_capacity(p.len());
             let mut san = Vec::new();
             for (a, b) in p.iter().zip(l.iter()) {
-                let s = sanitize_path_component(a)
-                    .or_else(|| sanitize_path_component(b));
+                let s = sanitize_path_component(a).or_else(|| sanitize_path_component(b));
                 if let Some(s) = s {
                     san.push(s);
                 }
@@ -524,12 +523,7 @@ impl OpenDirs {
     /// Whether a file named `raw` in the current directory is padding.
     /// Checks both the raw and sanitised file name, so whitespace or
     /// invisible characters cannot hide a padding marker.
-    fn is_padding(
-        &self,
-        raw: &str,
-        sanitised: Option<&str>,
-        attr: Option<&[u8]>,
-    ) -> bool {
+    fn is_padding(&self, raw: &str, sanitised: Option<&str>, attr: Option<&[u8]>) -> bool {
         let first_raw = if self.marks.is_empty() {
             raw
         } else if self.top_is_pad {

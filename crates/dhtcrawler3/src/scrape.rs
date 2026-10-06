@@ -76,7 +76,8 @@ pub struct ScrapeTuning {
 impl ScrapeTuning {
     /// Timings from `[crawl]`. The worker count lives in
     /// [`crate::crawl::Crawler::start`], which spawns the workers.
-    pub fn from_config(c: &CrawlConfig) -> Self {        Self {
+    pub fn from_config(c: &CrawlConfig) -> Self {
+        Self {
             batch: i64::try_from(c.scrape_batch).unwrap_or(i64::MAX),
             max_failures: c.max_scrape_failures,
             threshold: u64::from(c.scrape_seeder_threshold),
@@ -238,7 +239,10 @@ impl<S: CrawlStore> Scraper<S> {
             }
             Ok(false) => {}
         }
-        let report = self.dht.scrape(item.dht_key, self.tuning.lookup_timeout).await;
+        let report = self
+            .dht
+            .scrape(item.dht_key, self.tuning.lookup_timeout)
+            .await;
         let verdict = classify(&report, self.tuning.threshold);
         self.apply(item, verdict).await;
         Some(verdict)
@@ -281,11 +285,7 @@ impl<S: CrawlStore> Scraper<S> {
                     }
                 } else {
                     metrics::counter!(METRIC_SCRAPES, "outcome" => "dying").increment(1);
-                    if let Err(e) = self
-                        .store
-                        .record_scrape(item.id, Some(est), failures)
-                        .await
-                    {
+                    if let Err(e) = self.store.record_scrape(item.id, Some(est), failures).await {
                         tracing::error!(error = %e, id = item.id, "record_scrape failed");
                     }
                 }
@@ -305,7 +305,11 @@ impl<S: CrawlStore> Scraper<S> {
 
     /// Purges old scrape tombstones and trims removal memory.
     async fn sweep(&self) {
-        match self.store.purge_tombstoned(self.tuning.purge_grace, MAX_PURGE_BATCH).await {
+        match self
+            .store
+            .purge_tombstoned(self.tuning.purge_grace, MAX_PURGE_BATCH)
+            .await
+        {
             Ok(n) => {
                 if n > 0 {
                     metrics::counter!(METRIC_PURGED).increment(n);
@@ -335,7 +339,10 @@ impl<S: CrawlStore> Scraper<S> {
             () = stop.cancelled() => {},
             () = tokio::time::sleep(pause) => {},
         }
-        pause.saturating_mul(2).min(SCRAPE_IDLE_MAX).max(SCRAPE_IDLE_MIN)
+        pause
+            .saturating_mul(2)
+            .min(SCRAPE_IDLE_MAX)
+            .max(SCRAPE_IDLE_MIN)
     }
 }
 

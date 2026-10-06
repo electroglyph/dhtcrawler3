@@ -100,9 +100,7 @@ impl ScrapeOutcome {
     /// `None` means UNKNOWN (no aware response, or a saturated union).
     /// An empty union (live entries but no seeds seen) estimates to `0`.
     fn seeders_est(&self) -> Option<u64> {
-        self.seeders_union()?
-            .estimate()
-            .map(|n| n.floor() as u64)
+        self.seeders_union()?.estimate().map(|n| n.floor() as u64)
     }
 }
 
@@ -281,14 +279,10 @@ impl Lookup {
                     if live {
                         self.live_proofs = self.live_proofs.saturating_add(1);
                     }
-                    self.seed_filters.push(
-                        sd.map(|b| *b)
-                            .unwrap_or([0u8; crate::bloom::BLOOM_LEN]),
-                    );
-                    self.peer_filters.push(
-                        pe.map(|b| *b)
-                            .unwrap_or([0u8; crate::bloom::BLOOM_LEN]),
-                    );
+                    self.seed_filters
+                        .push(sd.map(|b| *b).unwrap_or([0u8; crate::bloom::BLOOM_LEN]));
+                    self.peer_filters
+                        .push(pe.map(|b| *b).unwrap_or([0u8; crate::bloom::BLOOM_LEN]));
                 }
             }
         }
@@ -539,7 +533,9 @@ pub(crate) async fn announce(
             info_hash: key,
             port,
             implied_port: false,
-            token, seed: false };
+            token,
+            seed: false,
+        };
         inner.query(sock, node.addr, method, Some(node.id))
     }))
     .await;

@@ -18,7 +18,9 @@ use dc3_search::{
 use dc3_store::TorrentRecord;
 use serde::Deserialize;
 
-use super::{Detail, Shown, encode_query_value, fresh_seeders, log_backend_error, show_all, torrent_href};
+use super::{
+    Detail, Shown, encode_query_value, fresh_seeders, log_backend_error, show_all, torrent_href,
+};
 use crate::Backend;
 use crate::app::{AppState, routes};
 use crate::format::{date, grouped, human_size, plural, rfc3339};
@@ -56,7 +58,9 @@ impl BadParam {
     pub(crate) fn message(self) -> String {
         match self {
             BadParam::Page => format!("The page number must be between 1 and {MAX_PAGE}."),
-            BadParam::Sort => "The sort order must be relevance, newest, size, seen or seeders.".into(),
+            BadParam::Sort => {
+                "The sort order must be relevance, newest, size, seen or seeders.".into()
+            }
             BadParam::PerPage => {
                 format!("The page size must be between 1 and {MAX_PER_PAGE}.")
             }
@@ -112,7 +116,11 @@ pub(crate) async fn expansion_blocked<B: Backend>(st: &AppState<B>, parsed: &Par
         },
         _ => return false,
     };
-    let expansions = match st.search.prefix_expansions(single.clone(), SEARCH_TIMEOUT).await {
+    let expansions = match st
+        .search
+        .prefix_expansions(single.clone(), SEARCH_TIMEOUT)
+        .await
+    {
         Ok(expansions) => expansions,
         Err(_) => return false,
     };
@@ -272,8 +280,11 @@ pub(crate) fn order_page(
         }
         Sort::Relevance => {
             torrents.sort_by(|a, b| {
-                boosted(&b.0, scores.get(&b.0.id), freshness)
-                    .total_cmp(&boosted(&a.0, scores.get(&a.0.id), freshness))
+                boosted(&b.0, scores.get(&b.0.id), freshness).total_cmp(&boosted(
+                    &a.0,
+                    scores.get(&a.0.id),
+                    freshness,
+                ))
             });
         }
         Sort::Newest | Sort::Size | Sort::Seen => {}
@@ -373,13 +384,7 @@ pub(crate) async fn search_page<B: Backend>(
         Ok(parsed) => parsed,
         Err(e) => {
             let failure = Failure::Query(e);
-            return error_with_query(
-                site,
-                Flavor::Html,
-                failure.status(),
-                &failure.message(),
-                q,
-            );
+            return error_with_query(site, Flavor::Html, failure.status(), &failure.message(), q);
         }
     };
     if expansion_blocked(&st, &parsed).await {
@@ -426,8 +431,7 @@ pub(crate) async fn search_page<B: Backend>(
         page_number,
         prev_href: (page_number > 1)
             .then(|| search_href(q, page_number.saturating_sub(1), sort, per_page)),
-        next_href: has_next
-            .then(|| search_href(q, page_number.saturating_add(1), sort, per_page)),
+        next_href: has_next.then(|| search_href(q, page_number.saturating_add(1), sort, per_page)),
     };
     html(StatusCode::OK, &page)
 }

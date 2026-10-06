@@ -448,7 +448,9 @@ mod tests {
         let c = MethodCounters::default();
         c.count(&Method::Ping);
         c.count(&Method::GetPeers {
-            info_hash: dc3_core::DhtKey([0; 20]), scrape: false });
+            info_hash: dc3_core::DhtKey([0; 20]),
+            scrape: false,
+        });
         c.count_other();
         let q = c.snapshot();
         let labels: Vec<_> = q.iter().collect();

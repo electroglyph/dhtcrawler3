@@ -67,8 +67,7 @@ pub(crate) fn fresh_seeders(record: &TorrentRecord, freshness: Duration) -> Opti
     let est = record.seeders_est?;
     let scraped = record.last_scraped_at?;
     let age = Utc::now().signed_duration_since(scraped);
-    (age <= chrono::Duration::from_std(freshness).unwrap_or(chrono::Duration::MAX))
-        .then_some(est)
+    (age <= chrono::Duration::from_std(freshness).unwrap_or(chrono::Duration::MAX)).then_some(est)
 }
 
 /// A stored torrent's text, cleaned for display and checked against the
@@ -358,14 +357,22 @@ mod tests {
     fn affixed_short_terms_hide_torrents() {
         let policy = TermMatcher::load("pthc\n").unwrap();
         assert!(
-            show(&record("fine", &["xpthc/a.jpg"]), &policy, Detail::WithFiles).is_none()
+            show(
+                &record("fine", &["xpthc/a.jpg"]),
+                &policy,
+                Detail::WithFiles
+            )
+            .is_none()
         );
-        assert!(
-            show(&record("fine", &["xpthc/a.jpg"]), &policy, Detail::NameOnly).is_none()
-        );
+        assert!(show(&record("fine", &["xpthc/a.jpg"]), &policy, Detail::NameOnly).is_none());
         assert!(show(&record("xpthc movie", &[]), &policy, Detail::NameOnly).is_none());
         assert!(
-            show(&record("holiday photos", &["ok.jpg"]), &policy, Detail::NameOnly).is_some()
+            show(
+                &record("holiday photos", &["ok.jpg"]),
+                &policy,
+                Detail::NameOnly
+            )
+            .is_some()
         );
     }
 
@@ -395,8 +402,7 @@ mod tests {
     fn scraped_record(est: Option<u64>, scraped_ago_secs: Option<i64>) -> TorrentRecord {
         let mut r = record("x", &[]);
         r.seeders_est = est;
-        r.last_scraped_at = scraped_ago_secs
-            .map(|s| Utc::now() - chrono::Duration::seconds(s));
+        r.last_scraped_at = scraped_ago_secs.map(|s| Utc::now() - chrono::Duration::seconds(s));
         r
     }
 
@@ -449,7 +455,12 @@ mod tests {
                 (r, s)
             })
             .collect();
-        order_page(&mut page, &HashMap::new(), dc3_search::Sort::Seeders, freshness);
+        order_page(
+            &mut page,
+            &HashMap::new(),
+            dc3_search::Sort::Seeders,
+            freshness,
+        );
         let ests: Vec<Option<u64>> = page.iter().map(|(r, _)| r.seeders_est).collect();
         assert_eq!(ests, [Some(30), Some(5), Some(0), None]);
 
@@ -491,14 +502,16 @@ mod tests {
 
         // The boost re-ranks the page: the lower BM25 score with many
         // fresh seeders comes first; a stale swarm does not move.
-        let mk = [missing, fresh, stale].into_iter().enumerate().map(|(i, mut r)| {
-            r.id = i as i64 + 1;
-            (r.clone(), shown_of(&r))
-        });
+        let mk = [missing, fresh, stale]
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut r)| {
+                r.id = i as i64 + 1;
+                (r.clone(), shown_of(&r))
+            });
         let mut page: Vec<(TorrentRecord, Shown)> = mk.collect();
         // Fresh (id 2) is boosted past the leader; stale (id 3) is not.
-        let scores: HashMap<i64, f32> =
-            [(1, 3.0), (2, 2.9), (3, 2.95)].into_iter().collect();
+        let scores: HashMap<i64, f32> = [(1, 3.0), (2, 2.9), (3, 2.95)].into_iter().collect();
         order_page(&mut page, &scores, dc3_search::Sort::Relevance, freshness);
         let ids: Vec<i64> = page.iter().map(|(r, _)| r.id).collect();
         // Fresh (id 2, boosted past 3.0) first; stale (id 3) and missing

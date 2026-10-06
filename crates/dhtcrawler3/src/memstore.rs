@@ -525,11 +525,14 @@ impl CrawlStore for MemoryStore {
         state.torrents.remove(&key);
         state.scrapes.remove(&key);
         state.tombstoned.insert(key, (Instant::now(), id, size));
-        let entry = state.removed.entry(prefix(key.as_bytes())).or_insert(RemovedEntry {
-            removed_at: Instant::now(),
-            removals: 0,
-            sightings: 0,
-        });
+        let entry = state
+            .removed
+            .entry(prefix(key.as_bytes()))
+            .or_insert(RemovedEntry {
+                removed_at: Instant::now(),
+                removals: 0,
+                sightings: 0,
+            });
         entry.removed_at = Instant::now();
         entry.removals = entry.removals.saturating_add(1);
         entry.sightings = 0;
@@ -818,7 +821,12 @@ mod scrape_tests {
         assert_eq!(items[0].id, id);
         assert_eq!(items[0].seeders_est, None);
         let snap = items[0].clone();
-        assert!(s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap().is_empty());
+        assert!(
+            s.claim_scrape_due(10, LIVE, UNKNOWN)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // A dead scrape is recorded.
         assert!(s.record_scrape(id, Some(0), 1).await.unwrap());
@@ -826,7 +834,11 @@ mod scrape_tests {
 
         // A refresh bumps the guard: the stale snapshot cannot tombstone.
         s.complete(&k, &torrent(k)).await.unwrap();
-        assert!(!s.tombstone_dead(id, snap.last_seen_at, snap.change_seq).await.unwrap());
+        assert!(
+            !s.tombstone_dead(id, snap.last_seen_at, snap.change_seq)
+                .await
+                .unwrap()
+        );
         assert!(s.torrent(&k).is_some());
 
         // Past the unknown interval the row is due again; the fresh
@@ -835,11 +847,22 @@ mod scrape_tests {
         let items = s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap();
         assert_eq!(items.len(), 1);
         let fresh = items[0].clone();
-        assert_ne!((fresh.last_seen_at, fresh.change_seq), (snap.last_seen_at, snap.change_seq));
-        assert!(s.tombstone_dead(id, fresh.last_seen_at, fresh.change_seq).await.unwrap());
+        assert_ne!(
+            (fresh.last_seen_at, fresh.change_seq),
+            (snap.last_seen_at, snap.change_seq)
+        );
+        assert!(
+            s.tombstone_dead(id, fresh.last_seen_at, fresh.change_seq)
+                .await
+                .unwrap()
+        );
         assert!(s.torrent(&k).is_none());
         assert_eq!(s.removed_keys_count().await.unwrap(), 1);
-        assert!(!s.tombstone_dead(id, fresh.last_seen_at, fresh.change_seq).await.unwrap());
+        assert!(
+            !s.tombstone_dead(id, fresh.last_seen_at, fresh.change_seq)
+                .await
+                .unwrap()
+        );
 
         // A denied tombstone is never purged.
         s.preload_denial(k.as_bytes(), DenyReason::Other);
@@ -847,7 +870,12 @@ mod scrape_tests {
         assert_eq!(s.purge_tombstoned(Duration::ZERO, 1000).await.unwrap(), 0);
         // Claiming skips denied rows.
         s.complete(&k, &torrent(k)).await.unwrap_err();
-        assert!(s.claim_scrape_due(10, Duration::ZERO, Duration::ZERO).await.unwrap().is_empty());
+        assert!(
+            s.claim_scrape_due(10, Duration::ZERO, Duration::ZERO)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // Trimming keeps the newest rows up to the cap.
         assert_eq!(s.trim_removed_keys(10).await.unwrap(), 0);

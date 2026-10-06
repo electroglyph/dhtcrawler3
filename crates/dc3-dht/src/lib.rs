@@ -24,9 +24,9 @@
 #![warn(clippy::arithmetic_side_effects)]
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
+pub mod bloom;
 pub mod compact;
 mod config;
-pub mod bloom;
 pub mod krpc;
 mod lookup;
 mod net;
@@ -55,8 +55,8 @@ use tokio_util::sync::DropGuard;
 
 pub use compact::{Family, is_dialable};
 pub use config::{
-    DEFAULT_BOOTSTRAP, DEFAULT_CLIENT_VERSION, DEFAULT_MAX_PACKETS_PER_SEC,
-    DEFAULT_PORT, DEFAULT_RESPONDER_BYTES_PER_SEC, DEFAULT_RESPONDER_REPLIES_PER_SEC,
+    DEFAULT_BOOTSTRAP, DEFAULT_CLIENT_VERSION, DEFAULT_MAX_PACKETS_PER_SEC, DEFAULT_PORT,
+    DEFAULT_RESPONDER_BYTES_PER_SEC, DEFAULT_RESPONDER_REPLIES_PER_SEC,
     DEFAULT_SAMPLER_CONCURRENCY, DEFAULT_SCRAPE_PACKETS_PER_SEC, DhtConfig, DhtTuning,
     MAX_SAMPLER_CONCURRENCY,
 };
@@ -157,7 +157,8 @@ impl ScrapeReport {
 /// A running DHT node. Cheap to clone; the node stops when
 /// [`shutdown`](Dht::shutdown) is called or the last handle is dropped.
 #[derive(Clone)]
-pub struct Dht {    inner: Arc<Inner>,
+pub struct Dht {
+    inner: Arc<Inner>,
     _stop_on_drop: Arc<DropGuard>,
 }
 

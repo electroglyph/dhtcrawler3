@@ -10,8 +10,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use dc3_core::DhtKey;
-use dc3_dht::compact::canonical_addr;
 use dc3_dht::ScrapeReport;
+use dc3_dht::compact::canonical_addr;
 
 /// What the crawler needs from a DHT node. Implemented by [`dc3_dht::Dht`];
 /// tests may substitute their own.

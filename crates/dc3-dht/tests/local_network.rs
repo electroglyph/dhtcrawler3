@@ -412,7 +412,13 @@ async fn private_network_inner() {
     }
     assert!(target.stats().errors_sent > errors_before);
     let lookup = client
-        .call(target_addr, Method::GetPeers { info_hash: key, scrape: false })
+        .call(
+            target_addr,
+            Method::GetPeers {
+                info_hash: key,
+                scrape: false,
+            },
+        )
         .await;
     let r = response(&lookup);
     assert_eq!(r.values, None, "an announce with a bad token was stored");
@@ -430,7 +436,13 @@ async fn private_network_inner() {
     let ok = client.call(target_addr, good).await;
     assert_eq!(response(&ok).id, target.node_ids()[0]);
     let lookup = client
-        .call(target_addr, Method::GetPeers { info_hash: key, scrape: false })
+        .call(
+            target_addr,
+            Method::GetPeers {
+                info_hash: key,
+                scrape: false,
+            },
+        )
         .await;
     assert_eq!(response(&lookup).values, Some(vec![client.addr()]));
     // The target reported both queries, with the client as the source.

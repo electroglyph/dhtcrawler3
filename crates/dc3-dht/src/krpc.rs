@@ -685,17 +685,24 @@ mod tests {
             Method::FindNode {
                 target: NodeId([3; 20]),
             },
-            Method::GetPeers { info_hash: key, scrape: false },
+            Method::GetPeers {
+                info_hash: key,
+                scrape: false,
+            },
             Method::AnnouncePeer {
                 info_hash: key,
                 port: 6881,
                 implied_port: false,
-                token: b"tok".to_vec(), seed: false },
+                token: b"tok".to_vec(),
+                seed: false,
+            },
             Method::AnnouncePeer {
                 info_hash: key,
                 port: 0,
                 implied_port: true,
-                token: vec![0; 8], seed: false },
+                token: vec![0; 8],
+                seed: false,
+            },
             Method::SampleInfohashes {
                 target: NodeId([4; 20]),
             },
@@ -766,10 +773,7 @@ mod tests {
         let Body::Query(q2) = back.body else {
             panic!("not a query")
         };
-        assert!(matches!(
-            q2.method,
-            Method::AnnouncePeer { seed: true, .. }
-        ));
+        assert!(matches!(q2.method, Method::AnnouncePeer { seed: true, .. }));
         // Filters require exactly 256 B; other lengths decode as absent.
         let mut r = Response {
             id,
@@ -834,10 +838,9 @@ mod tests {
         assert_eq!(m.ip, None);
         assert!(!m.read_only);
         // BEP 42 raw-address forms decode with port 0: only the IP is used.
-        let m = decode(
-            b"d2:ip4:\x01\x02\x03\x041:rd2:id20:mnopqrstuvwxyz123456e2:roi1e1:t1:x1:y1:re",
-        )
-        .unwrap();
+        let m =
+            decode(b"d2:ip4:\x01\x02\x03\x041:rd2:id20:mnopqrstuvwxyz123456e2:roi1e1:t1:x1:y1:re")
+                .unwrap();
         assert_eq!(m.ip, Some(sa("1.2.3.4:0")));
         let m = decode(
             b"d2:ip16:\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x011:rd2:id20:mnopqrstuvwxyz123456e2:roi1e1:t1:x1:y1:re",

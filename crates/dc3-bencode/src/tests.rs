@@ -154,34 +154,19 @@ fn depth_limit_is_enforced_without_recursion() {
 
 #[test]
 fn depth_limit_gates_scalars_at_every_level() {
-    let zero = Limits {
-        max_depth: 0,
-        ..L
-    };
-    assert_eq!(
-        decode(b"i1e", &zero).unwrap_err().kind,
-        ErrorKind::TooDeep
-    );
-    assert_eq!(
-        decode(b"1:a", &zero).unwrap_err().kind,
-        ErrorKind::TooDeep
-    );
+    let zero = Limits { max_depth: 0, ..L };
+    assert_eq!(decode(b"i1e", &zero).unwrap_err().kind, ErrorKind::TooDeep);
+    assert_eq!(decode(b"1:a", &zero).unwrap_err().kind, ErrorKind::TooDeep);
     let one = Limits { max_depth: 1, ..L };
     assert!(decode(b"i1e", &one).is_ok());
     assert!(decode(b"le", &one).is_ok());
-    assert_eq!(
-        decode(b"li1ee", &one).unwrap_err().kind,
-        ErrorKind::TooDeep
-    );
+    assert_eq!(decode(b"li1ee", &one).unwrap_err().kind, ErrorKind::TooDeep);
     assert_eq!(
         decode(b"d1:ai1ee", &one).unwrap_err().kind,
         ErrorKind::TooDeep
     );
     // Same predicate gates byte strings at every level.
-    assert_eq!(
-        decode(b"l1:ae", &one).unwrap_err().kind,
-        ErrorKind::TooDeep
-    );
+    assert_eq!(decode(b"l1:ae", &one).unwrap_err().kind, ErrorKind::TooDeep);
     assert_eq!(
         decode(b"d1:a1:be", &one).unwrap_err().kind,
         ErrorKind::TooDeep

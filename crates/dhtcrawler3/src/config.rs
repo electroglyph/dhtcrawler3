@@ -1531,7 +1531,10 @@ mod tests {
             ("DC3_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "604800"),
         ])
         .unwrap_err();
-        assert!(err.to_string().contains("scrape_unknown_interval_secs"), "{err}");
+        assert!(
+            err.to_string().contains("scrape_unknown_interval_secs"),
+            "{err}"
+        );
 
         // The overall lookup deadline must exceed the per-RPC timeout.
         let err = with_env(&[
@@ -1539,7 +1542,10 @@ mod tests {
             ("DC3_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "10"),
         ])
         .unwrap_err();
-        assert!(err.to_string().contains("scrape_lookup_timeout_secs"), "{err}");
+        assert!(
+            err.to_string().contains("scrape_lookup_timeout_secs"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1693,14 +1699,8 @@ mod tests {
                 "postgres://u@h/db?sslmode=disable",
             ),
             // Password variants are dropped, fragments never printed.
-            (
-                "postgres://bob:s3cret@h/db?passwd=x",
-                "postgres://bob@h/db",
-            ),
-            (
-                "postgres://bob:s3cret@h/db?pass=x",
-                "postgres://bob@h/db",
-            ),
+            ("postgres://bob:s3cret@h/db?passwd=x", "postgres://bob@h/db"),
+            ("postgres://bob:s3cret@h/db?pass=x", "postgres://bob@h/db"),
             (
                 "postgres://bob:s3cret@h/db?sslmode=disable&PWD=x&Token=y",
                 "postgres://bob@h/db?sslmode=disable",

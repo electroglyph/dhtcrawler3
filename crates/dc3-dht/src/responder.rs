@@ -117,9 +117,7 @@ pub(crate) fn answer(
             }
             // BEP 33: scrape=1 with local entries gains BFsd/BFpe; without
             // entries the response carries no filters (§0).
-            if *scrape
-                && let Some((sd, pe)) = store.filters(info_hash, ctx.transport, ctx.now)
-            {
+            if *scrape && let Some((sd, pe)) = store.filters(info_hash, ctx.transport, ctx.now) {
                 response.bf_sd = Some(Box::new(sd.0));
                 response.bf_pe = Some(Box::new(pe.0));
             }
@@ -378,7 +376,13 @@ mod tests {
         let key = DhtKey([5; 20]);
         let from = src().ip();
         let (reply, event) = f
-            .ask(src(), &query(Method::GetPeers { info_hash: key, scrape: false }))
+            .ask(
+                src(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: false,
+                }),
+            )
             .unwrap();
         let r = response(&reply);
         let token = r.token.clone().unwrap();
@@ -401,7 +405,9 @@ mod tests {
             info_hash: key,
             port: 7000,
             implied_port: false,
-            token: vec![0; 8], seed: false };
+            token: vec![0; 8],
+            seed: false,
+        };
         let (reply, event) = f.ask(src(), &query(bad)).unwrap();
         assert_eq!(error_code_of(&reply), error_code::PROTOCOL);
         assert!(event.is_none());
@@ -413,7 +419,9 @@ mod tests {
             info_hash: key,
             port: 7000,
             implied_port: false,
-            token: token.clone(), seed: false };
+            token: token.clone(),
+            seed: false,
+        };
         assert_eq!(
             error_code_of(&f.ask(other, &query(stolen)).unwrap().0),
             error_code::PROTOCOL
@@ -424,7 +432,9 @@ mod tests {
             info_hash: key,
             port: 7000,
             implied_port: false,
-            token: token.clone(), seed: false };
+            token: token.clone(),
+            seed: false,
+        };
         let (reply, event) = f.ask(src(), &query(good)).unwrap();
         assert_eq!(response(&reply).id, f.table.own_id());
         let peer: SocketAddr = "8.8.8.8:7000".parse().unwrap();
@@ -444,7 +454,9 @@ mod tests {
             info_hash: key,
             port: 1,
             implied_port: true,
-            token, seed: false };
+            token,
+            seed: false,
+        };
         let (_, event) = f.ask(src(), &query(implied)).unwrap();
         assert_eq!(event.unwrap().peer, Some(src()));
 
@@ -460,13 +472,25 @@ mod tests {
         assert!(event.unwrap().seed);
 
         let (reply, _) = f
-            .ask(src(), &query(Method::GetPeers { info_hash: key, scrape: false }))
+            .ask(
+                src(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: false,
+                }),
+            )
             .unwrap();
         // One entry per IP: the re-announce replaced the port.
         assert_eq!(response(&reply).values, Some(vec![src()]));
         // IPv6 requesters get IPv6 peers only.
         let (reply, event) = f
-            .ask(src6(), &query(Method::GetPeers { info_hash: key, scrape: false }))
+            .ask(
+                src6(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: false,
+                }),
+            )
             .unwrap();
         assert_eq!(response(&reply).values, None);
         assert_eq!(event.unwrap().from, src6().ip());
@@ -506,7 +530,16 @@ mod tests {
             let mut differs = false;
             for _ in 0..8 {
                 let (reply, _) = f
-                    .ask(from, &query_with(Method::GetPeers { info_hash: key, scrape: false }, want))
+                    .ask(
+                        from,
+                        &query_with(
+                            Method::GetPeers {
+                                info_hash: key,
+                                scrape: false,
+                            },
+                            want,
+                        ),
+                    )
                     .unwrap();
                 let encoded = krpc::encode(&reply).unwrap();
                 // The answer fits, and one more value would not have.
@@ -550,12 +583,24 @@ mod tests {
         }
         // With one node list, about 88 IPv4 or 28 IPv6 values fit.
         let (reply, _) = f
-            .ask(src(), &query(Method::GetPeers { info_hash: key, scrape: false }))
+            .ask(
+                src(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: false,
+                }),
+            )
             .unwrap();
         let back = krpc::decode(&krpc::encode(&reply).unwrap()).unwrap();
         assert_eq!(response(&back).values.as_ref().map(Vec::len), Some(88));
         let (reply, _) = f
-            .ask(src6(), &query(Method::GetPeers { info_hash: key, scrape: false }))
+            .ask(
+                src6(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: false,
+                }),
+            )
             .unwrap();
         let back = krpc::decode(&krpc::encode(&reply).unwrap()).unwrap();
         assert_eq!(response(&back).values.as_ref().map(Vec::len), Some(28));
@@ -739,7 +784,9 @@ mod tests {
             info_hash: key,
             port: 0,
             implied_port: true,
-            token, seed: false };
+            token,
+            seed: false,
+        };
         let (reply, event) = f.ask(zero_src, &query(implied)).unwrap();
         assert_eq!(error_code_of(&reply), error_code::PROTOCOL);
         assert!(event.is_none());
@@ -750,7 +797,9 @@ mod tests {
             info_hash: key,
             port: 7000,
             implied_port: false,
-            token, seed: false };
+            token,
+            seed: false,
+        };
         let (reply, event) = f.ask(private, &query(announce)).unwrap();
         assert_eq!(error_code_of(&reply), error_code::PROTOCOL);
         assert!(event.is_none());
@@ -768,7 +817,9 @@ mod tests {
                 info_hash: DhtKey([i; 20]),
                 port: 7000,
                 implied_port: false,
-                token: token.clone(), seed: false };
+                token: token.clone(),
+                seed: false,
+            };
             let (reply, event) = f.ask(src, &query(announce)).unwrap();
             // Refused announces still get a normal answer.
             assert!(matches!(reply.body, Body::Response(_)));
@@ -788,7 +839,9 @@ mod tests {
             info_hash: key,
             port: 7000,
             implied_port: false,
-            token, seed: false };
+            token,
+            seed: false,
+        };
         let (_, event) = f.ask(mapped, &query(announce)).unwrap();
         let event = event.unwrap();
         assert_eq!(event.peer, Some("8.8.8.8:7000".parse().unwrap()));

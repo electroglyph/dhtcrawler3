@@ -91,7 +91,11 @@ impl SearchHandle {
     /// Terms a trailing prefix word can expand to, on the live generation;
     /// see [`SearchIndex::prefix_expansions`]. Shares the search limit and
     /// timeout so gate checks cannot crowd out searches.
-    pub async fn prefix_expansions(&self, prefix: String, timeout: Duration) -> Result<Vec<String>> {
+    pub async fn prefix_expansions(
+        &self,
+        prefix: String,
+        timeout: Duration,
+    ) -> Result<Vec<String>> {
         let index = self.index();
         let permits = Arc::clone(&self.inner.permits);
         let run = async move {

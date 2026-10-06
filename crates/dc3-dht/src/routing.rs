@@ -1159,8 +1159,7 @@ mod tests {
         // local-test table: production tables do not admit private addrs
         // at all (`admissible` fails before BEP42 is consulted).
         let now = Instant::now();
-        let mut t =
-            RoutingTable::new(NodeId([0x55; 20]), now, config(Family::V4, LOCAL_TEST));
+        let mut t = RoutingTable::new(NodeId([0x55; 20]), now, config(Family::V4, LOCAL_TEST));
         let own = t.own_id();
         let id = own.random_with_prefix(0, true);
         assert!(t.on_response(id, sa("10.0.0.1:6881"), false, now));

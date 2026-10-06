@@ -597,7 +597,9 @@ impl<S: CrawlStore> Admission<S> {
                         }
                     }
                     for key in misses {
-                        self.removal_cache.entry(key).or_insert(RemovalVerdict::Clear(now));
+                        self.removal_cache
+                            .entry(key)
+                            .or_insert(RemovalVerdict::Clear(now));
                     }
                 }
                 Err(e) => {

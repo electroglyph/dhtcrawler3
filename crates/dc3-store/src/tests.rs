@@ -2514,7 +2514,12 @@ async fn scrape_claim_orders_never_scraped_first_and_holds_lease(pool: PgPool) {
     // The claim stamped both rows, so nothing is due until an interval elapses.
     let again = s.claim_scrape_due(10, live, unknown).await.unwrap();
     assert!(again.is_empty());
-    assert!(s.claim_scrape_due(0, live, unknown).await.unwrap().is_empty());
+    assert!(
+        s.claim_scrape_due(0, live, unknown)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -2581,7 +2586,11 @@ async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
     )
     .await
     .unwrap();
-    assert!(!s.tombstone_dead(id, item.last_seen_at, item.change_seq).await.unwrap());
+    assert!(
+        !s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
     assert_eq!(s.removed_keys_count().await.unwrap(), 0);
     assert!(raw_torrent(&pool, id).await.is_live());
 
@@ -2591,7 +2600,11 @@ async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
     backdate_scrape(&pool, id, days(40), None).await;
     let fresh = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
     let item = fresh.iter().find(|c| c.id == id).unwrap().clone();
-    assert!(s.tombstone_dead(id, item.last_seen_at, item.change_seq).await.unwrap());
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
     let row = raw_torrent(&pool, id).await;
     assert!(!row.is_live());
     assert_eq!(row.name, "");
@@ -2602,11 +2615,22 @@ async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
     // A second consecutive removal escalates the cooldown to 30d.
     s.note_removal(&k.0).await.unwrap();
     let remaining = s.removal_cooldown_remaining(&k.0).await.unwrap();
-    assert!(remaining > days(29) && remaining <= days(30), "{remaining:?}");
+    assert!(
+        remaining > days(29) && remaining <= days(30),
+        "{remaining:?}"
+    );
 
     // Tombstoning again (or an unknown id) records nothing.
-    assert!(!s.tombstone_dead(id, item.last_seen_at, item.change_seq).await.unwrap());
-    assert!(!s.tombstone_dead(999_999_999, item.last_seen_at, 1).await.unwrap());
+    assert!(
+        !s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s.tombstone_dead(999_999_999, item.last_seen_at, 1)
+            .await
+            .unwrap()
+    );
     assert_eq!(s.removed_keys_count().await.unwrap(), 1);
 }
 
@@ -2618,7 +2642,11 @@ async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
     let ida = s.complete(&a, &torrent(a, "old-dead")).await.unwrap();
     let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
     let item = snap.iter().find(|c| c.id == ida).unwrap().clone();
-    assert!(s.tombstone_dead(ida, item.last_seen_at, item.change_seq).await.unwrap());
+    assert!(
+        s.tombstone_dead(ida, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
     sqlx::query("UPDATE torrents SET deleted_at = now() - interval '2 hours' WHERE id = $1")
         .bind(ida)
         .execute(&pool)
@@ -2629,11 +2657,17 @@ async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
     let idb = s.complete(&b, &torrent(b, "fresh-dead")).await.unwrap();
     let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
     let item = snap.iter().find(|c| c.id == idb).unwrap().clone();
-    assert!(s.tombstone_dead(idb, item.last_seen_at, item.change_seq).await.unwrap());
+    assert!(
+        s.tombstone_dead(idb, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
     // Old denial tombstone: never purged (it is the block record).
     let c = key(43);
     s.complete(&c, &torrent(c, "denied")).await.unwrap();
-    s.deny(&c.0, DenyReason::Other, None, "tester").await.unwrap();
+    s.deny(&c.0, DenyReason::Other, None, "tester")
+        .await
+        .unwrap();
     sqlx::query("UPDATE torrents SET deleted_at = now() - interval '2 hours' WHERE dht_key = $1")
         .bind(c.0.as_slice())
         .execute(&pool)
@@ -2641,7 +2675,12 @@ async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
         .unwrap();
 
     assert_eq!(s.purge_tombstoned(days(1), 1000).await.unwrap(), 0);
-    assert_eq!(s.purge_tombstoned(Duration::from_secs(3600), 1000).await.unwrap(), 1);
+    assert_eq!(
+        s.purge_tombstoned(Duration::from_secs(3600), 1000)
+            .await
+            .unwrap(),
+        1
+    );
     assert!(raw_torrent(&pool, idb).await.deleted_at.is_some());
     let denied_id: i64 = sqlx::query_scalar("SELECT id FROM torrents WHERE dht_key = $1")
         .bind(c.0.as_slice())
@@ -2655,21 +2694,33 @@ async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
 async fn removal_memory_blocks_then_clears_on_refetch(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let k = key(51);
-    assert_eq!(s.removal_cooldown_remaining(&k.0).await.unwrap(), Duration::ZERO);
+    assert_eq!(
+        s.removal_cooldown_remaining(&k.0).await.unwrap(),
+        Duration::ZERO
+    );
 
     // A bare sighting creates no memory.
     s.note_removed_sighting(&k.0).await.unwrap();
-    assert_eq!(s.removal_cooldown_remaining(&k.0).await.unwrap(), Duration::ZERO);
+    assert_eq!(
+        s.removal_cooldown_remaining(&k.0).await.unwrap(),
+        Duration::ZERO
+    );
 
     // First removal: 7d; expiry is exactly bounded by the schedule.
     s.note_removal(&k.0).await.unwrap();
     let remaining = s.removal_cooldown_remaining(&k.0).await.unwrap();
-    assert!(remaining > Duration::ZERO && remaining <= days(7), "{remaining:?}");
+    assert!(
+        remaining > Duration::ZERO && remaining <= days(7),
+        "{remaining:?}"
+    );
 
     // A successful fetch clears the memory (LB-17): resurgent torrents
     // start over instead of escalating forever.
     s.complete(&k, &torrent(k, "back")).await.unwrap();
-    assert_eq!(s.removal_cooldown_remaining(&k.0).await.unwrap(), Duration::ZERO);
+    assert_eq!(
+        s.removal_cooldown_remaining(&k.0).await.unwrap(),
+        Duration::ZERO
+    );
     assert_eq!(s.removed_keys_count().await.unwrap(), 0);
 
     // 32-byte keys match by 20-byte prefix.
@@ -2690,7 +2741,10 @@ async fn trim_removed_keys_keeps_the_newest(pool: PgPool) {
     assert_eq!(s.trim_removed_keys(2).await.unwrap(), 1);
     assert_eq!(s.removed_keys_count().await.unwrap(), 2);
     // The oldest removal (key 1) was trimmed first.
-    assert_eq!(s.removal_cooldown_remaining(&key(1).0).await.unwrap(), Duration::ZERO);
+    assert_eq!(
+        s.removal_cooldown_remaining(&key(1).0).await.unwrap(),
+        Duration::ZERO
+    );
     assert!(s.removal_cooldown_remaining(&key(3).0).await.unwrap() > Duration::ZERO);
     assert_eq!(s.trim_removed_keys(0).await.unwrap(), 2);
     assert_eq!(s.removed_keys_count().await.unwrap(), 0);
@@ -2704,7 +2758,11 @@ async fn purge_tombstoned_takes_biggest_first_under_limit(pool: PgPool) {
         let id = s.complete(&k, &torrent(k, "sized")).await.unwrap();
         let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
         let item = snap.iter().find(|c| c.id == id).unwrap().clone();
-        assert!(s.tombstone_dead(id, item.last_seen_at, item.change_seq).await.unwrap());
+        assert!(
+            s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+                .await
+                .unwrap()
+        );
         sqlx::query(
             "UPDATE torrents SET deleted_at = now() - interval '2 hours', total_size = $2 \
               WHERE id = $1",
@@ -2717,10 +2775,11 @@ async fn purge_tombstoned_takes_biggest_first_under_limit(pool: PgPool) {
     }
     // Limit 2 removes the two biggest (30, 20); size 10 stays tombstoned.
     assert_eq!(s.purge_tombstoned(Duration::ZERO, 2).await.unwrap(), 2);
-    let left: Vec<i64> = sqlx::query_scalar("SELECT total_size FROM torrents WHERE deleted_at IS NOT NULL")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let left: Vec<i64> =
+        sqlx::query_scalar("SELECT total_size FROM torrents WHERE deleted_at IS NOT NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(left, vec![10]);
 }
 
@@ -2730,7 +2789,11 @@ async fn fetch_queue_prefers_lively_keys(pool: PgPool) {
     // Three queued keys: one with an estimate, two without.
     for n in [71u8, 72, 73] {
         s.observe(
-            &[Observation { key: key(n), sightings: 1, priority: false }],
+            &[Observation {
+                key: key(n),
+                sightings: 1,
+                priority: false,
+            }],
             NO_LIMIT,
         )
         .await
@@ -2749,7 +2812,6 @@ async fn fetch_queue_prefers_lively_keys(pool: PgPool) {
     assert_eq!(rest.len(), 2);
     assert!(rest.iter().all(|i| i.dht_key != ka));
 }
-
 
 #[sqlx::test(migrations = "./migrations")]
 async fn removal_cooldowns_and_sightings_batch(pool: PgPool) {
@@ -2790,6 +2852,8 @@ async fn refresh_scraped_defers_without_a_lookup(pool: PgPool) {
     assert_eq!(change_seq_of(&pool, id).await, before);
     // Unknown keys match nothing; tombstones stay tombstoned.
     assert_eq!(s.refresh_scraped(&[key(95)]).await.unwrap(), 0);
-    s.deny(&k.0, DenyReason::Other, None, "tester").await.unwrap();
+    s.deny(&k.0, DenyReason::Other, None, "tester")
+        .await
+        .unwrap();
     assert_eq!(s.refresh_scraped(&[k]).await.unwrap(), 0);
 }

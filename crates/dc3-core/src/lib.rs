@@ -281,10 +281,7 @@ mod tests {
         let twenty = "é".repeat(20);
         assert_eq!(twenty.chars().count(), 20);
         assert_eq!(twenty.len(), 40);
-        assert_eq!(
-            twenty.parse::<DhtKey>(),
-            Err(KeyParseError::BadLength(20))
-        );
+        assert_eq!(twenty.parse::<DhtKey>(), Err(KeyParseError::BadLength(20)));
         // 40 chars / 41 bytes: char length hits the hex arm, byte length does not.
         let s = format!("{}é{}", "a".repeat(19), "a".repeat(20));
         assert_eq!(s.chars().count(), 40);

@@ -89,10 +89,7 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
         keys: &[DhtKey],
     ) -> impl Future<Output = Result<Vec<(DhtKey, Duration)>>> + Send;
     /// See [`Store::note_removed_sightings`].
-    fn note_removed_sightings(
-        &self,
-        keys: &[DhtKey],
-    ) -> impl Future<Output = Result<u64>> + Send;
+    fn note_removed_sightings(&self, keys: &[DhtKey]) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::refresh_scraped`].
     fn refresh_scraped(&self, keys: &[DhtKey]) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::ping`].
@@ -208,10 +205,7 @@ impl CrawlStore for Store {
         Store::removal_cooldowns(self, keys)
     }
 
-    fn note_removed_sightings(
-        &self,
-        keys: &[DhtKey],
-    ) -> impl Future<Output = Result<u64>> + Send {
+    fn note_removed_sightings(&self, keys: &[DhtKey]) -> impl Future<Output = Result<u64>> + Send {
         Store::note_removed_sightings(self, keys)
     }
 

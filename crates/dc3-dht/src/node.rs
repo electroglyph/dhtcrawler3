@@ -318,11 +318,8 @@ impl Inner {
             spacing: QuerySpacing::new(tuning.per_address_query_spacing, policy),
         };
         let budget = TokenBucket::new(cfg.max_packets_per_sec, cfg.max_packets_per_sec, now);
-        let scrape_budget = TokenBucket::new(
-            cfg.scrape_packets_per_sec,
-            cfg.scrape_packets_per_sec,
-            now,
-        );
+        let scrape_budget =
+            TokenBucket::new(cfg.scrape_packets_per_sec, cfg.scrape_packets_per_sec, now);
         let responder_budget = ResponderBudget::new(
             tuning.responder_replies_per_sec,
             tuning.responder_bytes_per_sec,

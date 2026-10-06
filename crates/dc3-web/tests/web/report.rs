@@ -203,8 +203,9 @@ async fn report_outcomes_are_counted_but_never_shown() {
         m.counter(exhausted),
     );
 
-    let submit =
-        |reason: &str, peer: &str| report_post(&key, &SAME_ORIGIN_HEADERS, &form(reason, "", ""), peer);
+    let submit = |reason: &str, peer: &str| {
+        report_post(&key, &SAME_ORIGIN_HEADERS, &form(reason, "", ""), peer)
+    };
 
     app.backend.set_behaviour(ReportBehaviour::Hidden);
     let first = send(&app.router, submit("csam", "192.0.2.60:1")).await;
@@ -258,7 +259,11 @@ async fn backend_refusals() {
     {
         app.backend.set_behaviour(behaviour);
         let peer = format!("192.0.2.{}:1", 70 + i);
-        let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, &body, &peer)).await;
+        let r = send(
+            &app.router,
+            report_post(&key, &SAME_ORIGIN_HEADERS, &body, &peer),
+        )
+        .await;
         assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{behaviour:?}");
         assert!(r.body.contains("Reports are temporarily unavailable."));
         assert_security_headers(&r, true);
@@ -299,7 +304,11 @@ async fn invalid_reports_are_refused_with_the_form() {
     ];
     for (i, (body, message)) in cases.iter().enumerate() {
         let peer = format!("192.0.2.{}:1", 80 + i);
-        let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, body, &peer)).await;
+        let r = send(
+            &app.router,
+            report_post(&key, &SAME_ORIGIN_HEADERS, body, &peer),
+        )
+        .await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST, "{message}");
         assert!(r.body.contains(message), "{message}");
         assert!(r.body.contains("<form class=\"report-form\""));
@@ -310,7 +319,12 @@ async fn invalid_reports_are_refused_with_the_form() {
     let crlf = "<b>\r\n".repeat(400);
     let r = send(
         &app.router,
-        report_post(&key, &SAME_ORIGIN_HEADERS, &form("x", &crlf, ""), "192.0.2.90:1"),
+        report_post(
+            &key,
+            &SAME_ORIGIN_HEADERS,
+            &form("x", &crlf, ""),
+            "192.0.2.90:1",
+        ),
     )
     .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -389,10 +403,18 @@ async fn report_submissions_are_rate_limited() {
     let body = form("other", "", "");
     let peer = "198.51.100.200:5000";
     for _ in 0..3 {
-        let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, &body, peer)).await;
+        let r = send(
+            &app.router,
+            report_post(&key, &SAME_ORIGIN_HEADERS, &body, peer),
+        )
+        .await;
         assert_eq!(r.status, StatusCode::OK);
     }
-    let r = send(&app.router, report_post(&key, &SAME_ORIGIN_HEADERS, &body, peer)).await;
+    let r = send(
+        &app.router,
+        report_post(&key, &SAME_ORIGIN_HEADERS, &body, peer),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
     assert_security_headers(&r, true);
     let retry: u64 = r.header("retry-after").parse().unwrap();

@@ -229,11 +229,13 @@ pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
     // total folded length gates (so multi-token words like `22.0` keep their
     // phrase prefix) while the CJK check stays on the last token that the
     // prefix expands.
-    if ends_open && !trailing_ignored && let Some(last) = words.last_mut() {
+    if ends_open
+        && !trailing_ignored
+        && let Some(last) = words.last_mut()
+    {
         let eligible = !last.exclude
             && !last.quoted
-            && last.tokens.iter().map(|t| t.chars().count()).sum::<usize>()
-                >= PREFIX_MIN_CHARS
+            && last.tokens.iter().map(|t| t.chars().count()).sum::<usize>() >= PREFIX_MIN_CHARS
             && last.tokens.last().is_some_and(|t| !contains_cjk(t));
         last.prefix = eligible;
     }

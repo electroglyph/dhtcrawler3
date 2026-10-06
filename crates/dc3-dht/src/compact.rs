@@ -474,10 +474,7 @@ mod tests {
             Some(sa("[2001:db8::1]:0"))
         );
         // Compact endpoints with ports still decode with their port.
-        assert_eq!(
-            decode_bep42_ip(&[1, 2, 3, 4, 0, 5]),
-            Some(sa("1.2.3.4:5"))
-        );
+        assert_eq!(decode_bep42_ip(&[1, 2, 3, 4, 0, 5]), Some(sa("1.2.3.4:5")));
         // Anything else is ignored.
         for bad in [&[][..], &[0; 3], &[0; 5], &[0; 7], &[0; 17], &[0; 19]] {
             assert_eq!(decode_bep42_ip(bad), None, "len={}", bad.len());

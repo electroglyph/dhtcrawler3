@@ -281,7 +281,8 @@ impl TorrentRecord {
             last_scraped_at: get(row, "last_scraped_at")?,
             seeders_est: {
                 let est: Option<i32> = get(row, "seeders_est")?;
-                est.map(|e| to_u64("seeders_est", i64::from(e))).transpose()?
+                est.map(|e| to_u64("seeders_est", i64::from(e)))
+                    .transpose()?
             },
             change_seq: get(row, "change_seq")?,
             hidden_at: get(row, "hidden_at")?,
@@ -337,8 +338,9 @@ impl ScrapeItem {
                         .map_err(|_| StoreError::Corrupt(format!("negative seeders_est: {e}")))
                 })
                 .transpose()?,
-            scrape_failures: u32::try_from(failures)
-                .map_err(|_| StoreError::Corrupt(format!("negative scrape_failures: {failures}")))?,
+            scrape_failures: u32::try_from(failures).map_err(|_| {
+                StoreError::Corrupt(format!("negative scrape_failures: {failures}"))
+            })?,
             last_seen_at: get(row, "last_seen_at")?,
             change_seq: get(row, "change_seq")?,
         })
@@ -574,7 +576,8 @@ impl IndexRow {
             last_scraped_at: get(row, "last_scraped_at")?,
             seeders_est: {
                 let est: Option<i32> = get(row, "seeders_est")?;
-                est.map(|e| to_u64("seeders_est", i64::from(e))).transpose()?
+                est.map(|e| to_u64("seeders_est", i64::from(e)))
+                    .transpose()?
             },
             visible: get(row, "visible")?,
         })

@@ -230,7 +230,8 @@ impl PeerStore {
         // No live entries of this family: no filters (an empty class would
         // otherwise estimate to 0 and look like a finished swarm).
         live.clone().next()?;
-        let mut sd = crate::bloom::ScrapeBloom::empty();        let mut pe = crate::bloom::ScrapeBloom::empty();
+        let mut sd = crate::bloom::ScrapeBloom::empty();
+        let mut pe = crate::bloom::ScrapeBloom::empty();
         for (addr, _, seed) in live {
             if *seed {
                 sd.insert_ip(&addr.ip());
@@ -437,7 +438,12 @@ mod tests {
         // Nor do many IPv4 addresses in one /24.
         let before = s.len();
         for i in 0..200u32 {
-            s.announce(key(1000 + i), global([7, 7, 7, (i % 250) as u8], 6881), false, t0);
+            s.announce(
+                key(1000 + i),
+                global([7, 7, 7, (i % 250) as u8], 6881),
+                false,
+                t0,
+            );
         }
         assert!(
             s.len() - before <= 50,

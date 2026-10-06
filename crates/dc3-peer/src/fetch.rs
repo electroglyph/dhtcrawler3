@@ -144,13 +144,18 @@ async fn fetch_inner(
     // handshake-scale deadline; only a fully idle peer costs `total`.
     let mut budget = Budget::new(limits.byte_budget.as_ref());
     let mut rejects_sent = 0usize;
-    within(op_deadline(limits), send_requests(&mut wr, &mut assembly, peer_ut_id)).await??;
+    within(
+        op_deadline(limits),
+        send_requests(&mut wr, &mut assembly, peer_ut_id),
+    )
+    .await??;
     loop {
         let Frame::Extended(payload) = within(
             op_deadline(limits),
             wire::read_frame(&mut rd, MAX_FRAME_AFTER_EXT_HANDSHAKE),
         )
-        .await?? else {
+        .await??
+        else {
             continue;
         };
         let body = match wire::parse_message(&payload)? {

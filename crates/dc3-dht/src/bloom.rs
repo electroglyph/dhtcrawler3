@@ -166,10 +166,7 @@ mod tests {
             f.insert_ip_bytes(&b);
         }
         let est = f.estimate().expect("not saturated");
-        assert!(
-            (est - 100.0).abs() < 15.0,
-            "est {est} far from 100"
-        );
+        assert!((est - 100.0).abs() < 15.0, "est {est} far from 100");
     }
 
     #[test]

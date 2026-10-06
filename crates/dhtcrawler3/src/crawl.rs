@@ -197,7 +197,11 @@ impl Crawler {
         for _ in 0..opts.fetch_workers {
             workers.spawn(Arc::clone(&fetcher).run_worker(stop.clone()));
         }
-        let scraper = Arc::new(Scraper::new(store.clone(), dht.clone(), opts.scrape.clone()));
+        let scraper = Arc::new(Scraper::new(
+            store.clone(),
+            dht.clone(),
+            opts.scrape.clone(),
+        ));
         for _ in 0..opts.scrape_workers {
             workers.spawn(Arc::clone(&scraper).run(stop.clone()));
         }
