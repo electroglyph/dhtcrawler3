@@ -196,4 +196,40 @@ mod tests {
         assert!(ScrapeBloom::from_bytes(&[0u8; 10]).is_none());
         assert!(ScrapeBloom::from_bytes(&[0u8; BLOOM_LEN]).is_some());
     }
+
+    /// The BEP 33 test vector: 192.0.2.0–192.0.2.255 plus 2001:DB8::-2001:DB8::3E7
+    /// (1256 addresses) must build the published filter and estimate 1224.9308.
+    #[test]
+    fn bep33_test_vector() {
+        let mut f = ScrapeBloom::empty();
+        for i in 0..=255u8 {
+            f.insert_ip_bytes(&[192, 0, 2, i]);
+        }
+        for i in 0..=999u16 {
+            let mut ip = [0u8; 16];
+            ip[0] = 0x20;
+            ip[1] = 0x01;
+            ip[2] = 0x0d;
+            ip[3] = 0xb8;
+            ip[14] = (i >> 8) as u8;
+            ip[15] = (i & 0xff) as u8;
+            f.insert_ip_bytes(&ip);
+        }
+        let mut hex = String::with_capacity(2 * BLOOM_LEN);
+        for b in f.0 {
+            use std::fmt::Write;
+            let _ = write!(hex, "{b:02X}");
+        }
+        let expected = "F6C3F5EAA07FFD91BDE89F777F26FB2BFF37BDB8FB2BBAA2FD3DDDE7BACFFF75EE7CCBAE\
+            FE5EEDB1FBFAFF67F6ABFF5E43DDBCA3FD9B9FFDF4FFD3E9DFF12D1BDF59DB53DBE9FA5B\
+            7FF3B8FDFCDE1AFB8BEDD7BE2F3EE71EBBBFE93BCDEEFE148246C2BC5DBFF7E7EFDCF24F\
+            D8DC7ADFFD8FFFDFDDFFF7A4BBEEDF5CB95CE81FC7FCFF1FF4FFFFDFE5F7FDCBB7FD79B3\
+            FA1FC77BFE07FFF905B7B7FFC7FEFEFFE0B8370BB0CD3F5B7F2BD93FEB4386CFDD6F7FD5\
+            BFAF2E9EBFFFFEECD67ADBF7C67F17EFD5D75EBA6FFEBA7FFF47A91EB1BFBB53E8ABFB57\
+            62ABE8FF237279BFEFBFEEF5FFC5FEBFDFE5ADFFADFEE1FB737FFFFBFD9F6AEFFEEE76B6\
+            FD8F72EF";
+        assert_eq!(hex, expected);
+        let est = f.estimate().expect("vector is not saturated");
+        assert!((est - 1224.9308).abs() < 0.01, "est {est}");
+    }
 }
