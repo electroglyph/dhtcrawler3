@@ -91,7 +91,8 @@ pub(crate) struct Ticket {
 pub(crate) enum Pick {
     /// A node to sample now.
     Node(Ticket),
-    /// Nothing eligible is queued.
+    /// No eligible node was found in this scan. Skipped entries stay queued,
+    /// so a later pick resumes with them.
     Empty,
     /// Only new nodes were queued, and the visited map is full of unexpired entries.
     Full,
@@ -205,21 +206,42 @@ impl Frontier {
         true
     }
 
+    /// Puts a skipped entry back for a later pick, keeping its original
+    /// queue time so it still ages out via [`FRONTIER_MAX_AGE_SECS`].
+    fn requeue(&mut self, node: CompactNode, queued_at: u32) {
+        self.queued.insert(node.addr);
+        self.queue.push_back((node, queued_at));
+    }
+
     /// Takes the next eligible node and marks it in flight. Also returns how
     /// many new nodes were dropped because the visited map is full.
+    ///
+    /// Skipped entries that may become eligible later (not due yet, or no
+    /// visited-map room right now) are kept for a later pick; only stale
+    /// entries are dropped. The scan stops after one full pass over the
+    /// queued entries (or [`MAX_POPS_PER_PICK`] pops), so a verdict of
+    /// [`Pick::Empty`] means nothing queued was eligible, not that the
+    /// queue is drained.
     pub(crate) fn pick(&mut self, now: Instant) -> (Pick, u64) {
         let now_secs = self.secs_floor(now);
         let mut refused = 0u64;
+        let mut examined = 0usize;
+        let pass_len = self.queue.len();
         for _ in 0..MAX_POPS_PER_PICK {
+            if examined >= pass_len {
+                break;
+            }
             let Some((node, queued_at)) = self.queue.pop_front() else {
                 break;
             };
+            examined = examined.saturating_add(1);
             self.queued.remove(&node.addr);
             if now_secs.saturating_sub(queued_at) > FRONTIER_MAX_AGE_SECS {
                 continue;
             }
             let (endpoint_key, id_key) = self.keys(&node);
             if !self.available(endpoint_key, now_secs) || !self.available(id_key, now_secs) {
+                self.requeue(node, queued_at);
                 continue;
             }
             // Mark the keys first, so that pruning keeps this node's expired
@@ -234,6 +256,7 @@ impl Frontier {
                 self.in_flight.remove(&endpoint_key);
                 self.in_flight.remove(&id_key);
                 refused = refused.saturating_add(1);
+                self.requeue(node, queued_at);
                 continue;
             }
             self.reserved = self.reserved.saturating_add(needed);
@@ -644,6 +667,38 @@ mod tests {
     }
 
     #[test]
+    fn skipped_not_due_nodes_stay_queued() {
+        let t0 = Instant::now();
+        let mut f = Frontier::with_capacity(t0, 10, 100);
+        assert!(f.offer(node(1), t0));
+        assert!(f.offer(node(2), t0));
+        let t = picked(&mut f, t0);
+        // Node 1 answers with node 2's ID, so node 2 is not due for a minute.
+        f.finish(t, Some(id(2)), t0 + 60 * SEC);
+        let (pick, _) = f.pick(t0);
+        assert!(matches!(pick, Pick::Empty));
+        // Not due is not gone: it waits for a later pick instead of being
+        // evicted and needing a re-offer.
+        assert_eq!(f.len(), 1);
+        check_bounds(&f);
+        assert_eq!(picked(&mut f, t0 + 61 * SEC).node, node(2));
+        check_bounds(&f);
+    }
+
+    #[test]
+    fn visited_full_nodes_stay_queued() {
+        let t0 = Instant::now();
+        let mut f = Frontier::with_capacity(t0, 3, 1);
+        assert!(f.offer(node(1), t0));
+        let (pick, refused) = f.pick(t0);
+        assert!(matches!(pick, Pick::Full));
+        assert_eq!(refused, 1);
+        // No room right now is not gone either: the entry stays queued.
+        assert_eq!(f.len(), 1);
+        check_bounds(&f);
+    }
+
+    #[test]
     fn replies_yield_bounded_samples() {
         let t0 = Instant::now();
         let s = Sampler::new(t0);
@@ -706,7 +761,8 @@ mod tests {
         let ta = picked(&mut f, t0 + 2 * SEC);
         assert_eq!(ta.node, a);
         assert!(matches!(f.pick(t0 + 2 * SEC).0, Pick::Empty));
-        assert_eq!(f.len(), 0);
+        // Skipped, not evicted: the not-due entry stays queued for a later pick.
+        assert_eq!(f.len(), 1);
         f.finish(ta, Some(a.id), t0 + 60 * SEC);
         assert!(!f.offer(a2, t0 + 59 * SEC));
         // Other nodes are unaffected.
@@ -845,7 +901,9 @@ mod tests {
         // Still refused later on; the map is not rescanned before anything can expire.
         assert!(f.offer(node(11), t0 + 120 * SEC));
         assert!(f.offer(node(12), t0 + 120 * SEC));
-        assert_eq!(f.pick(t0 + 120 * SEC).1, 2);
+        // Three refusals: node 10 stayed queued from the earlier pick instead
+        // of being evicted.
+        assert_eq!(f.pick(t0 + 120 * SEC).1, 3);
         assert_eq!(f.visited.len(), 6);
         // Once the entries expire, new nodes are admitted.
         assert!(f.offer(node(13), t0 + HOUR));
