@@ -1058,9 +1058,11 @@ fn url_has_userinfo_password(url: &str) -> bool {
     }
 }
 
-/// True when `url` carries a secret-looking query parameter (`password`
-/// and variants): sqlx reads those live, so they bypass file-only
-/// passwords exactly like a userinfo password does.
+/// True when `url` carries a secret-looking query parameter (`password`):
+/// sqlx reads that key live, so it bypasses file-only passwords exactly
+/// like a userinfo password does. Only the exact key sqlx reads is
+/// rejected here; substring matches (`bypass`, `compass`) are left to the
+/// display-only redaction below so benign parameters keep working.
 fn url_has_secret_query_key(url: &str) -> bool {
     let Some((_, rest)) = url.split_once("://") else {
         return false;
@@ -1071,7 +1073,7 @@ fn url_has_secret_query_key(url: &str) -> bool {
     };
     query.split('&').any(|pair| {
         let name = pair.split_once('=').map(|(n, _)| n).unwrap_or(pair);
-        !name.is_empty() && is_password_key(name)
+        name.eq_ignore_ascii_case("password")
     })
 }
 
@@ -1144,7 +1146,9 @@ pub fn redact_url(url: &str) -> String {
 }
 
 /// True for query keys that may hold a secret (`password` and its common
-/// variants). Over-redaction is safe: this is display only.
+/// variants). Over-redaction is safe: this is display only, and is
+/// deliberately broader than the rejection check above (which only rejects
+/// the exact `password` key sqlx reads live).
 fn is_password_key(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("pass")
@@ -1666,6 +1670,13 @@ mod tests {
         assert!(parse_db_url("postgres://u@h/db").is_ok());
         assert!(parse_db_url("postgres://h/db?password=x").is_err());
         assert!(parse_db_url("postgres://h/db?sslmode=disable").is_ok());
+        // F-12: benign keys containing `pass` are not secret query keys.
+        for key in ["bypass", "compass", "passport", "passwordless"] {
+            assert!(
+                parse_db_url(&format!("postgres://h/db?{key}=x")).is_ok(),
+                "{key}"
+            );
+        }
         // ... but redaction still hides it when such a config is printed.
         c.database.url = Some("postgres://someone:urlpw@pg.internal:6543/other".into());
         let printed = c.to_redacted_toml().unwrap();
