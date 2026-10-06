@@ -157,6 +157,10 @@ impl TermMatcher {
     /// in affixes (`xpthc`) and behind prefix searches (`pt` → `pthc`),
     /// where whole-token matching cannot see them; the
     /// [`MAX_AFFIX_SEED_CHARS`] bound keeps everyday words searchable.
+    ///
+    /// Two evasions are also covered: tokens joined with separators
+    /// removed (`p.t.h.c` → `pthc`), and tokens with digits stripped
+    /// (`p1thc` → `pthc`).
     pub fn matches_affixed(&self, text: &str) -> bool {
         if self.index.is_empty() && self.short.is_empty() {
             return false;
@@ -170,11 +174,43 @@ impl TermMatcher {
         if self.short.is_empty() {
             return false;
         }
-        variants
+        if variants
             .all()
             .iter()
             .flat_map(|tokens| tokens.iter())
             .any(|tok| self.short.iter().any(|seed| tok.contains(seed.as_str())))
+        {
+            return true;
+        }
+        // Separator-fragmented seeds: `p.t.h.c` normalises to single-letter
+        // tokens, so no one token contains the seed. Joining each variant's
+        // tokens (separators removed) recovers it.
+        let fragmented = variants.all().iter().any(|tokens| {
+            if tokens.is_empty() {
+                return false;
+            }
+            let compact: String = tokens.concat();
+            self.short.iter().any(|seed| compact.contains(seed.as_str()))
+        });
+        if fragmented {
+            return true;
+        }
+        // Digit-interleaved seeds: `p1thc` is one token in every variant
+        // (leet maps `1` to `i`, giving `pithc`), so neither the plain nor
+        // the leet form contains the seed. Stripping digits recovers it.
+        variants
+            .all()
+            .iter()
+            .flat_map(|tokens| tokens.iter())
+            .any(|tok| {
+                if !tok.chars().any(|c| c.is_numeric()) {
+                    return false;
+                }
+                let stripped: String =
+                    tok.chars().filter(|c| !c.is_numeric()).collect();
+                !stripped.is_empty()
+                    && self.short.iter().any(|seed| stripped.contains(seed.as_str()))
+            })
     }
 
     /// Number of distinct terms.

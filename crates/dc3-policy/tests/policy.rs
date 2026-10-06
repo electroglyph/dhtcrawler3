@@ -96,6 +96,24 @@ fn years_stay_years() {
 }
 
 #[test]
+fn regression_f06_separator_fragmented_short_seeds_match() {
+    // F-06: intra-term separators must not evade the affix rule.
+    let m = TermMatcher::load("pthc\n").unwrap();
+    for text in ["p.t.h.c", "p t h c", "p-t-h-c", "p_t_h_c", "p/t/h/c"] {
+        assert!(m.matches_affixed(text), "missed: {text:?}");
+    }
+    assert!(!m.matches_affixed("clean holiday photos"));
+}
+
+#[test]
+fn regression_f06_digit_interleaved_short_seeds_match() {
+    // F-06: digits interleaved in the seed must not evade the affix rule.
+    let m = TermMatcher::load("pthc\n").unwrap();
+    assert!(m.matches_affixed("p1thc"));
+    assert!(!m.matches_affixed("clean movie 2024"));
+}
+
+#[test]
 fn ordinary_names_not_blocked() {
     let m = seed();
     for name in [
