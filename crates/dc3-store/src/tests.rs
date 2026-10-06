@@ -2422,7 +2422,8 @@ async fn schema_constraints(pool: PgPool) {
 
     let indexes: HashSet<String> = sqlx::query_scalar(
         "SELECT indexname::text FROM pg_indexes \
-          WHERE tablename IN ('torrents', 'pending', 'reports', 'denylist', 'audit_log', 'settings')",
+          WHERE tablename IN ('torrents', 'pending', 'reports', 'denylist', 'audit_log', 'settings', \
+                              'removed_keys')",
     )
     .fetch_all(&pool)
     .await
@@ -2444,7 +2445,235 @@ async fn schema_constraints(pool: PgPool) {
         "audit_log_at",
         "audit_log_action_at",
         "settings_pkey",
+        "torrents_scrape_due",
+        "removed_keys_age",
+        "removed_keys_pkey",
     ] {
         assert!(indexes.contains(name), "missing index {name}");
     }
+}
+
+fn days(n: i64) -> Duration {
+    Duration::from_secs((n as u64).saturating_mul(24 * 60 * 60))
+}
+
+/// Backdates a torrent's scrape stamp (and optionally its estimate).
+async fn backdate_scrape(pool: &PgPool, id: i64, ago: Duration, est: Option<i32>) {
+    sqlx::query(
+        "UPDATE torrents SET last_scraped_at = now() - make_interval(secs => $2), seeders_est = $3 \
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(ago.as_secs_f64())
+    .bind(est)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn scrape_row(pool: &PgPool, id: i64) -> (Option<i32>, i32) {
+    sqlx::query_as("SELECT seeders_est, scrape_failures FROM torrents WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[test]
+fn removal_cooldown_escalates_and_caps() {
+    use crate::crawler::removal_cooldown;
+    assert_eq!(removal_cooldown(0), days(7));
+    assert_eq!(removal_cooldown(1), days(7));
+    assert_eq!(removal_cooldown(2), days(30));
+    assert_eq!(removal_cooldown(3), days(90));
+    assert_eq!(removal_cooldown(100), days(90));
+    assert_eq!(removal_cooldown(-5), days(7));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn scrape_claim_orders_never_scraped_first_and_holds_lease(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let a = key(1);
+    let b = key(2);
+    let ida = s.complete(&a, &torrent(a, "aaa")).await.unwrap();
+    let idb = s.complete(&b, &torrent(b, "bbb")).await.unwrap();
+    backdate_scrape(&pool, idb, days(10), Some(5)).await;
+
+    let live = days(7);
+    let unknown = days(30);
+    let claimed = s.claim_scrape_due(10, live, unknown).await.unwrap();
+    assert_eq!(claimed.len(), 2);
+    // Never-scraped (NULL stamp) sorts before any stamped row.
+    assert_eq!(claimed[0].id, ida);
+    assert_eq!(claimed[1].id, idb);
+    assert_eq!(claimed[0].dht_key, a);
+    assert_eq!(claimed[0].seeders_est, None);
+    assert_eq!(claimed[1].seeders_est, Some(5));
+
+    // The claim stamped both rows, so nothing is due until an interval elapses.
+    let again = s.claim_scrape_due(10, live, unknown).await.unwrap();
+    assert!(again.is_empty());
+    assert!(s.claim_scrape_due(0, live, unknown).await.unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn scrape_claim_gates_unaware_rows_on_unknown_interval(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // Unaware row (scraped, still NULL estimate) 10 days ago: not due while
+    // the unknown interval is 30d, even though the live interval is 7d
+    // (LB-27: a bare live-interval clause would wrongly match it).
+    let u = key(11);
+    let idu = s.complete(&u, &torrent(u, "unaware")).await.unwrap();
+    s.record_scrape(idu, None, 0).await.unwrap();
+    backdate_scrape(&pool, idu, days(10), None).await;
+    // Live row (has an estimate) scraped 10 days ago: due on the 7d interval.
+    let l = key(12);
+    let idl = s.complete(&l, &torrent(l, "live")).await.unwrap();
+    s.record_scrape(idl, Some(4), 0).await.unwrap();
+    backdate_scrape(&pool, idl, days(10), Some(4)).await;
+
+    let claimed = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    assert_eq!(claimed.iter().map(|c| c.id).collect::<Vec<_>>(), vec![idl]);
+
+    // With a 7d unknown interval the unaware row is due again.
+    backdate_scrape(&pool, idu, days(10), None).await;
+    let claimed = s.claim_scrape_due(10, days(7), days(7)).await.unwrap();
+    assert!(claimed.iter().any(|c| c.id == idu));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn record_scrape_writes_stats_without_index_churn(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(21);
+    let id = s.complete(&k, &torrent(k, "stats")).await.unwrap();
+    let before = change_seq_of(&pool, id).await;
+
+    assert!(s.record_scrape(id, Some(21), 0).await.unwrap());
+    assert_eq!(scrape_row(&pool, id).await, (Some(21), 0));
+    assert_eq!(change_seq_of(&pool, id).await, before);
+
+    // Unknown outcome keeps a NULL estimate without touching failures.
+    assert!(s.record_scrape(id, None, 2).await.unwrap());
+    assert_eq!(scrape_row(&pool, id).await, (None, 2));
+    assert_eq!(change_seq_of(&pool, id).await, before);
+
+    assert!(!s.record_scrape(999_999_999, Some(1), 0).await.unwrap());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(31);
+    let id = s.complete(&k, &torrent(k, "doomed")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+
+    // A concurrent observation moves last_seen_at (and maybe change_seq):
+    // the stale snapshot must not wipe the refreshed row, and notes nothing.
+    s.observe(
+        &[Observation {
+            key: k,
+            sightings: 1,
+            priority: false,
+        }],
+        NO_LIMIT,
+    )
+    .await
+    .unwrap();
+    assert!(!s.tombstone_dead(id, item.last_seen_at, item.change_seq).await.unwrap());
+    assert_eq!(s.removed_keys_count().await.unwrap(), 0);
+    assert!(raw_torrent(&pool, id).await.is_live());
+
+    // A fresh snapshot tombstones and notes the removal in one transaction.
+    // (Backdate past the unknown interval: the first claim above stamped the
+    // row, so it would not be due again yet.)
+    backdate_scrape(&pool, id, days(40), None).await;
+    let fresh = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = fresh.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(s.tombstone_dead(id, item.last_seen_at, item.change_seq).await.unwrap());
+    let row = raw_torrent(&pool, id).await;
+    assert!(!row.is_live());
+    assert_eq!(row.name, "");
+    assert_eq!(s.removed_keys_count().await.unwrap(), 1);
+    let remaining = s.removal_cooldown_remaining(&k.0).await.unwrap();
+    assert!(remaining > days(6) && remaining <= days(7), "{remaining:?}");
+
+    // A second consecutive removal escalates the cooldown to 30d.
+    s.note_removal(&k.0).await.unwrap();
+    let remaining = s.removal_cooldown_remaining(&k.0).await.unwrap();
+    assert!(remaining > days(29) && remaining <= days(30), "{remaining:?}");
+
+    // Tombstoning again (or an unknown id) records nothing.
+    assert!(!s.tombstone_dead(id, item.last_seen_at, item.change_seq).await.unwrap());
+    assert!(!s.tombstone_dead(999_999_999, item.last_seen_at, 1).await.unwrap());
+    assert_eq!(s.removed_keys_count().await.unwrap(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // Old scrape tombstone: purged.
+    let a = key(41);
+    let ida = s.complete(&a, &torrent(a, "old-dead")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == ida).unwrap().clone();
+    assert!(s.tombstone_dead(ida, item.last_seen_at, item.change_seq).await.unwrap());
+    sqlx::query("UPDATE torrents SET deleted_at = now() - interval '2 hours' WHERE id = $1")
+        .bind(ida)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Fresh scrape tombstone: kept.
+    let b = key(42);
+    let idb = s.complete(&b, &torrent(b, "fresh-dead")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == idb).unwrap().clone();
+    assert!(s.tombstone_dead(idb, item.last_seen_at, item.change_seq).await.unwrap());
+    // Old denial tombstone: never purged (it is the block record).
+    let c = key(43);
+    s.complete(&c, &torrent(c, "denied")).await.unwrap();
+    s.deny(&c.0, DenyReason::Other, None, "tester").await.unwrap();
+    sqlx::query("UPDATE torrents SET deleted_at = now() - interval '2 hours' WHERE dht_key = $1")
+        .bind(c.0.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(s.purge_tombstoned(days(1)).await.unwrap(), 0);
+    assert_eq!(s.purge_tombstoned(Duration::from_secs(3600)).await.unwrap(), 1);
+    assert!(raw_torrent(&pool, idb).await.deleted_at.is_some());
+    let denied_id: i64 = sqlx::query_scalar("SELECT id FROM torrents WHERE dht_key = $1")
+        .bind(c.0.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(raw_torrent(&pool, denied_id).await.deleted_at.is_some());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn removal_memory_blocks_then_clears_on_refetch(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(51);
+    assert_eq!(s.removal_cooldown_remaining(&k.0).await.unwrap(), Duration::ZERO);
+
+    // A bare sighting creates no memory.
+    s.note_removed_sighting(&k.0).await.unwrap();
+    assert_eq!(s.removal_cooldown_remaining(&k.0).await.unwrap(), Duration::ZERO);
+
+    // First removal: 7d; expiry is exactly bounded by the schedule.
+    s.note_removal(&k.0).await.unwrap();
+    let remaining = s.removal_cooldown_remaining(&k.0).await.unwrap();
+    assert!(remaining > Duration::ZERO && remaining <= days(7), "{remaining:?}");
+
+    // A successful fetch clears the memory (LB-17): resurgent torrents
+    // start over instead of escalating forever.
+    s.complete(&k, &torrent(k, "back")).await.unwrap();
+    assert_eq!(s.removal_cooldown_remaining(&k.0).await.unwrap(), Duration::ZERO);
+    assert_eq!(s.removed_keys_count().await.unwrap(), 0);
+
+    // 32-byte keys match by 20-byte prefix.
+    let mut long = [0u8; 32];
+    long[..20].copy_from_slice(&k.0);
+    s.note_removal(&long).await.unwrap();
+    assert!(s.removal_cooldown_remaining(&k.0).await.unwrap() > Duration::ZERO);
 }

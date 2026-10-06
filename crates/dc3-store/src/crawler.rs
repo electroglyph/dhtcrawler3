@@ -10,7 +10,7 @@ use sqlx::PgConnection;
 
 use crate::types::{
     DenyOutcome, DenyReason, LiveRow, NewTorrent, Observation, ObserveOutcome, PendingItem,
-    files_to_json,
+    ScrapeItem, files_to_json,
 };
 use crate::{
     CountedTable, DailyCounter, EXACT_COUNT_THRESHOLD, FAIL_BASE_BACKOFF, FAIL_MAX_BACKOFF,
@@ -133,6 +133,67 @@ UPDATE torrents
        change_seq = nextval('change_seq')
  WHERE dht_key = $1 OR info_hash_v1 = $1 OR substring(info_hash_v2 FROM 1 FOR 20) = $1
 RETURNING id";
+
+/// Claims rows due for a BEP 33 scrape and stamps the claim (`$2`/`$3` are
+/// the unknown/live intervals in seconds). Never-scraped rows
+/// (`last_scraped_at IS NULL`) are always due; unaware rows
+/// (`seeders_est IS NULL`, scraped before) use the unknown interval so they
+/// are re-polled less often; rows with an estimate use the live interval.
+/// The live clause is gated on `seeders_est IS NOT NULL`, else it would also
+/// match unaware rows and the unknown interval would never apply.
+const CLAIM_SCRAPE_SQL: &str = "\
+UPDATE torrents t
+   SET last_scraped_at = now()
+ WHERE t.id IN (
+        SELECT s.id FROM torrents s
+         WHERE s.deleted_at IS NULL
+           AND s.hidden_at IS NULL
+           AND NOT dc3_key_denied(s.dht_key, s.info_hash_v1, s.info_hash_v2)
+           AND (s.last_scraped_at IS NULL
+                OR (s.seeders_est IS NULL
+                    AND s.last_scraped_at IS NOT NULL
+                    AND s.last_scraped_at < now() - make_interval(secs => $2))
+                OR (s.seeders_est IS NOT NULL
+                    AND s.last_scraped_at < now() - make_interval(secs => $3)))
+         ORDER BY s.last_scraped_at ASC NULLS FIRST
+         LIMIT $1
+           FOR UPDATE SKIP LOCKED)
+RETURNING t.id, t.dht_key, t.seeders_est, t.scrape_failures, t.last_seen_at, t.change_seq";
+
+/// Stats-only scrape write: no `change_seq` bump (the indexer must not see
+/// churn) and no `files` touch (which would fire `torrents_files_shape`).
+const RECORD_SCRAPE_SQL: &str = "\
+UPDATE torrents
+   SET seeders_est = $2, scrape_failures = $3, last_scraped_at = now()
+ WHERE id = $1";
+
+/// Conditional scrape tombstone: wipes name/files like [`TOMBSTONE_SQL`]
+/// (without a denylist insert) but only when the row is still exactly as
+/// claimed, so a concurrent fetch is never clobbered.
+const TOMBSTONE_DEAD_SQL: &str = "\
+UPDATE torrents
+   SET name = '', files = '[]'::jsonb, files_truncated = false,
+       deleted_at = coalesce(deleted_at, now()),
+       change_seq = nextval('change_seq')
+ WHERE id = $1 AND deleted_at IS NULL AND last_seen_at = $2 AND change_seq = $3";
+
+/// Deletes scrape tombstones older than the grace, keeping denylist
+/// tombstones (the block record) forever.
+const PURGE_TOMBSTONED_SQL: &str = "\
+DELETE FROM torrents
+ WHERE deleted_at IS NOT NULL
+   AND deleted_at < now() - make_interval(secs => $1)
+   AND NOT dc3_key_denied(dht_key, info_hash_v1, info_hash_v2)";
+
+/// Upserts removal memory: a new row starts at one consecutive removal, an
+/// existing one escalates while its sighting counter restarts.
+const NOTE_REMOVAL_SQL: &str = "\
+INSERT INTO removed_keys (key, removed_at, removals, sightings)
+VALUES ($1, now(), 1, 0)
+ON CONFLICT (key) DO UPDATE
+   SET removed_at = now(),
+       removals = removed_keys.removals + 1,
+       sightings = 0";
 
 /// Rows of a [`Store::scan_live`] page: at most `$2` rows after id `$1`,
 /// stopping once the earlier rows hold `$3` bytes of text (the first row is
@@ -377,6 +438,13 @@ impl Store {
             None => (0, None),
         };
 
+        // A successful fetch is positive liveness proof: clear removal
+        // memory, so a resurgent torrent is not penalised forever (§4a).
+        sqlx::query("DELETE FROM removed_keys WHERE key = $1")
+            .bind(key.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+
         let denied: bool = sqlx::query_scalar("SELECT dc3_key_denied($1, $2, $3)")
             .bind(key.as_bytes().as_slice())
             .bind(v1.as_deref())
@@ -572,6 +640,192 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(LiveRow::from_row).collect()
+    }
+
+    /// Claims up to `limit` stored torrents due for a BEP 33 scrape, oldest
+    /// scrape first (never-scraped first). A row is due when it is visible
+    /// (not hidden, tombstoned or denylisted) and either never scraped, or
+    /// scraped longer ago than `unknown_interval` (still-unaware rows, whose
+    /// `seeders_est` is NULL) or `live_interval` (rows with an estimate).
+    ///
+    /// The claim stamps `last_scraped_at = now()`, which is also the lease:
+    /// rows claimed by a crashed worker become due again once the interval
+    /// elapses. The stamp is stats-only otherwise: it never moves
+    /// `change_seq`, so the indexer sees no churn.
+    pub async fn claim_scrape_due(
+        &self,
+        limit: i64,
+        live_interval: Duration,
+        unknown_interval: Duration,
+    ) -> Result<Vec<ScrapeItem>> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(CLAIM_SCRAPE_SQL)
+            .bind(limit.min(MAX_CLAIM))
+            .bind(secs(unknown_interval))
+            .bind(secs(live_interval))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(ScrapeItem::from_row).collect()
+    }
+
+    /// Records a finished scrape: sets `seeders_est` (or keeps the caller
+    /// passing the previous value for unaware scrapes), `scrape_failures`
+    /// and `last_scraped_at = now()`. Stats-only: no `change_seq` bump, so
+    /// the indexer sees no churn. Returns false when no row has `id`.
+    pub async fn record_scrape(
+        &self,
+        id: i64,
+        seeders_est: Option<u32>,
+        scrape_failures: u32,
+    ) -> Result<bool> {
+        let est = seeders_est
+            .map(|e| {
+                i32::try_from(e)
+                    .map_err(|_| StoreError::Invalid(format!("seeders_est {e} exceeds i32")))
+            })
+            .transpose()?;
+        let failures = i32::try_from(scrape_failures).map_err(|_| {
+            StoreError::Invalid(format!("scrape_failures {scrape_failures} exceeds i32"))
+        })?;
+        let n = sqlx::query(RECORD_SCRAPE_SQL)
+            .bind(id)
+            .bind(est)
+            .bind(failures)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// Tombstones a dead torrent and notes the removal in one transaction
+    /// (a crash between the two would leave a tombstone without memory, and
+    /// the key would be re-fetched on every flap).
+    ///
+    /// The wipe is conditional on the row being unchanged since the claim
+    /// (`last_seen_at` and `change_seq` snapshots): a concurrent fetch that
+    /// revived or refreshed the row wins, and this call then records nothing
+    /// (returns false, without touching `removed_keys`). Denylist tombstones
+    /// are never touched here; only scrape deaths.
+    pub async fn tombstone_dead(
+        &self,
+        id: i64,
+        old_last_seen_at: chrono::DateTime<chrono::Utc>,
+        old_change_seq: i64,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        lock_change_shared(&mut tx).await?;
+        let key: Option<Vec<u8>> = sqlx::query_scalar("SELECT dht_key FROM torrents WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(key) = key else {
+            return Ok(false);
+        };
+        lock_keys(&mut tx, &[key.as_slice()]).await?;
+        let n = sqlx::query(TOMBSTONE_DEAD_SQL)
+            .bind(id)
+            .bind(old_last_seen_at)
+            .bind(old_change_seq)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if n == 0 {
+            return Ok(false);
+        }
+        sqlx::query(NOTE_REMOVAL_SQL)
+            .bind(key.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Deletes scrape tombstones older than `grace`, so their keys may be
+    /// re-admitted if still sampled. Denylist tombstones are never purged:
+    /// they are the block record. Returns the number removed. The grace
+    /// lets the indexer observably drop the document first (it sees
+    /// `visible=false` through the change feed).
+    pub async fn purge_tombstoned(&self, grace: Duration) -> Result<u64> {
+        let res = sqlx::query(PURGE_TOMBSTONED_SQL)
+            .bind(secs(grace))
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Notes a removal in `removed_keys` outside [`Store::tombstone_dead`]
+    /// (which already notes its own): upserts the row, stamping `removed_at`
+    /// and escalating `removals` while resetting `sightings` for the new
+    /// cooldown period.
+    pub async fn note_removal(&self, key: &[u8]) -> Result<()> {
+        check_key_len(key)?;
+        sqlx::query(NOTE_REMOVAL_SQL)
+            .bind(prefix(key))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Counts a post-removal sighting of a removed key, for the §4a
+    /// strong-evidence rule. Only increments an existing row; never creates
+    /// one (a sighting alone is not a removal).
+    pub async fn note_removed_sighting(&self, key: &[u8]) -> Result<()> {
+        check_key_len(key)?;
+        sqlx::query("UPDATE removed_keys SET sightings = sightings + 1 WHERE key = $1")
+            .bind(prefix(key))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// How long `key` stays out of admission: the cooldown for its
+    /// consecutive-removal count minus the time since `removed_at`, or zero
+    /// when the key was never removed or the cooldown has expired. Keys are
+    /// matched by 20-byte prefix.
+    pub async fn removal_cooldown_remaining(&self, key: &[u8]) -> Result<Duration> {
+        check_key_len(key)?;
+        let row = sqlx::query("SELECT removed_at, removals FROM removed_keys WHERE key = $1")
+            .bind(prefix(key))
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok(Duration::ZERO);
+        };
+        let removed_at: chrono::DateTime<chrono::Utc> = get(&row, "removed_at")?;
+        let removals: i32 = get(&row, "removals")?;
+        let cooldown = removal_cooldown(removals);
+        let elapsed = chrono::Utc::now().signed_duration_since(removed_at);
+        if elapsed.num_seconds() < 0 {
+            return Ok(cooldown);
+        }
+        match elapsed.to_std() {
+            Ok(elapsed) if elapsed < cooldown => Ok(cooldown.saturating_sub(elapsed)),
+            _ => Ok(Duration::ZERO),
+        }
+    }
+
+    /// Rows in `removed_keys`.
+    pub async fn removed_keys_count(&self) -> Result<i64> {
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM removed_keys")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(n)
+    }
+}
+
+/// Cooldown for a key removed `removals` times in a row (§4a): 7d, then 30d,
+/// then 90d capped. A successful fetch deletes the row
+/// ([`Store::complete`]), so resurgent torrents are not penalised forever.
+pub(crate) fn removal_cooldown(removals: i32) -> Duration {
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    if removals <= 1 {
+        DAY.saturating_mul(7)
+    } else if removals == 2 {
+        DAY.saturating_mul(30)
+    } else {
+        DAY.saturating_mul(90)
     }
 }
 

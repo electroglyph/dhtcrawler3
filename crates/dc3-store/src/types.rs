@@ -295,6 +295,44 @@ pub struct PendingItem {
     pub seen_count: u64,
 }
 
+/// A stored torrent claimed for a BEP 33 scrape (see
+/// [`crate::Store::claim_scrape_due`]). The snapshot of `last_seen_at` and
+/// `change_seq` is what [`crate::Store::tombstone_dead`] checks before
+/// wiping the row, so a concurrent fetch is never clobbered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrapeItem {
+    pub id: i64,
+    pub dht_key: DhtKey,
+    /// Last aware estimate, if any; `None` means never scraped or only
+    /// unaware scrapes so far.
+    pub seeders_est: Option<u32>,
+    /// Consecutive dead scrapes.
+    pub scrape_failures: u32,
+    pub last_seen_at: DateTime<Utc>,
+    pub change_seq: i64,
+}
+
+impl ScrapeItem {
+    pub(crate) fn from_row(row: &PgRow) -> Result<ScrapeItem> {
+        let est: Option<i32> = get(row, "seeders_est")?;
+        let failures: i32 = get(row, "scrape_failures")?;
+        Ok(ScrapeItem {
+            id: get(row, "id")?,
+            dht_key: dht_key_col(row, "dht_key")?,
+            seeders_est: est
+                .map(|e| {
+                    u32::try_from(e)
+                        .map_err(|_| StoreError::Corrupt(format!("negative seeders_est: {e}")))
+                })
+                .transpose()?,
+            scrape_failures: u32::try_from(failures)
+                .map_err(|_| StoreError::Corrupt(format!("negative scrape_failures: {failures}")))?,
+            last_seen_at: get(row, "last_seen_at")?,
+            change_seq: get(row, "change_seq")?,
+        })
+    }
+}
+
 /// One key seen by the crawler, for [`crate::Store::observe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observation {

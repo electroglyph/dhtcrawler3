@@ -8,6 +8,10 @@
 //! * **crawl** (`dc3_crawler`): [`Store::observe`], [`Store::claim`],
 //!   [`Store::renew`], [`Store::complete`], [`Store::fail`],
 //!   [`Store::purge_gave_up`], [`Store::pending_depth`],
+//!   [`Store::claim_scrape_due`], [`Store::record_scrape`],
+//!   [`Store::tombstone_dead`], [`Store::purge_tombstoned`],
+//!   [`Store::note_removal`], [`Store::note_removed_sighting`],
+//!   [`Store::removal_cooldown_remaining`], [`Store::removed_keys_count`],
 //!   [`Store::is_denied`], [`Store::deny`], [`Store::scan_live`];
 //! * **index** (`dc3_indexer`): [`Store::high_water_mark`],
 //!   [`Store::changes_since`];
@@ -74,7 +78,7 @@ pub use sqlx::postgres::PgConnectOptions;
 pub use types::{
     DailyStats, DenyEntry, DenyOutcome, DenyReason, FileRow, IndexRow, LiveRow, NewReport,
     NewTorrent, Observation, ObserveOutcome, ParseEnumError, PendingItem, PublicStats, Report,
-    ReportAction, ReportReason, ReportStatus, StoreStats, SubmitOutcome, TorrentRecord,
+    ReportAction, ReportReason, ReportStatus, ScrapeItem, StoreStats, SubmitOutcome, TorrentRecord,
 };
 
 /// Advisory lock key of the change feed (ASCII `"dc3chg"` followed by 0x0001).
