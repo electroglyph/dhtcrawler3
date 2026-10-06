@@ -502,7 +502,7 @@ impl Inner {
         let (tx, rx) = oneshot::channel();
         let deadline = after(now, tuning.query_timeout);
         let want = self.want_for(&method);
-        let (tid, packet) = {
+        let (id, tid) = {
             let mut st = lock(&sock.state);
             let id = st.id;
             let Some(tid) = st.txns.insert(
@@ -517,24 +517,28 @@ impl Inner {
                 counters.drop_packet(DropReason::Throttled);
                 return Err(QueryError::Busy);
             };
-            let msg = Message {
-                tid: tid.to_vec(),
-                version: Some(self.cfg.client_version.to_vec()),
-                ip: None,
-                read_only: self.cfg.read_only,
-                body: Body::Query(Query {
-                    id,
-                    want,
-                    method: method.clone(),
-                }),
-            };
-            match krpc::encode(&msg) {
-                Ok(packet) => (tid, packet),
-                Err(_) => {
-                    st.txns.remove(tid, &addr);
-                    counters.drop_packet(DropReason::SendError);
-                    return Err(QueryError::Send);
-                }
+            // Drop the lock before encoding: bencode + trim never touch
+            // shared state, and holding `state` across it couples every
+            // query's tail latency to the slowest encoder (B-004).
+            (id, tid)
+        };
+        let msg = Message {
+            tid: tid.to_vec(),
+            version: Some(self.cfg.client_version.to_vec()),
+            ip: None,
+            read_only: self.cfg.read_only,
+            body: Body::Query(Query {
+                id,
+                want,
+                method: method.clone(),
+            }),
+        };
+        let packet = match krpc::encode(&msg) {
+            Ok(packet) => packet,
+            Err(_) => {
+                lock(&sock.state).txns.remove(tid, &addr);
+                counters.drop_packet(DropReason::SendError);
+                return Err(QueryError::Send);
             }
         };
         if sock.socket.send_to(&packet, addr).await.is_err() {
@@ -594,8 +598,22 @@ impl Inner {
                 | Err(DecodeError::BadReply { tid }) => Some(tid),
                 _ => None,
             };
-            let ours = reply_tid.is_some_and(|tid| lock(&sock.state).txns.contains(tid, &from));
-            if !ours && !self.allow_inbound(sock, &from, now) {
+            // Claim our transaction atomically instead of `contains` (peek)
+            // + `take` in `on_reply` (B-004): one lock + one lookup instead
+            // of two, and no peek-then-claim race. A claimed reply is ours,
+            // so it skips the second inbound charge; anything else is gated
+            // by the bucket as before. NOTE: the `take` must be its own `let`
+            // statement — an `if let ... = lock(...).take()` scrutinee would
+            // keep the guard alive through the block and deadlock in
+            // `learn_from_response` below (non-reentrant mutex).
+            if let Some(tid) = reply_tid {
+                let claimed = lock(&sock.state).txns.take(tid, &from);
+                if let Some(pending) = claimed {
+                    self.on_claimed_reply(sock, pending, decoded, from, now);
+                    return;
+                }
+            }
+            if !self.allow_inbound(sock, &from, now) {
                 return;
             }
         }
@@ -766,6 +784,21 @@ impl Inner {
                 .drop_packet(DropReason::Unsolicited);
             return;
         };
+        self.deliver_reply(sock, pending, body, reported_ip, from, now);
+    }
+
+    /// Delivers an already-claimed reply. `handle_datagram` calls this on the
+    /// fast path (transaction atomically taken); `on_reply` calls it after
+    /// taking.
+    fn deliver_reply(
+        &self,
+        sock: &SocketNode,
+        pending: Pending,
+        body: Result<Response, KrpcError>,
+        reported_ip: Option<SocketAddr>,
+        from: SocketAddr,
+        now: Instant,
+    ) {
         let reply = match body {
             Ok(response) => {
                 incr(&self.counters.responses_received);
@@ -778,6 +811,52 @@ impl Inner {
             }
         };
         let _ = pending.tx.send(reply);
+    }
+
+    /// Dispatches a reply-shaped datagram whose transaction was already
+    /// claimed (fast path). Only response/error/malformed shapes reach here:
+    /// the caller takes the transaction only when the decoded reply ID is
+    /// present, which those shapes alone provide.
+    fn on_claimed_reply(
+        &self,
+        sock: &SocketNode,
+        pending: Pending,
+        decoded: Result<Message, DecodeError>,
+        from: SocketAddr,
+        now: Instant,
+    ) {
+        match decoded {
+            Ok(msg) => match msg.body {
+                Body::Response(response) => {
+                    self.deliver_reply(sock, pending, Ok(response), msg.ip, from, now);
+                }
+                Body::Error(error) => {
+                    self.deliver_reply(sock, pending, Err(error), msg.ip, from, now);
+                }
+                Body::Query(_) => {
+                    // Unreachable by construction (see above): degrade to a
+                    // drop, so a logic error costs one query timeout, never a
+                    // panic in the network path.
+                    debug_assert!(false, "claimed reply with query body");
+                    self.counters
+                        .family(sock.family)
+                        .drop_packet(DropReason::Malformed);
+                    let _ = pending.tx.send(Reply::Malformed);
+                }
+            },
+            Err(DecodeError::BadReply { .. }) => {
+                incr(&self.counters.errors_received);
+                let _ = pending.tx.send(Reply::Malformed);
+            }
+            Err(_) => {
+                // Unreachable by construction (see above); same safe fallback.
+                debug_assert!(false, "claimed reply with non-reply error");
+                self.counters
+                    .family(sock.family)
+                    .drop_packet(DropReason::Malformed);
+                let _ = pending.tx.send(Reply::Malformed);
+            }
+        }
     }
 
     /// Updates the routing table, the external-IP vote and the sampler

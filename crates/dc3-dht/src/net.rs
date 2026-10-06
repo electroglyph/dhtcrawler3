@@ -123,11 +123,6 @@ impl Transactions {
         self.per_endpoint.contains_key(addr)
     }
 
-    /// Whether `(tid, from)` matches an outstanding query.
-    pub(crate) fn contains(&self, tid: &[u8], from: &SocketAddr) -> bool {
-        <[u8; TID_LEN]>::try_from(tid).is_ok_and(|tid| self.map.contains_key(&(tid, *from)))
-    }
-
     fn forget(per_endpoint: &mut HashMap<SocketAddr, usize>, addr: &SocketAddr) {
         if let Entry::Occupied(mut e) = per_endpoint.entry(*addr) {
             *e.get_mut() = e.get().saturating_sub(1);
@@ -327,12 +322,10 @@ mod tests {
         assert!(t.take(&[tid[0]], &a).is_none());
         assert!(t.take(&[tid[0], tid[1], 0], &a).is_none());
         assert!(t.expects(&a) && !t.expects(&b));
-        assert!(t.contains(&tid, &a) && !t.contains(&tid, &b));
-        assert!(!t.contains(&[tid[0]], &a));
         assert!(t.take(&tid, &a).is_some());
         assert!(t.take(&tid, &a).is_none());
         assert_eq!(t.len(), 0);
-        assert!(!t.expects(&a) && !t.contains(&tid, &a));
+        assert!(!t.expects(&a));
         let (p, _rx) = pending(now + Duration::from_secs(4));
         let tid = t.insert(a, p, now).unwrap();
         t.remove(tid, &a);
