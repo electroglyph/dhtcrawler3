@@ -81,10 +81,13 @@ const METRIC_ADMITTED: &str = "dc3_admitted_total";
 /// Pipeline blocks, by reason (also used by `fetch`).
 pub const METRIC_BLOCKED: &str = "dc3_blocked_total";
 
+/// Capacities of zero are rejected loudly: a zero-capacity LRU cannot exist,
+/// so silently running with room for one key would be a worse surprise.
+#[allow(clippy::panic)] // fail-fast on a programming error, like `expect`
 const fn non_zero(n: usize) -> NonZeroUsize {
     match NonZeroUsize::new(n) {
         Some(n) => n,
-        None => NonZeroUsize::MIN,
+        None => panic!("admission cache capacity must be non-zero"),
     }
 }
 
@@ -915,6 +918,12 @@ mod tests {
         t.record(key(3), ip("1.1.1.1"));
         assert_eq!(t.len(), 2, "bounded LRU");
         assert_eq!(t.record(key(1), ip("5.6.7.8")), 1, "key 1 was evicted");
+    }
+
+    #[test]
+    #[should_panic(expected = "must be non-zero")]
+    fn zero_capacity_is_rejected_not_silently_one() {
+        let _ = SourceTracker::new(0);
     }
 
     #[tokio::test(start_paused = true)]
