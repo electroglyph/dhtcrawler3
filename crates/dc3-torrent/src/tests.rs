@@ -172,6 +172,27 @@ fn v1_multi_file_prefers_utf8_variants() {
 }
 
 #[test]
+fn invalid_utf8_preferred_falls_back_to_legacy() {
+    // F-09: BEP 3 requires `.utf-8` fields to be valid UTF-8. Bytes that are
+    // invalid UTF-8 but decode via GB18030 or lossy UTF-8 must not win over
+    // a valid legacy entry.
+    let v = with(
+        v1_file(1, &["fallback"]),
+        "path.utf-8",
+        O::List(vec![O::bytes(vec![0x81, 0x30])]),
+    );
+    let m = parse(&v1_multi(vec![v])).unwrap();
+    assert_eq!(paths(&m), vec!["fallback"]);
+    // Same for the torrent name.
+    let v = with(
+        with(v1_single(), "name", b("fallback")),
+        "name.utf-8",
+        O::bytes(vec![0x81, 0x30]),
+    );
+    assert_eq!(parse(&v).unwrap().name, "fallback");
+}
+
+#[test]
 fn name_utf8_wrong_type_falls_back_and_missing_name_is_unnamed() {
     let v = with(v1_single(), "name.utf-8", i(1));
     assert_eq!(parse(&v).unwrap().name, "ubuntu.iso");

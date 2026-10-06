@@ -134,19 +134,26 @@ pub(crate) fn parse_decoded(
 }
 
 /// Sanitised text under `preferred`, falling back to `fallback` when the
-/// preferred value is missing or sanitises to empty.
+/// preferred value is missing, is not valid UTF-8 (BEP 3 requires `.utf-8`
+/// fields to be valid UTF-8), or sanitises to empty.
 fn sanitised_text_field(
     dict: &Dict<'_>,
     preferred: &[u8],
     fallback: &[u8],
     enc: Option<&'static Encoding>,
 ) -> Option<String> {
-    for key in [preferred, fallback] {
-        if let Some(raw) = dict.get_bytes(key) {
-            let s = sanitize_display(&decode_text(raw, enc), NAME_MAX_CHARS);
-            if !s.is_empty() {
-                return Some(s);
-            }
+    if let Some(raw) = dict.get_bytes(preferred)
+        && let Ok(s) = std::str::from_utf8(raw)
+    {
+        let s = sanitize_display(s, NAME_MAX_CHARS);
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    if let Some(raw) = dict.get_bytes(fallback) {
+        let s = sanitize_display(&decode_text(raw, enc), NAME_MAX_CHARS);
+        if !s.is_empty() {
+            return Some(s);
         }
     }
     None
@@ -324,15 +331,25 @@ impl CappedPath {
 /// Decodes one path list, or `None` when the key is missing or any element
 /// is not a byte string. Decodes inline so the intermediate `Vec<&[u8]>`
 /// (`raw_bytes_list`) is gone: one allocation per list, not two.
+///
+/// With `strict`, entries must be valid UTF-8 (BEP 3 requires `.utf-8`
+/// fields to be valid UTF-8); any invalid entry makes the whole list
+/// `None` so callers fall back to the legacy list.
 fn decoded_list<'a>(
     d: &'a Dict<'a>,
     key: &[u8],
     enc: Option<&'static Encoding>,
+    strict: bool,
 ) -> Option<Vec<Cow<'a, str>>> {
     let list = d.get_list(key)?;
     let mut out = Vec::with_capacity(list.len());
     for v in list {
-        out.push(decode_text(v.as_bytes()?, enc));
+        let raw = v.as_bytes()?;
+        if strict {
+            out.push(Cow::Borrowed(std::str::from_utf8(raw).ok()?));
+        } else {
+            out.push(decode_text(raw, enc));
+        }
     }
     Some(out)
 }
@@ -343,6 +360,10 @@ fn decoded_list<'a>(
 /// per component so one blank `utf-8` entry does not hide a valid `path`
 /// entry.
 ///
+/// The preferred list must be valid UTF-8 per BEP 3: an entry that is not
+/// valid UTF-8 never wins over the legacy entry, even when it would decode
+/// through the legacy code page or lossy UTF-8.
+///
 /// Each list is decoded at most once and moved (never re-decoded): the old
 /// code re-decoded the legacy list (`leg_dec2`) and decoded the preferred
 /// list again in the counted-but-unlisted fallback (up to 4 list-decodes).
@@ -350,8 +371,8 @@ fn sanitised_path_components<'a>(
     fd: &'a Dict<'a>,
     enc: Option<&'static Encoding>,
 ) -> Result<(Vec<Cow<'a, str>>, Vec<String>), ParseError> {
-    let pref_dec = decoded_list(fd, b"path.utf-8", enc);
-    let leg_dec = decoded_list(fd, b"path", enc);
+    let pref_dec = decoded_list(fd, b"path.utf-8", enc, true);
+    let leg_dec = decoded_list(fd, b"path", enc, false);
     if pref_dec.is_none() && leg_dec.is_none() {
         return Err(ParseError::InvalidField("path"));
     }
