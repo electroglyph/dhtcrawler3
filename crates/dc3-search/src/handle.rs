@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 
 use crate::generations::IndexRoot;
 use crate::index::{MAX_CONCURRENT_SEARCHES, Result, SearchError, SearchIndex, SearchResults};
-use crate::query::SearchQuery;
+use crate::query::{ParsedQuery, SearchQuery};
 
 /// Shortest poll interval [`SearchHandle::watch`] uses.
 pub const MIN_WATCH_INTERVAL: Duration = Duration::from_millis(10);
@@ -73,6 +73,19 @@ impl SearchHandle {
     pub async fn search(&self, q: SearchQuery, timeout: Duration) -> Result<SearchResults> {
         let index = self.index();
         index.search_async(q, timeout).await
+    }
+
+    /// Searches the live generation with an already-parsed query; see
+    /// [`SearchIndex::search_parsed`]. Saves the second `parse_query` on the
+    /// prefix-gate path (B-005).
+    pub async fn search_parsed(
+        &self,
+        q: SearchQuery,
+        parsed: ParsedQuery,
+        timeout: Duration,
+    ) -> Result<SearchResults> {
+        let index = self.index();
+        index.search_parsed_async(q, parsed, timeout).await
     }
 
     /// Terms a trailing prefix word can expand to, on the live generation;

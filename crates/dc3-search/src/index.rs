@@ -413,10 +413,16 @@ impl SearchIndex {
 
     /// Runs a search on the calling thread.
     pub fn search(&self, q: &SearchQuery) -> Result<SearchResults> {
-        let offset = q.offset()?;
         let parsed = parse_query(&q.text)?;
+        self.search_parsed(q, &parsed)
+    }
+
+    /// Runs a search on the calling thread with an already-parsed query.
+    /// Saves the second `parse_query` on the prefix-gate path (B-005).
+    pub fn search_parsed(&self, q: &SearchQuery, parsed: &ParsedQuery) -> Result<SearchResults> {
+        let offset = q.offset()?;
         let searcher = self.reader.searcher();
-        let query = self.build_query(&parsed, &searcher)?;
+        let query = self.build_query(parsed, &searcher)?;
         let per_page = usize::try_from(q.per_page).unwrap_or(usize::MAX);
         let top = TopDocs::for_doc_range(offset..offset.saturating_add(per_page))
             .order_by(RankKeyComputer { sort: q.sort });
@@ -455,6 +461,34 @@ impl SearchIndex {
             let task = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 this.search(&q)
+            });
+            task.await.map_err(|e| SearchError::Task(e.to_string()))?
+        };
+        tokio::time::timeout(timeout, run)
+            .await
+            .map_err(|_| SearchError::Timeout)?
+    }
+
+    /// Runs [`search_parsed`](Self::search_parsed) on the blocking pool with
+    /// the same limit and timeout as [`search_async`](Self::search_async).
+    pub async fn search_parsed_async(
+        self: &Arc<Self>,
+        q: SearchQuery,
+        parsed: ParsedQuery,
+        timeout: Duration,
+    ) -> Result<SearchResults> {
+        let this = Arc::clone(self);
+        let permits = Arc::clone(&self.permits);
+        let run = async move {
+            let permit = permits
+                .acquire_owned()
+                .await
+                .map_err(|e| SearchError::Task(e.to_string()))?;
+            // The permit moves into the task, so a search that outlives its
+            // timeout still counts against the limit until it finishes.
+            let task = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                this.search_parsed(&q, &parsed)
             });
             task.await.map_err(|e| SearchError::Task(e.to_string()))?
         };

@@ -12,7 +12,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use dc3_search::{
-    DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, QueryError,
+    DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, ParsedQuery, QueryError,
     SEARCH_TIMEOUT, SearchError, SearchQuery, Sort, parse_query,
 };
 use dc3_store::TorrentRecord;
@@ -103,16 +103,13 @@ pub(crate) fn is_blocked<B>(st: &AppState<B>, q: &str) -> bool {
 /// phrases. Runs after parameter validation, so blocked and clean queries
 /// answer bad parameters alike. A broken index is not a block: the search
 /// itself reports it.
-pub(crate) async fn expansion_blocked<B: Backend>(st: &AppState<B>, text: &str) -> bool {
-    let single = match parse_query(text) {
-        Ok(parsed) => match parsed.words.last() {
-            Some(last) if last.prefix => match last.tokens.as_slice() {
-                [single] => single.clone(),
-                _ => return false,
-            },
+pub(crate) async fn expansion_blocked<B: Backend>(st: &AppState<B>, parsed: &ParsedQuery) -> bool {
+    let single = match parsed.words.last() {
+        Some(last) if last.prefix => match last.tokens.as_slice() {
+            [single] => single.clone(),
             _ => return false,
         },
-        Err(_) => return false,
+        _ => return false,
     };
     let expansions = match st.search.prefix_expansions(single.clone(), SEARCH_TIMEOUT).await {
         Ok(expansions) => expansions,
@@ -197,6 +194,7 @@ pub(crate) struct Found {
 pub(crate) async fn execute<B: Backend>(
     st: &AppState<B>,
     text: &str,
+    parsed: &ParsedQuery,
     page: u32,
     per_page: u32,
     sort: Sort,
@@ -208,7 +206,10 @@ pub(crate) async fn execute<B: Backend>(
         per_page,
     };
     let started = Instant::now();
-    let result = st.search.search(query, SEARCH_TIMEOUT).await;
+    let result = st
+        .search
+        .search_parsed(query, parsed.clone(), SEARCH_TIMEOUT)
+        .await;
     metrics::histogram!(metric_names::SEARCH_SECONDS).record(started.elapsed().as_secs_f64());
     let results = match result {
         Ok(results) => results,
@@ -316,14 +317,30 @@ pub(crate) async fn search_page<B: Backend>(
         };
         return html(StatusCode::OK, &page);
     }
-    if expansion_blocked(&st, q).await {
+    // Parsed once and shared by the prefix gate and the search (B-005);
+    // a query that fails to parse is answered exactly as `execute` answered
+    // it before (the gate treats it as not blocked).
+    let parsed = match parse_query(q) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            let failure = Failure::Query(e);
+            return error_with_query(
+                site,
+                Flavor::Html,
+                failure.status(),
+                &failure.message(),
+                q,
+            );
+        }
+    };
+    if expansion_blocked(&st, &parsed).await {
         let page = BlockedPage {
             page: site.page("Search blocked", "", true),
         };
         return html(StatusCode::OK, &page);
     }
 
-    let found = match execute(&st, q, page_number, per_page, sort).await {
+    let found = match execute(&st, q, &parsed, page_number, per_page, sort).await {
         Ok(found) => found,
         Err(failure) => {
             return error_with_query(site, Flavor::Html, failure.status(), &failure.message(), q);

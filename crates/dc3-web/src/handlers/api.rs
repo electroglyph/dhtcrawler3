@@ -13,9 +13,11 @@ use axum::response::Response;
 use dc3_store::TorrentRecord;
 use serde::Serialize;
 
+use dc3_search::parse_query;
+
 use super::search::{
-    SearchParams, execute, expansion_blocked, is_blocked, parse_page, parse_per_page, parse_sort,
-    too_long, too_long_message,
+    Failure, SearchParams, execute, expansion_blocked, is_blocked, parse_page, parse_per_page,
+    parse_sort, too_long, too_long_message,
 };
 use super::{Lookup, Shown, lookup, parse_key};
 use crate::Backend;
@@ -126,7 +128,15 @@ pub(crate) async fn search<B: Backend>(
         };
         return json(StatusCode::OK, &body);
     }
-    if expansion_blocked(&st, q).await {
+    // Parsed once and shared by the prefix gate and the search (B-005).
+    let parsed = match parse_query(q) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            let failure = Failure::Query(e);
+            return json_error(failure.status(), &failure.message());
+        }
+    };
+    if expansion_blocked(&st, &parsed).await {
         // A prefix of a blocked term is blocked like the term itself.
         let body = ApiSearch {
             query: "",
@@ -138,7 +148,7 @@ pub(crate) async fn search<B: Backend>(
         };
         return json(StatusCode::OK, &body);
     }
-    match execute(&st, q, page, per_page, sort).await {
+    match execute(&st, q, &parsed, page, per_page, sort).await {
         Ok(found) => {
             let body = ApiSearch {
                 query: q,
