@@ -11,7 +11,7 @@
 --   scrapes; reset on any live scrape, untouched by unaware scrapes.
 -- * removed_keys: one row per scrape-tombstoned DHT key (20 bytes only),
 --   consulted by admission while the cooldown runs. removals escalates the
---   cooldown 7d -> 30d -> 90d (cap); sightings counts post-removal sightings
+--   cooldown 7d -> 28d -> 90d (cap); sightings counts post-removal sightings
 --   for the strong-evidence rule; both reset when the key is fetched again.
 
 ALTER TABLE torrents ADD COLUMN last_scraped_at timestamptz NULL;

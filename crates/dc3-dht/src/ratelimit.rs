@@ -360,6 +360,27 @@ mod tests {
     }
 
     #[test]
+    fn scrape_and_crawl_buckets_are_independent() {
+        // BEP 33 §2 LB-2/LB-3: scrapes charge a dedicated bucket (25/s),
+        // never the crawl bucket (250/s); per-address spacing stays shared
+        // (see `query_spacing`). Draining one bucket must not touch the
+        // other. Binding: `query_scrape` charges `scrape_budget`
+        // (node.rs), `query_gated` charges `budget`.
+        let t0 = Instant::now();
+        let mut crawl = TokenBucket::new(250, 250, t0);
+        let mut scrape = TokenBucket::new(25, 25, t0);
+        for _ in 0..25 {
+            assert!(scrape.try_acquire(t0));
+        }
+        assert!(!scrape.try_acquire(t0));
+        // The crawl bucket is still full after the scrape bucket drained.
+        for i in 0..250 {
+            assert!(crawl.try_acquire(t0), "crawl packet {i}");
+        }
+        assert!(!crawl.try_acquire(t0));
+    }
+
+    #[test]
     fn bucket_takes_and_refunds_several_tokens() {
         let t0 = Instant::now();
         let mut b = TokenBucket::new(1000, 1000, t0);

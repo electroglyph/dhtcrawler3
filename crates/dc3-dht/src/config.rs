@@ -357,6 +357,25 @@ mod tests {
     }
 
     #[test]
+    fn scrape_budget_is_dedicated() {
+        // BEP 33 §2 LB-2: the scrape bucket is dedicated and much smaller
+        // than the crawl bucket, so scrape traversals never starve the
+        // crawl and crawl bursts never starve scrapes (node.rs:
+        // `query_scrape` charges `scrape_budget`, `query_gated` charges
+        // `budget`; both share per-address spacing).
+        assert_eq!(DEFAULT_SCRAPE_PACKETS_PER_SEC, 25);
+        assert_eq!(DEFAULT_MAX_PACKETS_PER_SEC, 250);
+        let c = DhtConfig::default();
+        assert!(c.scrape_packets_per_sec < c.max_packets_per_sec);
+        assert!(c.validate().is_ok());
+        let bad = DhtConfig {
+            scrape_packets_per_sec: 0,
+            ..DhtConfig::default()
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
     fn validation() {
         let tuned = |tuning: DhtTuning| DhtConfig {
             tuning,

@@ -16,7 +16,7 @@ use crate::{Discovered, Source};
 
 /// Peers drawn at random for one `get_peers` answer: all a key can hold.
 /// `krpc::encode` then trims them so the datagram fits in 1 024 bytes,
-/// which keeps roughly 88 IPv4 or 29 IPv6 values next to one node list.
+/// which keeps roughly 88 IPv4 or 28 IPv6 values next to one node list.
 pub(crate) const MAX_VALUES_PER_REPLY: usize = MAX_PEERS_PER_KEY;
 /// Keys put in one `sample_infohashes` answer (BEP 51 suggests about 20).
 pub(crate) const MAX_SAMPLES_PER_REPLY: usize = 20;
@@ -659,6 +659,72 @@ mod tests {
         let r = response(&back);
         assert_eq!(r.bf_sd.as_ref().map(|b| b.len()), Some(256));
         assert_eq!(r.bf_pe.as_ref().map(|b| b.len()), Some(256));
+    }
+
+    #[test]
+    fn scrape_reply_with_values_nodes_and_filters_fits_datagram() {
+        let mut f = Fixture::new();
+        // A hot key: 100 peers of each family, alternating seed/leecher, so
+        // the scrape values cap (20) binds and both filters are non-empty.
+        f.store = PeerStore::with_limits(TTL, 1, 2 * MAX_PEERS_PER_KEY);
+        let key = DhtKey([11; 20]);
+        for (i, seed) in (0..100u16).map(|i| (i, i % 2 == 0)) {
+            f.store.announce(
+                key,
+                SocketAddr::from(([8, 8, (i >> 8) as u8, i as u8], 1000 + i)),
+                seed,
+                f.now,
+            );
+            let ip = format!("2a02:0:0:{:x}::1", i + 1);
+            f.store.announce(
+                key,
+                SocketAddr::new(ip.parse().unwrap(), 2000 + i),
+                seed,
+                f.now,
+            );
+        }
+        // Single family (default want): the 532 B filter reserve (§5) holds
+        // 20 values next to one node list and both 256 B filters.
+        let (reply, _) = f
+            .ask(
+                src(),
+                &query(Method::GetPeers {
+                    info_hash: key,
+                    scrape: true,
+                }),
+            )
+            .unwrap();
+        let encoded = krpc::encode(&reply).unwrap();
+        assert!(encoded.len() <= MAX_DATAGRAM_OUT, "{} bytes", encoded.len());
+        let back = krpc::decode(&encoded).unwrap();
+        let r = response(&back);
+        assert_eq!(r.values.as_ref().map(Vec::len), Some(20));
+        assert_eq!(r.bf_sd.as_ref().map(|b| b.len()), Some(256));
+        assert_eq!(r.bf_pe.as_ref().map(|b| b.len()), Some(256));
+        assert_ne!(r.bf_sd, r.bf_pe);
+        // Both families wanted: values trim first, filters and the primary
+        // node list survive, and the reply still fits (§5 values-first).
+        let both = Some(Want { n4: true, n6: true });
+        let (reply, _) = f
+            .ask(
+                src(),
+                &query_with(
+                    Method::GetPeers {
+                        info_hash: key,
+                        scrape: true,
+                    },
+                    both,
+                ),
+            )
+            .unwrap();
+        let encoded = krpc::encode(&reply).unwrap();
+        assert!(encoded.len() <= MAX_DATAGRAM_OUT, "{} bytes", encoded.len());
+        let back = krpc::decode(&encoded).unwrap();
+        let r = response(&back);
+        assert!(r.values.as_ref().map_or(0, Vec::len) <= 20);
+        assert_eq!(r.bf_sd.as_ref().map(|b| b.len()), Some(256));
+        assert_eq!(r.bf_pe.as_ref().map(|b| b.len()), Some(256));
+        assert!(r.nodes.is_some());
     }
 
     #[test]

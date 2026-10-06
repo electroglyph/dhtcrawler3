@@ -233,7 +233,7 @@ pub fn is_dialable(addr: SocketAddr, allow_private: bool) -> bool;   // the addr
 - **Responder** (disabled when `read_only`; every query we send then carries `ro`=1):
   - `ping` → `id`.
   - `find_node` → the 8 closest nodes to **`target`**, as `nodes` and/or `nodes6` according to `want`.
-  - `get_peers` → `token`, `nodes` (and `nodes6` if wanted), and a random sample of stored `values`, trimmed so the reply fits in 1 024 bytes. This is roughly ≤ 88 IPv4 or ≤ 29 IPv6 values with one node list.
+  - `get_peers` → `token`, `nodes` (and `nodes6` if wanted), and a random sample of stored `values`, trimmed so the reply fits in 1 024 bytes. This is roughly ≤ 88 IPv4 or ≤ 28 IPv6 values with one node list.
   - `announce_peer` → the token is checked against the current and previous secret for the source IP; the port is range-checked and `implied_port` honoured. The peer is stored and `Discovered{Announce, peer}` is emitted. A bad token gets error 203.
   - `sample_infohashes` → up to 20 random stored keys, `num`, `interval` (21 600 s in production) and `nodes`.
   - An unknown method carrying `target` or `info_hash` is answered like `find_node`; anything else gets error 204.
