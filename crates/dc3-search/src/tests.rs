@@ -189,6 +189,15 @@ fn parse_basic_syntax() {
 }
 
 #[test]
+fn trailing_ignored_word_does_not_open_prefix() {
+    assert!(parse_query("foo").unwrap().words[0].prefix);
+    assert!(!parse_query("foo ").unwrap().words[0].prefix);
+    assert!(!parse_query("foo !!!").unwrap().words[0].prefix);
+    assert!(!parse_query("foo *").unwrap().words[0].prefix);
+    assert!(!parse_query("foo bar !!!").unwrap().words[1].prefix);
+}
+
+#[test]
 fn parse_limits() {
     assert_eq!(parse_query(""), Err(QueryError::NoTerms));
     assert_eq!(parse_query("   "), Err(QueryError::NoTerms));
