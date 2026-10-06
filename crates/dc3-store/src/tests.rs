@@ -1794,6 +1794,30 @@ async fn record_scrape_writes_stats_without_index_churn(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn tombstone_dead_missing_row_rolls_back_and_releases(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // Missing row takes the early-Ok(false) path, which must roll back
+    // explicitly instead of relying on Drop-rollback, releasing the
+    // change-feed shared lock it already holds.
+    let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap();
+    assert!(!s.tombstone_dead(999_999_999, epoch, 1).await.unwrap());
+    // The pool must be immediately usable for a full write cycle.
+    let k = key(32);
+    s.observe(
+        &[Observation {
+            key: k,
+            sightings: 1,
+            priority: false,
+        }],
+        NO_LIMIT,
+    )
+    .await
+    .unwrap();
+    let id = s.complete(&k, &torrent(k, "after-rollback")).await.unwrap();
+    assert!(raw_torrent(&pool, id).await.is_live());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let k = key(31);

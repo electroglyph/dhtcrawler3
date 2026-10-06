@@ -775,6 +775,7 @@ impl Store {
             .fetch_optional(&mut *tx)
             .await?;
         let Some(key) = key else {
+            tx.rollback().await?;
             return Ok(false);
         };
         lock_keys(&mut tx, &[key.as_slice()]).await?;
@@ -786,6 +787,7 @@ impl Store {
             .await?
             .rows_affected();
         if n == 0 {
+            tx.rollback().await?;
             return Ok(false);
         }
         sqlx::query(NOTE_REMOVAL_SQL)
