@@ -77,7 +77,7 @@ impl FromStr for DhtKey {
     /// Accepts 40 hex characters (any case) or 32 base32 characters (any case),
     /// as allowed in magnet links (BEP 9).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.len() {
+        match s.chars().count() {
             40 => {
                 let mut out = [0u8; 20];
                 hex::decode_to_slice(s, &mut out).map_err(|_| KeyParseError::BadHex)?;
@@ -156,8 +156,8 @@ impl FromStr for InfoHashV2 {
     type Err = KeyParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() != 64 {
-            return Err(KeyParseError::BadV2Length(s.len()));
+        if s.chars().count() != 64 {
+            return Err(KeyParseError::BadV2Length(s.chars().count()));
         }
         let mut out = [0u8; 32];
         hex::decode_to_slice(s, &mut out).map_err(|_| KeyParseError::BadHex)?;
@@ -189,7 +189,7 @@ impl FromStr for AnyKey {
     type Err = KeyParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() == 64 {
+        if s.chars().count() == 64 {
             s.parse().map(AnyKey::V2)
         } else {
             s.parse().map(AnyKey::V1OrDht)
@@ -273,6 +273,27 @@ mod tests {
         );
         assert!("1".repeat(32).parse::<DhtKey>().is_err());
         assert!(DhtKey::from_slice(&[0u8; 19]).is_err());
+    }
+
+    #[test]
+    fn key_length_errors_count_characters() {
+        // 20 chars / 40 bytes: byte length hits the hex arm, char length does not.
+        let twenty = "é".repeat(20);
+        assert_eq!(twenty.chars().count(), 20);
+        assert_eq!(twenty.len(), 40);
+        assert_eq!(
+            twenty.parse::<DhtKey>(),
+            Err(KeyParseError::BadLength(20))
+        );
+        // 40 chars / 41 bytes: char length hits the hex arm, byte length does not.
+        let s = format!("{}é{}", "a".repeat(19), "a".repeat(20));
+        assert_eq!(s.chars().count(), 40);
+        assert_eq!(s.len(), 41);
+        assert_eq!(s.parse::<DhtKey>(), Err(KeyParseError::BadHex));
+        // 40 chars / 41 bytes reports the true char count path, not bytes.
+        let v2 = format!("{}é{}", "b".repeat(63), "");
+        assert_eq!(v2.chars().count(), 64);
+        assert_eq!(v2.parse::<InfoHashV2>(), Err(KeyParseError::BadHex));
     }
 
     #[test]
