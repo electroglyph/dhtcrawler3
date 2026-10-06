@@ -54,6 +54,7 @@ struct State {
     observed: Vec<Observation>,
     failing_observes: usize,
     failing_completes: usize,
+    failing_removals: usize,
     renewals: usize,
     fails: HashMap<DhtKey, u32>,
     /// `None` means [`MEMORY_FAIL_BACKOFF`].
@@ -214,6 +215,12 @@ impl MemoryStore {
     /// database hiccuped mid-write).
     pub fn fail_next_completes(&self, n: usize) {
         self.lock().failing_completes = n;
+    }
+
+    /// Makes the next `n` `removal_cooldowns` calls fail (as if the
+    /// database hiccuped mid-read).
+    pub fn fail_next_removals(&self, n: usize) {
+        self.lock().failing_removals = n;
     }
 
     /// Number of successful lease renewals.
@@ -667,7 +674,11 @@ impl CrawlStore for MemoryStore {
         base_days: u64,
         strong_evidence: &[DhtKey],
     ) -> Result<Vec<RemovalCooldown>> {
-        let state = self.lock();
+        let mut state = self.lock();
+        if state.failing_removals > 0 {
+            state.failing_removals = state.failing_removals.saturating_sub(1);
+            return Err(StoreError::Invalid("injected removal_cooldowns failure".into()));
+        }
         let now = Instant::now();
         Ok(keys
             .iter()

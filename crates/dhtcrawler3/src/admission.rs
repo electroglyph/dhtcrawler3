@@ -465,6 +465,35 @@ impl<S> std::fmt::Debug for Admission<S> {
     }
 }
 
+/// Evicts removal-memory verdicts down to [`REMOVAL_CACHE_KEYS`].
+///
+/// Live cooldowns are the load-bearing entries: dropping a `Blocked`
+/// verdict lets the next flush admit the key if the re-query fails, so
+/// stale and negative verdicts (cheap to re-query on a miss) go first.
+/// Only a pathological over-cap of live cooldowns sheds the
+/// soonest-expiring ones, never the whole map.
+fn evict_removal_cache(cache: &mut HashMap<DhtKey, RemovalVerdict>, now: Instant) {
+    if cache.len() <= REMOVAL_CACHE_KEYS {
+        return;
+    }
+    cache.retain(|_, v| matches!(v, RemovalVerdict::Blocked(until) if *until > now));
+    if cache.len() <= REMOVAL_CACHE_KEYS {
+        return;
+    }
+    let mut expiries: Vec<(DhtKey, Instant)> = cache
+        .iter()
+        .filter_map(|(key, verdict)| match *verdict {
+            RemovalVerdict::Blocked(until) => Some((*key, until)),
+            RemovalVerdict::Clear(_) => None,
+        })
+        .collect();
+    expiries.sort_by_key(|(_, until)| *until);
+    let shed = cache.len().saturating_sub(REMOVAL_CACHE_KEYS);
+    for (key, _) in expiries.iter().take(shed) {
+        cache.remove(key);
+    }
+}
+
 impl<S: CrawlStore> Admission<S> {
     /// New admission state writing to `store`.
     pub fn new(
@@ -573,7 +602,8 @@ impl<S: CrawlStore> Admission<S> {
 
     /// Drops batch keys still in removal cooldown (§4a) and counts a
     /// post-removal sighting for every batch key the memory still knows.
-    /// Verdicts come from the LRU [`REMOVAL_CACHE_KEYS`] cache; misses are
+    /// Verdicts come from the bounded [`REMOVAL_CACHE_KEYS`] cache (live
+    /// cooldowns survive eviction); misses are
     /// checked in one batched query. Keys with strong evidence (seed
     /// announces in `strong_evidence`, or enough post-removal sightings)
     /// get the ÷4 shortening from the store — shortening, never bypassing.
@@ -623,15 +653,19 @@ impl<S: CrawlStore> Admission<S> {
                     }
                 }
                 Err(e) => {
+                    // Fail closed: the cooldowns are unknown, so the misses
+                    // leave the batch for recheck on re-announce instead of
+                    // being admitted unchecked. No verdict is cached and no
+                    // sighting is recorded — nothing is known about them.
                     tracing::warn!(
                         error = %e,
-                        "removal_cooldowns failed; admitting the batch unchecked"
+                        keys = misses.len(),
+                        "removal_cooldowns failed; dropping the batch keys for recheck"
                     );
+                    blocked_keys.extend(misses);
                 }
             }
-            if self.removal_cache.len() > REMOVAL_CACHE_KEYS {
-                self.removal_cache.clear();
-            }
+            evict_removal_cache(&mut self.removal_cache, now);
         }
         if !remembered.is_empty()
             && let Err(e) = self.store.note_removed_sightings(&remembered).await
@@ -658,9 +692,10 @@ impl<S: CrawlStore> Admission<S> {
     /// keys still in cooldown are dropped (counted as
     /// `dc3_blocked_total{reason="removal_cooldown"}`) and counted as
     /// post-removal sightings; keys announced with `seed=1` refresh their
-    /// scrape clock first (§4b win 6). Both helpers are best-effort: a
-    /// failed check admits the key (intake liveness beats duplicate
-    /// fetches; the scrape worker re-tombstones what revives wrongly).
+    /// scrape clock first (§4b win 6). A failed removal-memory query drops
+    /// the batch keys for recheck on re-announce (fail closed: unknown
+    /// cooldowns are never admitted unchecked); only the scrape-clock
+    /// refresh stays best-effort.
     pub async fn flush(
         &mut self,
         cancel: Option<&CancellationToken>,
@@ -924,6 +959,81 @@ mod tests {
     #[should_panic(expected = "must be non-zero")]
     fn zero_capacity_is_rejected_not_silently_one() {
         let _ = SourceTracker::new(0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn removal_gate_fails_closed_on_store_error() {
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::default();
+        a.handle(
+            event(key(1), Source::Sample, "1.2.3.4", None),
+            &own,
+            Instant::now(),
+        );
+        // The removal-memory query fails: the key must not be admitted.
+        store.fail_next_removals(1);
+        let outcome = a.flush(None, None).await.unwrap();
+        assert_eq!(outcome.queued, 0);
+        assert_eq!(a.batch_len(), 0);
+        assert_eq!(store.observe_calls(), 0);
+        // Nothing was cached about the key, so the next sighting rechecks
+        // against a healthy store and is admitted.
+        a.handle(
+            event(key(1), Source::Sample, "1.2.3.4", None),
+            &own,
+            Instant::now(),
+        );
+        let outcome = a.flush(None, None).await.unwrap();
+        assert_eq!(outcome.queued, 1);
+        assert_eq!(store.observe_calls(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn removal_cache_eviction_keeps_live_cooldowns() {
+        fn wide_key(i: u32) -> DhtKey {
+            let mut b = [0u8; 20];
+            b[..4].copy_from_slice(&i.to_be_bytes());
+            DhtKey(b)
+        }
+        let cap = u32::try_from(REMOVAL_CACHE_KEYS).unwrap();
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        for i in 0..cap {
+            cache.insert(wide_key(i), RemovalVerdict::Clear(now));
+        }
+        let mut live = Vec::new();
+        for i in 0..5u32 {
+            let k = wide_key(cap + i);
+            cache.insert(k, RemovalVerdict::Blocked(now + Duration::from_secs(3600)));
+            live.push(k);
+        }
+        for i in 0..3u32 {
+            cache.insert(
+                wide_key(cap + 100 + i),
+                RemovalVerdict::Blocked(now - Duration::from_secs(1)),
+            );
+        }
+        evict_removal_cache(&mut cache, now);
+        assert_eq!(cache.len(), 5);
+        for k in &live {
+            assert!(matches!(cache.get(k), Some(RemovalVerdict::Blocked(_))));
+        }
+        // Pathological: live cooldowns alone exceed the cap — the
+        // soonest-expiring shed, the rest survive.
+        let mut cache = HashMap::new();
+        for i in 0..cap + 5 {
+            cache.insert(
+                wide_key(i),
+                RemovalVerdict::Blocked(now + Duration::from_secs(u64::from(i) + 1)),
+            );
+        }
+        evict_removal_cache(&mut cache, now);
+        assert_eq!(cache.len(), REMOVAL_CACHE_KEYS);
+        for i in 0..5u32 {
+            assert!(!cache.contains_key(&wide_key(i)), "soonest-expiring shed");
+        }
+        assert!(cache.contains_key(&wide_key(cap + 4)));
     }
 
     #[tokio::test(start_paused = true)]
