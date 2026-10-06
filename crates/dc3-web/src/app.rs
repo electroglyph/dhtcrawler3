@@ -183,12 +183,25 @@ impl<B> AppState<B> {
 /// page shows no statistics. Serve it with
 /// `into_make_service_with_connect_info::<SocketAddr>()`; requests without
 /// a peer address are refused.
+///
+/// # Panics
+///
+/// Panics when `cfg` fails [`WebConfig::validate`]: a router built from an
+/// unvalidated config would serve a malformed `security.txt` canonical URL.
+/// [`serve`](crate::serve) validates first; direct callers must pass a
+/// validated config.
 pub fn router<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> Router {
     build(cfg, deps).0
 }
 
 /// The router and the state it shares with the background tasks.
+///
+/// Panics on an invalid `cfg` (see [`router`]).
+#[allow(clippy::panic)]
 pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Arc<AppState<B>>) {
+    if let Err(e) = cfg.validate() {
+        panic!("invalid WebConfig: {e}");
+    }
     let seeder_freshness = cfg.seeder_freshness;
     let state = Arc::new(AppState {
         site: Site::new(cfg, Utc::now()),

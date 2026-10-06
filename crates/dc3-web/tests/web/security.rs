@@ -388,3 +388,14 @@ async fn request_bodies_are_limited() {
         .insert("content-length", "4096".parse().unwrap());
     assert_eq!(send(&app.router, req).await.status, StatusCode::OK);
 }
+
+/// Building the router with an invalid `base_url` fails fast instead of
+/// serving a malformed `security.txt` canonical URL.
+#[tokio::test]
+#[should_panic(expected = "invalid WebConfig")]
+async fn router_rejects_an_invalid_base_url() {
+    let _serial = serial().await;
+    let mut cfg = config();
+    cfg.base_url = "evil".into();
+    let _ = app_with(Vec::new(), cfg);
+}
