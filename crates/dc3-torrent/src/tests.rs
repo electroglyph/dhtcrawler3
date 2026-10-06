@@ -891,6 +891,30 @@ fn shared_long_prefix_is_not_rescanned_per_file() {
 }
 
 #[test]
+fn visited_bound_is_budget_plus_metadata_len() {
+    // F-05: the documented bound on visited text is budget + info length
+    // (fail-closed with TooMuchText), not the budget alone.
+    let dir = "e".repeat(255);
+    let files: Vec<(Vec<u8>, O)> = (0..20_000)
+        .map(|n| (format!("{n}").into_bytes(), v2_file(1)))
+        .collect();
+    let mut files: Map = files.into_iter().collect();
+    files.insert(b"zz blocked".to_vec(), v2_file(1));
+    let mut node = O::Dict(files);
+    for _ in 0..16 {
+        node = d([(dir.as_str(), node)]);
+    }
+    let raw = encode(&v2_only(node));
+    let budget = text_budget(&raw);
+    let mut chars = 0usize;
+    let r = parse_info_visit(&raw, &mut |p| {
+        chars += p.chars().count();
+    });
+    assert_eq!(r, Err(ParseError::TooMuchText));
+    assert!(chars <= budget + raw.len(), "{chars}");
+}
+
+#[test]
 fn components_beyond_the_path_cap_are_visited() {
     let long = "x".repeat(255);
     let mut comps: Vec<&str> = vec![long.as_str(); 17];

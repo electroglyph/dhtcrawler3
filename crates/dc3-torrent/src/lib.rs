@@ -39,7 +39,9 @@ pub const MAX_FILE_TREE_DEPTH: usize = 64;
 pub const TEXT_CHARS_PER_BYTE: usize = 4;
 /// Lower bound of the visited-text budget, so small torrents with deep trees parse.
 pub const MIN_TEXT_CHARS: usize = 1 << 20;
-/// Upper bound of the visited-text budget, whatever the metadata size.
+/// Upper bound of the visited-text budget input (per byte of metadata,
+/// clamped); total visited text is bounded by budget + metadata length and
+/// parsing fails with [`ParseError::TooMuchText`] past the budget.
 pub const MAX_TEXT_CHARS: usize = 16 << 20;
 /// Name used when a torrent's name is missing or sanitises to nothing.
 pub const UNNAMED: &str = "(unnamed)";
