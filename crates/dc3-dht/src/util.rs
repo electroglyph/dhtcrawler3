@@ -17,3 +17,34 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub(crate) fn after(now: Instant, d: Duration) -> Instant {
     now.checked_add(d).unwrap_or(now)
 }
+
+/// What's left of a shared pre-send wait budget after `elapsed` was spent
+/// waiting: per-address spacing and budget acquisition share one
+/// `max_send_wait`, so the budget wait only gets the remainder instead of
+/// a second full `max_send_wait`.
+pub(crate) fn remaining_budget(max_wait: Duration, elapsed: Duration) -> Duration {
+    max_wait.checked_sub(elapsed).unwrap_or(Duration::ZERO)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remaining_budget_shares_one_wait_bound() {
+        let max = Duration::from_secs(4);
+        assert_eq!(
+            remaining_budget(max, Duration::ZERO),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            remaining_budget(max, Duration::from_secs(1)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(remaining_budget(max, max), Duration::ZERO);
+        assert_eq!(
+            remaining_budget(max, max + Duration::from_secs(1)),
+            Duration::ZERO
+        );
+    }
+}

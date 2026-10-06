@@ -135,8 +135,8 @@ pub struct DhtTuning {
     /// Time limit for lookups the node starts itself (bootstrap, refresh,
     /// sampler refill, announce). Production: 30 s.
     pub lookup_timeout: Duration,
-    /// Longest a query may wait for the send budget or per-address spacing
-    /// before it is dropped. Production: 4 s.
+    /// Longest a query may wait combined for per-address spacing and the
+    /// send budget before it is dropped. Production: 4 s.
     pub max_send_wait: Duration,
     /// Minimum time between two queries to one IP. Production: 1 s.
     pub per_address_query_spacing: Duration,

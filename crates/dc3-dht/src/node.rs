@@ -39,7 +39,7 @@ use crate::sampler::Sampler;
 use crate::state::{self, FamilyState, MAX_SAVED_NODES, STATE_VERSION, SavedNode, StateFile};
 use crate::stats::{Counters, DhtStatsSnapshot, DropReason, incr};
 use crate::token::TokenSecrets;
-use crate::util::{after, lock};
+use crate::util::{after, lock, remaining_budget};
 use crate::{Discovered, Error};
 use lru::LruCache;
 
@@ -569,11 +569,15 @@ impl Inner {
             counters.drop_packet(DropReason::Throttled);
             return Err(QueryError::Throttled);
         };
+        let waited_from = Instant::now();
         if !wait.is_zero() && !self.sleep(wait).await {
             lock(&self.shared).spacing.release(&addr, Instant::now());
             return Err(QueryError::Cancelled);
         }
-        if !self.acquire_budget(tuning.max_send_wait).await {
+        // Spacing and the send budget share one `max_send_wait`: the budget
+        // wait only gets the remainder instead of a second full bound.
+        let remaining = remaining_budget(tuning.max_send_wait, waited_from.elapsed());
+        if !self.acquire_budget(remaining).await {
             lock(&self.shared).spacing.release(&addr, Instant::now());
             if self.cancel.is_cancelled() {
                 return Err(QueryError::Cancelled);
@@ -692,11 +696,15 @@ impl Inner {
             counters.drop_packet(DropReason::Throttled);
             return Err(QueryError::Throttled);
         };
+        let waited_from = Instant::now();
         if !wait.is_zero() && !self.sleep(wait).await {
             lock(&self.shared).spacing.release(&addr, Instant::now());
             return Err(QueryError::Cancelled);
         }
-        if !self.acquire_scrape_budget(tuning.max_send_wait).await {
+        // Spacing and the send budget share one `max_send_wait`: the budget
+        // wait only gets the remainder instead of a second full bound.
+        let remaining = remaining_budget(tuning.max_send_wait, waited_from.elapsed());
+        if !self.acquire_scrape_budget(remaining).await {
             lock(&self.shared).spacing.release(&addr, Instant::now());
             if self.cancel.is_cancelled() {
                 return Err(QueryError::Cancelled);
