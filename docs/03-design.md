@@ -109,10 +109,7 @@ Rules for every crate:
 | `files` search field | 64 KiB of text | search |
 | Prefix expansions | 200 terms per field | search |
 | Search query | ≤ 200 characters, ≤ 12 words, page ≤ 50, 20 results per page (API ≤ 50), 5 s timeout, ≤ 16 concurrent searches | search, web |
-| HTTP request body | 32 KiB for `POST /report/{key}`; 4 KiB elsewhere | web |
-| Report message / contact | 2 000 / 320 characters | web, store |
-| Open reports | 100 000; `submit_report` refuses beyond | store |
-| CSAM auto-hides | `web.autohide_per_hour` (default 60), enforced in the database | store |
+| HTTP request body | 4 KiB | web |
 | Web rate-limiter map | 100 000 prefixes, 10 min idle expiry; refilled buckets are forgotten first; when full, new clients share one of 64 overflow buckets chosen by IPv4 /16 or IPv6 /32 | web |
 | HTTP request head | must arrive within 10 s of the connection opening (or of the next request's first byte); trickled bytes do not extend it | web |
 | Detail-page policy re-check | name, plus the first 8 KiB of path text | web |
@@ -346,11 +343,10 @@ The migrations embedded in the crate are the specification.
   - `files jsonb` (lz4 where available), `files_truncated`, `piece_length`;
   - `seen_count`, `first_seen_at`, `last_seen_at`;
   - `change_seq` (unique index);
-  - `hidden_at`, `reviewed_at`, `deleted_at`.
+  - `deleted_at`.
 - **`pending`**: `dht_key` (PK), `discovered_at`, `seen_count`, `attempts`, `next_attempt_at`, `lease_until`, `gave_up`.
 - **`denylist`**: `key` (20 or 32 bytes), `reason`, `note`, `created_at`, `created_by`.
-- **`reports`**: no IP addresses.
-- **`audit_log`**, **`stats_daily`**, and **`settings`** (owner-managed key/value, including `autohide_per_hour`).
+- **`audit_log`**, **`stats_daily`**, and **`settings`** (owner-managed key/value).
 
 **Keys.**
 - A key is **known** if it equals any stored row's `dht_key`, `info_hash_v1`, or the first 20 bytes of `info_hash_v2`.
@@ -388,32 +384,19 @@ are expected.
 3. Otherwise, update the row whose `dht_key`, `info_hash_v1` or `info_hash_v2` matches, keeping `first_seen_at`, or insert a new row.
 4. In both cases, add the pending row's `seen_count`, bump `change_seq`, and increment `stats_daily.fetched`.
 
-**`deny(key, reason, note, actor)`** runs in one transaction:
+**Takedowns.** `deny(key, reason, note, actor)` runs in one transaction:
 1. Insert into the denylist.
 2. Tombstone every matching torrent: wipe `name` and `files`, set `deleted_at`, bump `change_seq`.
 3. Delete the pending row.
 4. Write the audit log.
 
-**`submit_report(...)`** is a `SECURITY DEFINER` function owned by `dc3_owner`. It is the
-web role's only write path. In one transaction it:
-1. refuses the report if 100 000 reports are already open;
-2. inserts the report;
-3. if `reason = csam`, the torrent is visible, `hidden_at` is NULL, `reviewed_at` is NULL (an admin has not already cleared it), this is the first open csam report for the torrent, **and** fewer than `settings.autohide_per_hour` auto-hides happened in the last hour, sets `hidden_at`, bumps `change_seq`, and writes an `audit_log` row (`actor = 'web'`, `action = 'auto-hide'`);
-4. returns the report ID, whether the torrent was hidden, and `budget_exhausted` (every other hide condition held but the hourly budget was used up). The web role uses it for `dc3_autohide_budget_exhausted_total`.
-
-In this lookup, a hidden torrent still counts as found, so later reports link to it. Hiding still requires `hidden_at IS NULL`.
-
-**Resolving a report.**
-- **Dismissing** a report of any reason sets `reviewed_at` to the time of the latest review and un-hides the torrent (unless another open csam report exists). After that, only an admin can hide it again.
-- **Denying** calls `deny`.
-
-**Roles** are created by `deploy/postgres/init`. Grants are applied by a migration. The crawler's INSERT and UPDATE grants on `torrents` are column-level and exclude `hidden_at` and `reviewed_at`, so it can never un-hide a reported torrent.
+**Roles** are created by `deploy/postgres/init`. Grants are applied by a migration. The web role has no write grants at all.
 
 | Role | Grants |
 |---|---|
 | `dc3_crawler` | SELECT/INSERT/UPDATE on `torrents`, `pending`, `stats_daily`; SELECT/INSERT on `denylist`; INSERT on `audit_log`; DELETE on `pending`; USAGE on `change_seq` |
 | `dc3_indexer` | SELECT on `torrents`, `denylist` and the `change_seq` sequence (the high-water mark reads `last_value` directly) |
-| `dc3_web` | SELECT on `torrents`, `denylist` and `stats_daily`; EXECUTE on `submit_report`. **No** direct INSERT or UPDATE. |
+| `dc3_web` | SELECT on `torrents`, `denylist` and `stats_daily`. **No** INSERT, UPDATE or EXECUTE. |
 | `dc3_owner` | owns everything; runs migrations and admin commands |
 
 All queries use bound parameters.
@@ -466,7 +449,7 @@ rename.
 **Indexer loop** (in the binary):
 1. Take the high-water mark (§10).
 2. Read up to 1 000 rows with `checkpoint < change_seq ≤ mark`.
-3. Delete rows that are hidden, tombstoned or denylisted, **or whose name or stored paths match the policy**. Upsert the rest.
+3. Delete rows that are tombstoned or denylisted, **or whose name or stored paths match the policy**. Upsert the rest.
 4. Commit with the batch's last `change_seq`.
 5. Repeat without sleeping if the batch was full. Otherwise sleep for `index.poll_interval_ms`.
 
@@ -486,7 +469,6 @@ pub async fn serve(cfg: WebConfig, store: Store, index: SearchHandle, policy: Ar
 | `GET /` | search box and index statistics, from an in-memory snapshot refreshed by one background task at most every 60 s; requests never trigger counts |
 | `GET /search?q=&p=&sort=` | results |
 | `GET /t/{key}` | torrent detail; 40-hex DHT or v1 key, or 64-hex v2 |
-| `GET /report/{key}`, `POST /report/{key}` | report form and submission, through `submit_report` |
 | `GET /api/v1/search`, `GET /api/v1/torrents/{key}` | JSON API |
 | `GET /about`, `/legal`, `/privacy` | information pages |
 | `GET /robots.txt`, `/.well-known/security.txt` | crawler and security contact files |
@@ -521,7 +503,7 @@ No `Server` header is sent.
 
 **Rate limits.**
 - Buckets per IPv4 /32, and per IPv6 /64, /56 and /48 **at the same time**. A request needs a token from every bucket that applies.
-- Pages: 3/s, burst 30. API: 2/s, burst 20. Report POST: 3/min, burst 3.
+- Pages: 3/s, burst 30. API: 2/s, burst 20.
 - The map is bounded (§3). When it is full, new clients share one overflow bucket instead of evicting live entries.
 - A rate-limited request gets 429 with `Retry-After`.
 
@@ -545,8 +527,7 @@ the policy again, before display.
 in HTML. A blocked API query returns the normal shape, with `blocked: true` and no
 results.
 
-**CSRF.** A POST is accepted only if `Sec-Fetch-Site` is `same-origin` or `none`, or
-`Origin` equals `web.base_url`.
+**CSRF.** There are no POST endpoints; every request is a GET.
 
 **Blocked queries** get a page with no results and a deterrence and help message. They
 increment a counter and are never logged.
@@ -562,8 +543,6 @@ has no access log. For nginx, use a format without `$remote_addr` or `$request`,
 dhtcrawler3 [--config FILE] <COMMAND>
   migrate | crawl | index [--rebuild] | web | all
   deny add <KEY> --reason <dmca|csam|abuse|other> [--note TEXT] | deny remove <KEY> | deny list [--limit N]
-  reports list [--status open|actioned|dismissed] [--limit N]
-  reports resolve <ID> --action <deny|dismiss> [--reason R] [--note TEXT]
   all [--migrate]
   policy rescan
   stats | check-config
@@ -575,7 +554,7 @@ dhtcrawler3 [--config FILE] <COMMAND>
 - `[database.crawler]`, `[database.indexer]`, `[database.web]`: optional `user` and `password_file` overrides, used by `all`.
 - `[crawl]` (including `max_pending` and `max_inflight_metadata_bytes`).
 - `[index]`.
-- `[web]` (including `autohide_per_hour`, written to `settings` by `migrate`).
+- `[web]`.
 - `[metrics]` (`listen`).
 - `[policy]` (`terms_file`).
 - `[log]`.
@@ -607,7 +586,7 @@ List values are comma-separated.
 
 **End-to-end tests** (in `crates/dhtcrawler3/tests/`):
 1. **No database or network.** 16 DHT nodes on `127.0.0.1` with `allow_private_addrs` and `tuning.limits_by_endpoint`, plus the test seeder. The crawler discovers a key by BEP 51, finds the seeder, and fetches, verifies and parses the torrent.
-2. **With `DATABASE_URL` set.** Discovery → pending → fetch → torrents → index → web search → report → auto-hide → deny.
+2. **With `DATABASE_URL` set.** Discovery → pending → fetch → torrents → index → web search → deny.
 
 ## 14. Deployment and supply chain (R12, R13)
 
@@ -675,7 +654,7 @@ An independent review on 2026-09-16 raised these points. All were adopted above:
 - test addressing;
 - the self-contained binary wording;
 - release attestation;
-- report body size;
+- request body size;
 - web role privileges;
 - change-feed lock ordering and timeouts;
 - the sampler's visited-map eviction;

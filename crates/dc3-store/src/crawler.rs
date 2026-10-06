@@ -153,7 +153,6 @@ UPDATE torrents t
  WHERE t.id IN (
         SELECT s.id FROM torrents s
          WHERE s.deleted_at IS NULL
-           AND s.hidden_at IS NULL
            AND NOT dc3_key_denied(s.dht_key, s.info_hash_v1, s.info_hash_v2)
            AND (s.last_scraped_at IS NULL
                 OR (s.seeders_est IS NULL

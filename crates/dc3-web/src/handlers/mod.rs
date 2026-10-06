@@ -3,7 +3,6 @@
 pub(crate) mod api;
 pub(crate) mod health;
 pub(crate) mod pages;
-pub(crate) mod report;
 pub(crate) mod search;
 pub(crate) mod torrent;
 
@@ -45,14 +44,6 @@ pub(crate) fn parse_key(segment: Result<Path<String>, PathRejection>) -> Option<
         return None;
     }
     text.parse().ok()
-}
-
-/// A key in its canonical lowercase hex form.
-pub(crate) fn key_hex(key: &AnyKey) -> String {
-    match key {
-        AnyKey::V1OrDht(k) => k.to_hex(),
-        AnyKey::V2(h) => h.to_hex(),
-    }
 }
 
 /// The path of a torrent's page.
@@ -239,8 +230,6 @@ mod tests {
             last_scraped_at: None,
             seeders_est: None,
             change_seq: 1,
-            hidden_at: None,
-            reviewed_at: None,
             deleted_at: None,
         }
     }
@@ -288,13 +277,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn show_all_keeps_order_and_drops_hidden_and_blocked() {
+    async fn show_all_keeps_order_and_drops_dead_and_blocked() {
         let policy = Arc::new(TermMatcher::load("forbiddenword\n").unwrap());
-        let mut hidden = record("hidden", &[]);
-        hidden.hidden_at = Some(Utc::now());
+        let mut dead = record("tombstoned", &[]);
+        dead.deleted_at = Some(Utc::now());
         let records = vec![
             record("b first", &[]),
-            hidden,
+            dead,
             record("forbiddenword", &[]),
             record("a last", &[]),
         ];
@@ -386,8 +375,6 @@ mod tests {
         assert!(ok("abc").is_none());
         assert!(ok(&"g".repeat(40)).is_none());
         assert!(ok(&"a".repeat(65)).is_none());
-        let v2: AnyKey = "c".repeat(64).parse().unwrap();
-        assert_eq!(key_hex(&v2), "c".repeat(64));
     }
 
     #[test]

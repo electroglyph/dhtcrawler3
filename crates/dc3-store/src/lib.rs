@@ -18,11 +18,10 @@
 //! * **index** (`dc3_indexer`): [`Store::high_water_mark`],
 //!   [`Store::changes_since`];
 //! * **web** (`dc3_web`): [`Store::get_by_key`], [`Store::get_many`],
-//!   [`Store::submit_report`], [`Store::public_stats`],
+//!   [`Store::public_stats`],
 //!   [`Store::daily_stats`];
 //! * **admin** (`dc3_owner`): [`Store::migrate`], [`Store::stats`],
-//!   [`Store::undeny`], [`Store::list_denied`], [`Store::list_reports`],
-//!   [`Store::get_report`], [`Store::resolve_report`], [`Store::audit`],
+//!   [`Store::undeny`], [`Store::list_denied`], [`Store::audit`],
 //!   [`Store::get_setting`], [`Store::set_setting`].
 //!
 //! [`Store::ping`] works for every user, and the owner may call every method.
@@ -46,12 +45,6 @@
 //! A denylist key is 20 bytes (DHT key or v1 infohash) or 32 bytes (v2
 //! infohash). A v2 torrent is found in the DHT under the first 20 bytes of its
 //! hash, so keys are matched by their 20-byte prefix everywhere.
-//!
-//! # Reports
-//!
-//! The web user writes nothing directly. [`Store::submit_report`] calls the
-//! `submit_report` database function (`SECURITY DEFINER`), which stores the
-//! report and may hide the torrent, within the limits in the `settings` table.
 //!
 //! All SQL uses bound parameters; strings are never concatenated into SQL.
 #![forbid(unsafe_code)]
@@ -81,19 +74,13 @@ pub use sqlx;
 /// Connection options for [`Store::connect_with`].
 pub use sqlx::postgres::PgConnectOptions;
 pub use types::{
-    DailyStats, DenyEntry, DenyOutcome, DenyReason, FileRow, IndexRow, LiveRow, NewReport,
-    NewTorrent, Observation, ObserveOutcome, ParseEnumError, PendingItem, PublicStats,
-    RemovalCooldown, Report, ReportAction, ReportReason, ReportStatus, ScrapeItem, StoreStats,
-    SubmitOutcome, TorrentRecord,
+    DailyStats, DenyEntry, DenyOutcome, DenyReason, FileRow, IndexRow, LiveRow, NewTorrent,
+    Observation, ObserveOutcome, ParseEnumError, PendingItem, PublicStats, RemovalCooldown,
+    ScrapeItem, StoreStats, TorrentRecord,
 };
 
 /// Advisory lock key of the change feed (ASCII `"dc3chg"` followed by 0x0001).
-/// The `submit_report` database function uses the same value.
 pub const CHANGE_LOCK_KEY: i64 = 0x6463_3363_6867_0001;
-
-/// Advisory lock key that serialises the CSAM auto-hide budget check inside
-/// the `submit_report` database function (ASCII `"dc3hid"` followed by 0x0001).
-pub const AUTOHIDE_LOCK_KEY: i64 = 0x6463_3368_6964_0001;
 
 /// First argument of the two-key advisory locks that serialise writes per
 /// torrent key (a separate lock space from the one-key locks above).
@@ -105,13 +92,9 @@ pub const MAX_NAME_CHARS: usize = 1024;
 pub const MAX_PATH_CHARS: usize = 4096;
 /// Maximum number of file rows stored per torrent.
 pub const MAX_STORED_FILES: usize = 2000;
-/// Maximum characters in a report message.
-pub const REPORT_MESSAGE_MAX_CHARS: usize = 2000;
-/// Maximum characters in a report contact field.
-pub const REPORT_CONTACT_MAX_CHARS: usize = 320;
 /// Maximum characters in a denial or resolution note.
 pub const NOTE_MAX_CHARS: usize = 2000;
-/// Maximum characters in an actor name (audit log, denylist, reports).
+/// Maximum characters in an actor name (audit log, denylist).
 pub const ACTOR_MAX_CHARS: usize = 128;
 /// Maximum characters in an audit action.
 pub const AUDIT_ACTION_MAX_CHARS: usize = 64;
@@ -162,16 +145,6 @@ pub const HWM_LOCK_TIMEOUT: Duration = Duration::from_millis(200);
 /// `idle_in_transaction_session_timeout` of every store connection.
 pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Setting: CSAM auto-hides allowed per hour (`web.autohide_per_hour`).
-pub const SETTING_AUTOHIDE_PER_HOUR: &str = "autohide_per_hour";
-/// Setting: `submit_report` refuses new reports while this many are open.
-pub const SETTING_OPEN_REPORTS_CAP: &str = "open_reports_cap";
-/// Value of [`SETTING_AUTOHIDE_PER_HOUR`] after the first migration, and
-/// the value the database function uses if the row is missing.
-pub const DEFAULT_AUTOHIDE_PER_HOUR: u32 = 60;
-/// Value of [`SETTING_OPEN_REPORTS_CAP`] after the first migration, and the
-/// value the database function uses if the row is missing.
-pub const DEFAULT_OPEN_REPORTS_CAP: u32 = 100_000;
 /// Maximum characters in a setting key.
 pub const MAX_SETTING_KEY_CHARS: usize = 64;
 /// Maximum characters in a setting value.
@@ -179,13 +152,9 @@ pub const MAX_SETTING_VALUE_CHARS: usize = 1024;
 /// Largest value of a numeric setting (at most nine decimal digits).
 pub const MAX_NUMERIC_SETTING: u32 = 999_999_999;
 
-/// SQLSTATE the `submit_report` database function raises when the
-/// open-report cap is reached; mapped to [`StoreError::ReportsFull`].
-pub const SQLSTATE_REPORTS_FULL: &str = "D3R01";
-
 /// Settings whose value must be a decimal integer in
 /// `0..=MAX_NUMERIC_SETTING` (the schema checks the same).
-const NUMERIC_SETTINGS: [&str; 2] = [SETTING_AUTOHIDE_PER_HOUR, SETTING_OPEN_REPORTS_CAP];
+const NUMERIC_SETTINGS: [&str; 0] = [];
 /// Digits in [`MAX_NUMERIC_SETTING`].
 const MAX_NUMERIC_SETTING_DIGITS: usize = 9;
 /// Actor recorded in the audit log by [`Store::set_setting`].
@@ -193,8 +162,6 @@ const SETTINGS_ACTOR: &str = "owner";
 
 /// lock_not_available: a lock wait exceeded `lock_timeout`.
 const SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
-/// invalid_parameter_value: raised by `submit_report` for bad arguments.
-const SQLSTATE_INVALID_PARAMETER: &str = "22023";
 /// check_violation.
 const SQLSTATE_CHECK_VIOLATION: &str = "23514";
 
@@ -221,12 +188,6 @@ pub enum StoreError {
     Denied,
     #[error("not found")]
     NotFound,
-    #[error("report {0} is not open")]
-    ReportNotOpen(i64),
-    /// [`Store::submit_report`] refused the report: the number of open
-    /// reports has reached the `open_reports_cap` setting.
-    #[error("too many open reports")]
-    ReportsFull,
     /// A value read from the database does not fit the Rust type.
     #[error("unexpected data in database: {0}")]
     Corrupt(String),
@@ -405,20 +366,18 @@ async fn estimated_rows(pool: &PgPool, table: CountedTable) -> Result<i64> {
     Ok(estimate as i64)
 }
 
-/// Torrents that are neither hidden nor tombstoned: exact while the estimate
+/// Torrents that are not tombstoned: exact while the estimate
 /// is at most [`EXACT_COUNT_THRESHOLD`], otherwise the estimate itself (which
-/// includes hidden and tombstoned rows), because an exact count scans the
+/// includes tombstoned rows), because an exact count scans the
 /// table.
 async fn live_torrents(pool: &PgPool) -> Result<i64> {
     let estimate = estimated_rows(pool, CountedTable::Torrents).await?;
     if estimate > EXACT_COUNT_THRESHOLD {
         return Ok(estimate);
     }
-    let n: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM torrents WHERE hidden_at IS NULL AND deleted_at IS NULL",
-    )
-    .fetch_one(pool)
-    .await?;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM torrents WHERE deleted_at IS NULL")
+        .fetch_one(pool)
+        .await?;
     Ok(n)
 }
 
@@ -464,7 +423,7 @@ fn check_note(note: Option<&str>) -> Result<()> {
     }
 }
 
-/// Validates a denylist or report key (20 or 32 bytes).
+/// Validates a denylist key (20 or 32 bytes).
 fn check_key_len(key: &[u8]) -> Result<()> {
     match key.len() {
         PREFIX_LEN | V2_LEN => Ok(()),

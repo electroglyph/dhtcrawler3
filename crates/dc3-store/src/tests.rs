@@ -9,7 +9,6 @@ use dc3_core::{AnyKey, DhtKey, InfoHashV2};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
-use crate::web::submit_error;
 use crate::*;
 
 /// A `max_pending` that never gates.
@@ -94,19 +93,6 @@ fn prio(k: DhtKey, n: u32) -> Observation {
     }
 }
 
-fn report(key: AnyKey, reason: ReportReason, message: &str) -> NewReport {
-    NewReport {
-        key,
-        reason,
-        message: message.to_owned(),
-        contact: None,
-    }
-}
-
-fn csam(k: DhtKey) -> NewReport {
-    report(AnyKey::V1OrDht(k), ReportReason::Csam, "")
-}
-
 fn code_of(e: &sqlx::Error) -> Option<String> {
     sqlstate(e).map(|c| c.into_owned())
 }
@@ -146,14 +132,6 @@ async fn today(pool: &PgPool) -> DailyStats {
 async fn audit_count(pool: &PgPool, action: &str) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = $1")
         .bind(action)
-        .fetch_one(pool)
-        .await
-        .unwrap()
-}
-
-async fn report_torrent(pool: &PgPool, report_id: i64) -> Option<i64> {
-    sqlx::query_scalar("SELECT torrent_id FROM reports WHERE id = $1")
-        .bind(report_id)
         .fetch_one(pool)
         .await
         .unwrap()
@@ -205,12 +183,6 @@ fn enums_round_trip() {
     for r in DenyReason::ALL {
         assert_eq!(r.as_str().parse::<DenyReason>().unwrap(), *r);
     }
-    for r in ReportReason::ALL {
-        assert_eq!(r.as_str().parse::<ReportReason>().unwrap(), *r);
-    }
-    for r in ReportStatus::ALL {
-        assert_eq!(r.as_str().parse::<ReportStatus>().unwrap(), *r);
-    }
     assert_eq!(DenyReason::CsamAuto.as_str(), "csam-auto");
     assert!("nope".parse::<DenyReason>().is_err());
     assert_eq!(key_lock_id(&[1, 2, 3, 4, 5]), 0x0102_0304);
@@ -220,10 +192,8 @@ fn enums_round_trip() {
 
 #[test]
 fn helpers_and_constants() {
-    // The database function spells these in decimal.
+    // The advisory lock key is spelled in decimal in the database.
     assert_eq!(CHANGE_LOCK_KEY, 7_233_681_928_533_508_097);
-    assert_eq!(AUTOHIDE_LOCK_KEY, 7_233_681_950_024_925_185);
-    assert_ne!(CHANGE_LOCK_KEY, AUTOHIDE_LOCK_KEY);
 
     for ok in ["0", "7", "60", "999999999"] {
         assert!(is_numeric_setting_value(ok), "{ok}");
@@ -271,47 +241,18 @@ async fn migrations_and_ping(pool: PgPool) {
     assert_eq!(s.public_stats().await.unwrap(), PublicStats::default());
     assert_eq!(s.pending_depth().await.unwrap(), 0);
 
-    // Seeded settings match the crate's defaults.
-    assert_eq!(
-        s.get_setting(SETTING_AUTOHIDE_PER_HOUR).await.unwrap(),
-        Some(DEFAULT_AUTOHIDE_PER_HOUR.to_string())
-    );
-    assert_eq!(
-        s.get_setting(SETTING_OPEN_REPORTS_CAP).await.unwrap(),
-        Some(DEFAULT_OPEN_REPORTS_CAP.to_string())
-    );
+    // No report settings are seeded (reporting is removed).
+    assert_eq!(s.get_setting("autohide_per_hour").await.unwrap(), None);
+    assert_eq!(s.get_setting("open_reports_cap").await.unwrap(), None);
 
-    // submit_report is SECURITY DEFINER with a pinned search_path, uses the
-    // crate's lock keys, and PUBLIC cannot call it.
-    let row = sqlx::query(
-        "SELECT prosecdef, proconfig, prosrc, \
-                has_function_privilege('public', p.oid, 'EXECUTE') AS public_exec \
-           FROM pg_proc p WHERE p.oid = 'submit_report(bytea, text, text, text)'::regprocedure",
+    // The report write path is gone: no submit_report function exists.
+    let gone: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('submit_report(bytea, text, text, text)') IS NULL",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(row.get::<bool, _>("prosecdef"));
-    assert_eq!(
-        row.get::<Vec<String>, _>("proconfig"),
-        vec!["search_path=pg_catalog, public, pg_temp".to_owned()]
-    );
-    let src: String = row.get("prosrc");
-    assert!(src.contains(&CHANGE_LOCK_KEY.to_string()));
-    assert!(src.contains(&AUTOHIDE_LOCK_KEY.to_string()));
-    assert!(src.contains(&format!(
-        "c_default_cap      CONSTANT bigint := {DEFAULT_OPEN_REPORTS_CAP};"
-    )));
-    assert!(src.contains(&format!(
-        "c_default_budget   CONSTANT bigint := {DEFAULT_AUTOHIDE_PER_HOUR};"
-    )));
-    assert!(src.contains(&format!(
-        "c_max_message      CONSTANT integer := {REPORT_MESSAGE_MAX_CHARS};"
-    )));
-    assert!(src.contains(&format!(
-        "c_max_contact      CONSTANT integer := {REPORT_CONTACT_MAX_CHARS};"
-    )));
-    assert!(!row.get::<bool, _>("public_exec"));
+    assert!(gone);
     let public_exec: bool = sqlx::query_scalar(
         "SELECT has_function_privilege('public', 'dc3_key_denied(bytea, bytea, bytea)', 'EXECUTE')",
     )
@@ -925,10 +866,7 @@ async fn complete_is_idempotent_and_carries_seen_count(pool: PgPool) {
     assert_eq!(r1.files, t.files);
     assert_eq!(r1.info_hash_v1, Some(k));
     assert_eq!(r1.piece_length, Some(16384));
-    assert_eq!(
-        (r1.hidden_at, r1.reviewed_at, r1.deleted_at),
-        (None, None, None)
-    );
+    assert!(r1.deleted_at.is_none());
     assert!(r1.change_seq > 0);
 
     // Twice: same row, same count, content refreshed, change_seq moved.
@@ -1436,8 +1374,7 @@ async fn scan_live_pages_in_id_order(pool: PgPool) {
         .complete(&key(5), &torrent_with_files(key(5), 3))
         .await
         .unwrap();
-    // Hidden rows are scanned; tombstoned rows are not.
-    assert!(s.submit_report(&csam(key(2))).await.unwrap().hidden);
+    // Tombstoned rows are not scanned.
     s.deny(key(3).as_bytes(), DenyReason::Dmca, None, "admin")
         .await
         .unwrap();
@@ -1486,699 +1423,6 @@ async fn scan_live_pages_in_id_order(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn submit_report_hides_once_and_audits(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-    let k = key(1);
-    let tid = s.complete(&k, &torrent(k, "reported")).await.unwrap();
-    let seq0 = change_seq_of(&pool, tid).await;
-
-    let first = s.submit_report(&csam(k)).await.unwrap();
-    assert!(first.hidden);
-    assert!(!first.budget_exhausted);
-    assert_eq!(report_torrent(&pool, first.report_id).await, Some(tid));
-    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_none());
-    let hidden = raw_torrent(&pool, tid).await;
-    assert!(hidden.hidden_at.is_some());
-    assert!(hidden.deleted_at.is_none() && hidden.reviewed_at.is_none());
-    assert!(hidden.change_seq > seq0);
-    assert_eq!(audit_count(&pool, "auto-hide").await, 1);
-    let audit =
-        sqlx::query("SELECT actor, subject, detail FROM audit_log WHERE action = 'auto-hide'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(audit.get::<String, _>("actor"), "web");
-    assert_eq!(audit.get::<String, _>("subject"), k.to_hex());
-    assert_eq!(
-        audit.get::<serde_json::Value, _>("detail"),
-        serde_json::json!({"report_id": first.report_id, "torrent_id": tid})
-    );
-
-    // The index sees the hide.
-    let mark = s.high_water_mark().await.unwrap().unwrap();
-    let feed = s.changes_since(seq0, mark, 10).await.unwrap();
-    assert_eq!(feed.len(), 1);
-    assert!(!feed[0].visible);
-
-    // A second CSAM report is stored and linked, but neither hides again nor
-    // uses the budget.
-    let second = s.submit_report(&csam(k)).await.unwrap();
-    assert_eq!(
-        second,
-        SubmitOutcome {
-            report_id: second.report_id,
-            hidden: false,
-            budget_exhausted: false
-        }
-    );
-    assert!(second.report_id > first.report_id);
-    assert_eq!(report_torrent(&pool, second.report_id).await, Some(tid));
-    let again = raw_torrent(&pool, tid).await;
-    assert_eq!(again.hidden_at, hidden.hidden_at);
-    assert_eq!(again.change_seq, hidden.change_seq);
-    assert_eq!(audit_count(&pool, "auto-hide").await, 1);
-
-    // Other reasons never hide.
-    let k2 = key(2);
-    let t2 = s.complete(&k2, &torrent(k2, "other")).await.unwrap();
-    for reason in [
-        ReportReason::Copyright,
-        ReportReason::Malware,
-        ReportReason::Other,
-    ] {
-        let out = s
-            .submit_report(&NewReport {
-                contact: Some("me@example.org".into()),
-                ..report(AnyKey::V1OrDht(k2), reason, "why")
-            })
-            .await
-            .unwrap();
-        assert!(!out.hidden && !out.budget_exhausted);
-        assert_eq!(report_torrent(&pool, out.report_id).await, Some(t2));
-    }
-    assert!(s.get_by_key(&AnyKey::V1OrDht(k2)).await.unwrap().is_some());
-
-    let r = s.get_report(first.report_id).await.unwrap().unwrap();
-    assert_eq!(
-        (r.torrent_id, r.key, r.reason, r.status),
-        (
-            Some(tid),
-            AnyKey::V1OrDht(k),
-            ReportReason::Csam,
-            ReportStatus::Open
-        )
-    );
-    assert_eq!(s.stats().await.unwrap().open_reports, 5);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn submit_report_links_by_every_key_form(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-    let other = |k: AnyKey| report(k, ReportReason::Other, "");
-
-    // A hybrid stored under its v1 key.
-    let (k1, h1) = (key(1), v2(1));
-    let hybrid = s
-        .complete(
-            &k1,
-            &NewTorrent {
-                info_hash_v2: Some(h1),
-                ..torrent(k1, "hybrid")
-            },
-        )
-        .await
-        .unwrap();
-    // A v2-only torrent stored under its truncated hash.
-    let h2 = v2(2);
-    let v2_only = s
-        .complete(&h2.truncated(), &torrent_v2(h2, "v2"))
-        .await
-        .unwrap();
-    // A v1 torrent stored under another DHT key than its v1 hash.
-    let (k3, v1_3) = (key(3), key(33));
-    let aliased = s
-        .complete(
-            &k3,
-            &NewTorrent {
-                info_hash_v1: Some(v1_3),
-                ..torrent(k3, "aliased")
-            },
-        )
-        .await
-        .unwrap();
-
-    for (k, want) in [
-        (AnyKey::V1OrDht(k1), Some(hybrid)),
-        (AnyKey::V2(h1), Some(hybrid)),
-        (AnyKey::V1OrDht(h1.truncated()), Some(hybrid)),
-        (AnyKey::V2(h2), Some(v2_only)),
-        (AnyKey::V1OrDht(h2.truncated()), Some(v2_only)),
-        (AnyKey::V1OrDht(k3), Some(aliased)),
-        (AnyKey::V1OrDht(v1_3), Some(aliased)),
-        (AnyKey::V1OrDht(key(99)), None),
-        (AnyKey::V2(v2(99)), None),
-        // A 32-byte key whose prefix is a v1 key is not that torrent.
-        (
-            AnyKey::V2(InfoHashV2({
-                let mut b = [0u8; 32];
-                b[..20].copy_from_slice(k1.as_bytes());
-                b
-            })),
-            None,
-        ),
-    ] {
-        let out = s.submit_report(&other(k)).await.unwrap();
-        assert_eq!(report_torrent(&pool, out.report_id).await, want, "{k:?}");
-        let stored = s.get_report(out.report_id).await.unwrap().unwrap();
-        assert_eq!(stored.key, k);
-    }
-
-    // Unknown keys are stored unlinked and hide nothing, even for CSAM.
-    let out = s.submit_report(&csam(key(98))).await.unwrap();
-    assert!(!out.hidden && !out.budget_exhausted);
-    assert_eq!(report_torrent(&pool, out.report_id).await, None);
-
-    // Tombstoned torrents are not linked or hidden.
-    s.deny(k3.as_bytes(), DenyReason::Dmca, None, "admin")
-        .await
-        .unwrap();
-    let out = s.submit_report(&csam(k3)).await.unwrap();
-    assert!(!out.hidden);
-    assert_eq!(report_torrent(&pool, out.report_id).await, None);
-    assert!(raw_torrent(&pool, aliased).await.hidden_at.is_none());
-
-    // A torrent covered by the denylist but not tombstoned is not linked.
-    sqlx::query("INSERT INTO denylist (key, reason, created_by) VALUES ($1, 'other', 'test')")
-        .bind(h2.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .unwrap();
-    let out = s.submit_report(&csam(h2.truncated())).await.unwrap();
-    assert!(!out.hidden);
-    assert_eq!(report_torrent(&pool, out.report_id).await, None);
-    assert!(raw_torrent(&pool, v2_only).await.hidden_at.is_none());
-    assert_eq!(audit_count(&pool, "auto-hide").await, 0);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn submit_report_respects_the_hourly_budget(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-    assert!(s.set_setting(SETTING_AUTOHIDE_PER_HOUR, "2").await.unwrap());
-    let mut ids = Vec::new();
-    for i in 1..=6u8 {
-        ids.push(s.complete(&key(i), &torrent(key(i), "t")).await.unwrap());
-    }
-
-    assert!(s.submit_report(&csam(key(1))).await.unwrap().hidden);
-    assert!(s.submit_report(&csam(key(2))).await.unwrap().hidden);
-    let third = s.submit_report(&csam(key(3))).await.unwrap();
-    assert!(!third.hidden);
-    assert!(third.budget_exhausted);
-    assert_eq!(report_torrent(&pool, third.report_id).await, Some(ids[2]));
-    assert!(
-        s.get_by_key(&AnyKey::V1OrDht(key(3)))
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(audit_count(&pool, "auto-hide").await, 2);
-
-    // A report that could not hide anyway does not report the budget.
-    let out = s.submit_report(&csam(key(1))).await.unwrap();
-    assert!(!out.hidden && !out.budget_exhausted);
-    let out = s
-        .submit_report(&report(
-            AnyKey::V1OrDht(key(4)),
-            ReportReason::Copyright,
-            "",
-        ))
-        .await
-        .unwrap();
-    assert!(!out.budget_exhausted);
-
-    // Auto-hides older than an hour no longer count.
-    sqlx::query(
-        "UPDATE audit_log SET at = now() - interval '61 minutes' WHERE action = 'auto-hide'",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    // key(3) already has an open CSAM report (the one the budget stopped),
-    // so another one does not hide it: only the first open report hides.
-    let out = s.submit_report(&csam(key(3))).await.unwrap();
-    assert!(!out.hidden && !out.budget_exhausted);
-    assert!(s.submit_report(&csam(key(4))).await.unwrap().hidden);
-    assert_eq!(audit_count(&pool, "auto-hide").await, 3);
-
-    // A budget of 0 disables auto-hiding.
-    s.set_setting(SETTING_AUTOHIDE_PER_HOUR, "0").await.unwrap();
-    let out = s.submit_report(&csam(key(5))).await.unwrap();
-    assert!(!out.hidden && out.budget_exhausted);
-
-    // Without the setting, the default applies.
-    sqlx::query("DELETE FROM settings WHERE key = $1")
-        .bind(SETTING_AUTOHIDE_PER_HOUR)
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert!(s.submit_report(&csam(key(6))).await.unwrap().hidden);
-    assert_eq!(audit_count(&pool, "auto-hide").await, 4);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn submit_report_budget_holds_under_concurrency(pool: PgPool) {
-    const TORRENTS: u8 = 12;
-    const BUDGET: usize = 3;
-    let s = Store::from_pool(pool.clone());
-    s.set_setting(SETTING_AUTOHIDE_PER_HOUR, &BUDGET.to_string())
-        .await
-        .unwrap();
-    for i in 1..=TORRENTS {
-        s.complete(&key(i), &torrent(key(i), "t")).await.unwrap();
-    }
-    let mut tasks = Vec::new();
-    for i in 1..=TORRENTS {
-        let s = s.clone();
-        tasks.push(tokio::spawn(async move {
-            s.submit_report(&csam(key(i))).await.unwrap()
-        }));
-    }
-    let mut outs = Vec::new();
-    for t in tasks {
-        outs.push(t.await.unwrap());
-    }
-    assert_eq!(outs.iter().filter(|o| o.hidden).count(), BUDGET);
-    assert_eq!(
-        outs.iter().filter(|o| o.budget_exhausted).count(),
-        usize::from(TORRENTS) - BUDGET
-    );
-    assert_eq!(audit_count(&pool, "auto-hide").await, BUDGET as i64);
-    let hidden: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM torrents WHERE hidden_at IS NOT NULL")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(hidden, BUDGET as i64);
-
-    // Many CSAM reports about one torrent hide it exactly once.
-    let k = key(100);
-    s.complete(&k, &torrent(k, "one")).await.unwrap();
-    s.set_setting(SETTING_AUTOHIDE_PER_HOUR, "100")
-        .await
-        .unwrap();
-    let mut tasks = Vec::new();
-    for _ in 0..8 {
-        let s = s.clone();
-        tasks.push(tokio::spawn(async move {
-            s.submit_report(&csam(k)).await.unwrap()
-        }));
-    }
-    let mut hides = 0;
-    for t in tasks {
-        if t.await.unwrap().hidden {
-            hides += 1;
-        }
-    }
-    assert_eq!(hides, 1);
-    assert_eq!(audit_count(&pool, "auto-hide").await, BUDGET as i64 + 1);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn submit_report_refuses_beyond_the_open_cap(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-    s.set_setting(SETTING_OPEN_REPORTS_CAP, "3").await.unwrap();
-    let k = key(1);
-    s.complete(&k, &torrent(k, "t")).await.unwrap();
-    let other = || report(AnyKey::V1OrDht(key(50)), ReportReason::Other, "spam?");
-
-    let mut ids = Vec::new();
-    for _ in 0..3 {
-        ids.push(s.submit_report(&other()).await.unwrap().report_id);
-    }
-    assert!(matches!(
-        s.submit_report(&other()).await,
-        Err(StoreError::ReportsFull)
-    ));
-    // A refused CSAM report neither stores nor hides anything.
-    assert!(matches!(
-        s.submit_report(&csam(k)).await,
-        Err(StoreError::ReportsFull)
-    ));
-    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_some());
-    assert_eq!(s.stats().await.unwrap().open_reports, 3);
-    assert_eq!(audit_count(&pool, "auto-hide").await, 0);
-
-    // The raw error carries the documented SQLSTATE.
-    let err = sqlx::query("SELECT * FROM submit_report($1, 'other', '', NULL)")
-        .bind(k.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .unwrap_err();
-    assert_eq!(code_of(&err).as_deref(), Some(SQLSTATE_REPORTS_FULL));
-
-    // Resolved reports no longer count.
-    s.resolve_report(ids[0], ReportAction::Dismiss, None, "admin")
-        .await
-        .unwrap();
-    assert!(s.submit_report(&csam(k)).await.unwrap().hidden);
-    assert!(matches!(
-        s.submit_report(&other()).await,
-        Err(StoreError::ReportsFull)
-    ));
-
-    // A cap of 0 refuses everything; without the setting the default applies.
-    s.set_setting(SETTING_OPEN_REPORTS_CAP, "0").await.unwrap();
-    s.resolve_report(ids[1], ReportAction::Dismiss, None, "admin")
-        .await
-        .unwrap();
-    assert!(matches!(
-        s.submit_report(&other()).await,
-        Err(StoreError::ReportsFull)
-    ));
-    sqlx::query("DELETE FROM settings WHERE key = $1")
-        .bind(SETTING_OPEN_REPORTS_CAP)
-        .execute(&pool)
-        .await
-        .unwrap();
-    s.submit_report(&other()).await.unwrap();
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn submit_report_validates_its_arguments(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-    let k = AnyKey::V1OrDht(key(1));
-
-    // Limits are in characters.
-    let at_limit = NewReport {
-        contact: Some("é".repeat(REPORT_CONTACT_MAX_CHARS)),
-        ..report(
-            k,
-            ReportReason::Other,
-            &"é".repeat(REPORT_MESSAGE_MAX_CHARS),
-        )
-    };
-    let id = s.submit_report(&at_limit).await.unwrap().report_id;
-    let stored = s.get_report(id).await.unwrap().unwrap();
-    assert_eq!(stored.message, at_limit.message);
-    assert_eq!(stored.contact, at_limit.contact);
-
-    let long = report(
-        k,
-        ReportReason::Csam,
-        &"m".repeat(REPORT_MESSAGE_MAX_CHARS + 1),
-    );
-    assert!(matches!(
-        s.submit_report(&long).await,
-        Err(StoreError::Invalid(_))
-    ));
-    let long = NewReport {
-        contact: Some("c".repeat(REPORT_CONTACT_MAX_CHARS + 1)),
-        ..report(k, ReportReason::Csam, "")
-    };
-    assert!(matches!(
-        s.submit_report(&long).await,
-        Err(StoreError::Invalid(_))
-    ));
-
-    // The function checks the same, for callers that bypass this crate.
-    let long_message = "m".repeat(REPORT_MESSAGE_MAX_CHARS + 1);
-    let long_contact = "c".repeat(REPORT_CONTACT_MAX_CHARS + 1);
-    let k20 = vec![1u8; 20];
-    // (key, reason, message, contact)
-    type RawArgs<'a> = (
-        Option<Vec<u8>>,
-        Option<&'a str>,
-        Option<&'a str>,
-        Option<&'a str>,
-    );
-    let bad: [RawArgs<'_>; 8] = [
-        (None, Some("other"), Some(""), None),
-        (Some(vec![1u8; 1]), Some("other"), Some(""), None),
-        (Some(vec![1u8; 21]), Some("other"), Some(""), None),
-        (Some(k20.clone()), None, Some(""), None),
-        (Some(k20.clone()), Some("spam"), Some(""), None),
-        (Some(k20.clone()), Some("csam"), None, None),
-        (Some(k20.clone()), Some("csam"), Some(&long_message), None),
-        (
-            Some(k20.clone()),
-            Some("other"),
-            Some(""),
-            Some(&long_contact),
-        ),
-    ];
-    for (key_bytes, reason, message, contact) in bad {
-        let err = sqlx::query("SELECT * FROM submit_report($1, $2, $3, $4)")
-            .bind(key_bytes.as_deref())
-            .bind(reason)
-            .bind(message)
-            .bind(contact)
-            .execute(&pool)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            code_of(&err).as_deref(),
-            Some(SQLSTATE_INVALID_PARAMETER),
-            "{reason:?} {err}"
-        );
-        assert!(
-            matches!(submit_error(err), StoreError::Invalid(m) if m.starts_with("submit_report: "))
-        );
-    }
-    let reports: i64 = sqlx::query_scalar("SELECT count(*) FROM reports")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(reports, 1);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn submit_report_takes_the_change_lock_for_csam_only(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-    let k = key(1);
-    s.complete(&k, &torrent(k, "t")).await.unwrap();
-
-    // The indexer's exclusive lock blocks CSAM reports (they may bump
-    // change_seq) but not others.
-    let mut holder = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(CHANGE_LOCK_KEY)
-        .execute(&mut *holder)
-        .await
-        .unwrap();
-
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("SET LOCAL lock_timeout = '100ms'")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    let err = sqlx::query("SELECT * FROM submit_report($1, 'csam', '', NULL)")
-        .bind(k.as_bytes().as_slice())
-        .execute(&mut *tx)
-        .await
-        .unwrap_err();
-    assert_eq!(code_of(&err).as_deref(), Some(SQLSTATE_LOCK_NOT_AVAILABLE));
-    tx.rollback().await.unwrap();
-
-    let out = s
-        .submit_report(&report(AnyKey::V1OrDht(k), ReportReason::Malware, ""))
-        .await
-        .unwrap();
-    assert!(!out.hidden);
-
-    holder.rollback().await.unwrap();
-    assert!(s.submit_report(&csam(k)).await.unwrap().hidden);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn reports_and_resolution(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-    let k = key(1);
-    let tid = s.complete(&k, &torrent(k, "reported")).await.unwrap();
-
-    // A copyright report does not hide.
-    let r_copy = s
-        .submit_report(&NewReport {
-            contact: Some("me@example.org".into()),
-            ..report(AnyKey::V1OrDht(k), ReportReason::Copyright, "mine")
-        })
-        .await
-        .unwrap()
-        .report_id;
-    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_some());
-
-    // The first CSAM report hides; the second is linked to the same torrent.
-    let r1 = s.submit_report(&csam(k)).await.unwrap();
-    let r2 = s.submit_report(&csam(k)).await.unwrap();
-    assert!(r1.hidden && !r2.hidden);
-    let (r1, r2) = (r1.report_id, r2.report_id);
-    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_none());
-
-    // Report on an unknown v2 key.
-    let r_v2 = s
-        .submit_report(&report(AnyKey::V2(v2(5)), ReportReason::Malware, ""))
-        .await
-        .unwrap()
-        .report_id;
-
-    let open = s.list_reports(Some(ReportStatus::Open), 100).await.unwrap();
-    assert_eq!(
-        open.iter().map(|r| r.id).collect::<Vec<_>>(),
-        vec![r_copy, r1, r2, r_v2]
-    );
-    assert_eq!(open[0].contact.as_deref(), Some("me@example.org"));
-    assert_eq!(open[0].message, "mine");
-    assert_eq!(open[3].key, AnyKey::V2(v2(5)));
-    assert_eq!(open[3].reason, ReportReason::Malware);
-    assert_eq!(open[3].torrent_id, None);
-    assert_eq!(s.list_reports(None, 2).await.unwrap().len(), 2);
-    assert!(s.list_reports(None, 0).await.unwrap().is_empty());
-    assert_eq!(s.stats().await.unwrap().open_reports, 4);
-
-    // Dismissing one CSAM report keeps the torrent hidden (another is open),
-    // but marks it reviewed.
-    let seq = change_seq_of(&pool, tid).await;
-    s.resolve_report(r1, ReportAction::Dismiss, Some("not csam"), "admin")
-        .await
-        .unwrap();
-    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_none());
-    let row = raw_torrent(&pool, tid).await;
-    assert!(row.reviewed_at.is_some() && row.hidden_at.is_some());
-    assert_eq!(row.change_seq, seq, "reviewed_at alone is not a change");
-    // Resolving twice fails.
-    assert!(matches!(
-        s.resolve_report(r1, ReportAction::Dismiss, None, "admin").await,
-        Err(StoreError::ReportNotOpen(id)) if id == r1
-    ));
-    assert!(matches!(
-        s.resolve_report(9999, ReportAction::Dismiss, None, "admin")
-            .await,
-        Err(StoreError::NotFound)
-    ));
-    assert!(matches!(
-        s.resolve_report(r2, ReportAction::Dismiss, None, "").await,
-        Err(StoreError::Invalid(_))
-    ));
-
-    // Dismissing the last one un-hides.
-    s.resolve_report(r2, ReportAction::Dismiss, None, "admin")
-        .await
-        .unwrap();
-    let visible = s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().unwrap();
-    assert!(visible.reviewed_at.is_some());
-    let json = serde_json::to_value(&visible).unwrap();
-    assert!(json.get("reviewed_at").is_none(), "{json}");
-    assert_eq!(json["name"], "reported");
-    assert!(visible.hidden_at.is_none());
-    assert!(visible.change_seq > seq);
-    let mark = s.high_water_mark().await.unwrap().unwrap();
-    let feed = s.changes_since(seq, mark, 10).await.unwrap();
-    assert_eq!(feed.len(), 1);
-    assert!(feed[0].visible);
-
-    let r = s.get_report(r2).await.unwrap().unwrap();
-    assert_eq!(r.status, ReportStatus::Dismissed);
-    assert_eq!(r.resolved_by.as_deref(), Some("admin"));
-    assert!(r.resolved_at.is_some());
-    assert!(s.get_report(12345).await.unwrap().is_none());
-
-    // A reviewed torrent is not hidden again automatically.
-    let r3 = s.submit_report(&csam(k)).await.unwrap();
-    assert!(!r3.hidden && !r3.budget_exhausted);
-    assert_eq!(report_torrent(&pool, r3.report_id).await, Some(tid));
-    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_some());
-    assert_eq!(audit_count(&pool, "auto-hide").await, 1);
-
-    // Dismissing a report about an unhidden torrent only marks it reviewed.
-    let k2 = key(2);
-    let t2 = s.complete(&k2, &torrent(k2, "fine")).await.unwrap();
-    let seq2 = change_seq_of(&pool, t2).await;
-    let r4 = s
-        .submit_report(&report(AnyKey::V1OrDht(k2), ReportReason::Other, ""))
-        .await
-        .unwrap()
-        .report_id;
-    s.resolve_report(r4, ReportAction::Dismiss, None, "admin")
-        .await
-        .unwrap();
-    let row = raw_torrent(&pool, t2).await;
-    assert!(row.reviewed_at.is_some() && row.hidden_at.is_none());
-    assert_eq!(row.change_seq, seq2);
-    assert!(!s.submit_report(&csam(k2)).await.unwrap().hidden);
-
-    // Deny via the copyright report: tombstone, denylist, actioned. The open
-    // CSAM report r3 stays open for review.
-    s.resolve_report(
-        r_copy,
-        ReportAction::Deny(DenyReason::Dmca),
-        Some("DMCA #1"),
-        "admin",
-    )
-    .await
-    .unwrap();
-    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_none());
-    assert!(raw_torrent(&pool, tid).await.deleted_at.is_some());
-    assert!(s.is_denied(&[k.as_bytes()]).await.unwrap());
-    let r = s.get_report(r_copy).await.unwrap().unwrap();
-    assert_eq!(r.status, ReportStatus::Actioned);
-    assert_eq!(r.resolution_note.as_deref(), Some("DMCA #1"));
-    let d = s.list_denied(10, 0).await.unwrap();
-    assert_eq!(d.len(), 1);
-    assert_eq!(d[0].reason, DenyReason::Dmca);
-
-    // Deny by a report about a v2 key with no torrent.
-    s.resolve_report(r_v2, ReportAction::Deny(DenyReason::Abuse), None, "admin")
-        .await
-        .unwrap();
-    assert!(s.is_denied(&[v2(5).truncated().as_bytes()]).await.unwrap());
-
-    // Dismissing a report about a tombstoned torrent is harmless.
-    s.resolve_report(r3.report_id, ReportAction::Dismiss, None, "admin")
-        .await
-        .unwrap();
-    assert!(raw_torrent(&pool, tid).await.deleted_at.is_some());
-
-    assert_eq!(
-        s.list_reports(Some(ReportStatus::Open), 10)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        s.list_reports(Some(ReportStatus::Dismissed), 10)
-            .await
-            .unwrap()
-            .len(),
-        4
-    );
-    assert_eq!(
-        s.list_reports(Some(ReportStatus::Actioned), 10)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
-
-    let actions: Vec<String> =
-        sqlx::query_scalar("SELECT action FROM audit_log WHERE actor = 'admin' ORDER BY id")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(
-        actions,
-        vec![
-            "report-dismiss",
-            "report-dismiss",
-            "report-dismiss",
-            "deny",
-            "report-deny",
-            "deny",
-            "report-deny",
-            "report-dismiss",
-        ]
-    );
-    let detail: serde_json::Value = sqlx::query_scalar(
-        "SELECT detail FROM audit_log WHERE subject = $1 AND action = 'report-dismiss'",
-    )
-    .bind(format!("report:{r2}"))
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(detail["unhidden"], true);
-    assert_eq!(detail["reviewed"], true);
-
-    // Free-form audit entries.
-    s.audit("admin", "note", "general", &serde_json::json!({"x": 1}))
-        .await
-        .unwrap();
-    assert!(matches!(
-        s.audit("admin", "", "general", &serde_json::json!({}))
-            .await,
-        Err(StoreError::Invalid(_))
-    ));
-}
-
-#[sqlx::test(migrations = "./migrations")]
 async fn lookups_and_stats(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let a = s.complete(&key(1), &torrent(key(1), "a")).await.unwrap();
@@ -2222,9 +1466,7 @@ async fn lookups_and_stats(pool: PgPool) {
         many[0]
     );
 
-    // One hidden, one tombstoned.
-    assert!(s.submit_report(&csam(key(1))).await.unwrap().hidden);
-    assert!(s.get_many(&[a]).await.unwrap().is_empty());
+    // One tombstoned.
     s.deny(key(4).as_bytes(), DenyReason::Dmca, None, "admin")
         .await
         .unwrap();
@@ -2232,17 +1474,16 @@ async fn lookups_and_stats(pool: PgPool) {
     assert_eq!(
         s.stats().await.unwrap(),
         StoreStats {
-            torrents: 2,
+            torrents: 3,
             pending: 2,
             gave_up: 0,
             denylisted: 1,
-            open_reports: 1
         }
     );
     assert_eq!(
         s.public_stats().await.unwrap(),
         PublicStats {
-            torrents: 2,
+            torrents: 3,
             added_today: 4,
             added_yesterday: 0
         }
@@ -2277,8 +1518,8 @@ async fn lookups_and_stats(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(s.stats().await.unwrap().torrents, 2);
-    assert_eq!(s.public_stats().await.unwrap().torrents, 2);
+    assert_eq!(s.stats().await.unwrap().torrents, 3);
+    assert_eq!(s.public_stats().await.unwrap().torrents, 3);
 
     // Above the threshold, the estimate is used.
     let estimate = EXACT_COUNT_THRESHOLD * 3;
@@ -2296,12 +1537,9 @@ async fn settings_are_validated_and_audited(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     assert_eq!(s.get_setting("missing").await.unwrap(), None);
 
-    assert!(s.set_setting(SETTING_AUTOHIDE_PER_HOUR, "5").await.unwrap());
-    assert!(!s.set_setting(SETTING_AUTOHIDE_PER_HOUR, "5").await.unwrap());
-    assert_eq!(
-        s.get_setting(SETTING_AUTOHIDE_PER_HOUR).await.unwrap(),
-        Some("5".into())
-    );
+    assert!(s.set_setting("banner", "5").await.unwrap());
+    assert!(!s.set_setting("banner", "5").await.unwrap());
+    assert_eq!(s.get_setting("banner").await.unwrap(), Some("5".into()));
     let audit =
         sqlx::query("SELECT actor, subject, detail FROM audit_log WHERE action = 'set-setting'")
             .fetch_all(&pool)
@@ -2309,25 +1547,23 @@ async fn settings_are_validated_and_audited(pool: PgPool) {
             .unwrap();
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0].get::<String, _>("actor"), "owner");
-    assert_eq!(
-        audit[0].get::<String, _>("subject"),
-        SETTING_AUTOHIDE_PER_HOUR
-    );
+    assert_eq!(audit[0].get::<String, _>("subject"), "banner");
     assert_eq!(
         audit[0].get::<serde_json::Value, _>("detail"),
-        serde_json::json!({"old": "60", "new": "5"})
+        serde_json::json!({"old": null, "new": "5"})
     );
 
-    for bad in ["", "-1", "abc", " 5", "1234567890"] {
-        assert!(
-            matches!(
-                s.set_setting(SETTING_OPEN_REPORTS_CAP, bad).await,
-                Err(StoreError::Invalid(_))
-            ),
-            "{bad:?}"
-        );
+    // No numeric settings remain, so any length-valid value stores fine;
+    // over-length values are refused.
+    for bad in ["-1", "abc", " 5", "1234567890"] {
+        assert!(s.set_setting("banner", bad).await.is_ok(), "{bad:?}");
     }
-    s.set_setting(SETTING_OPEN_REPORTS_CAP, &MAX_NUMERIC_SETTING.to_string())
+    assert!(matches!(
+        s.set_setting("banner", &"x".repeat(MAX_SETTING_VALUE_CHARS + 1))
+            .await,
+        Err(StoreError::Invalid(_))
+    ));
+    s.set_setting("banner", &MAX_NUMERIC_SETTING.to_string())
         .await
         .unwrap();
     assert!(matches!(
@@ -2355,14 +1591,6 @@ async fn settings_are_validated_and_audited(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(created, serde_json::json!({"old": null, "new": ""}));
-
-    // The schema enforces the numeric format too.
-    let err = sqlx::query("UPDATE settings SET value = '1e3' WHERE key = $1")
-        .bind(SETTING_AUTOHIDE_PER_HOUR)
-        .execute(&pool)
-        .await
-        .unwrap_err();
-    assert_eq!(code_of(&err).as_deref(), Some(SQLSTATE_CHECK_VIOLATION));
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -2373,8 +1601,6 @@ async fn schema_constraints(pool: PgPool) {
         "INSERT INTO pending (dht_key) VALUES ('\\x00')",
         "INSERT INTO denylist (key, reason, created_by) VALUES (decode(repeat('00', 21), 'hex'), 'dmca', 'a')",
         "INSERT INTO denylist (key, reason, created_by) VALUES (decode(repeat('00', 20), 'hex'), 'bogus', 'a')",
-        "INSERT INTO reports (dht_key, reason, message) VALUES (decode(repeat('00', 20), 'hex'), 'spam', '')",
-        "INSERT INTO reports (dht_key, reason, message, status) VALUES (decode(repeat('00', 20), 'hex'), 'other', '', 'actioned')",
         "INSERT INTO torrents (dht_key, name, total_size, file_count, change_seq, deleted_at) \
          VALUES (decode(repeat('00', 20), 'hex'), 'still named', 0, 0, 1, now())",
         "INSERT INTO torrents (dht_key, name, total_size, file_count, change_seq, info_hash_v2) \
@@ -2384,7 +1610,6 @@ async fn schema_constraints(pool: PgPool) {
         "INSERT INTO torrents (dht_key, name, total_size, file_count, change_seq, files) \
          VALUES (decode(repeat('00', 20), 'hex'), 'x', 0, 0, 1, \
                  (SELECT jsonb_agg(i) FROM generate_series(1, 2001) AS i))",
-        "INSERT INTO settings (key, value) VALUES ('open_reports_cap', '-5')",
         "INSERT INTO settings (key, value) VALUES ('', 'x')",
     ];
     for sql in bad {
@@ -2422,7 +1647,7 @@ async fn schema_constraints(pool: PgPool) {
 
     let indexes: HashSet<String> = sqlx::query_scalar(
         "SELECT indexname::text FROM pg_indexes \
-          WHERE tablename IN ('torrents', 'pending', 'reports', 'denylist', 'audit_log', 'settings', \
+          WHERE tablename IN ('torrents', 'pending', 'denylist', 'audit_log', 'settings', \
                               'removed_keys')",
     )
     .fetch_all(&pool)
@@ -2440,9 +1665,6 @@ async fn schema_constraints(pool: PgPool) {
         "pending_gave_up",
         "pending_seeders",
         "denylist_prefix",
-        "reports_open",
-        "reports_torrent",
-        "reports_open_csam",
         "audit_log_at",
         "audit_log_action_at",
         "settings_pkey",

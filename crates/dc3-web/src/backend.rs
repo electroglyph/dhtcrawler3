@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use dc3_core::AnyKey;
-use dc3_store::{NewReport, PublicStats, Store, StoreError, SubmitOutcome, TorrentRecord};
+use dc3_store::{PublicStats, Store, StoreError, TorrentRecord};
 
 /// A boxed error from a [`Backend`] implementation.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -11,10 +11,6 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// Why a [`Backend`] call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
-    /// Too many reports are open; the report was not stored
-    /// ([`StoreError::ReportsFull`]).
-    #[error("too many open reports")]
-    ReportsFull,
     /// The backend rejected the input ([`StoreError::Invalid`]).
     #[error("invalid input: {0}")]
     Invalid(String),
@@ -27,7 +23,6 @@ pub enum BackendError {
 impl From<StoreError> for BackendError {
     fn from(e: StoreError) -> Self {
         match e {
-            StoreError::ReportsFull => BackendError::ReportsFull,
             StoreError::Invalid(message) => BackendError::Invalid(message),
             other => BackendError::Unavailable(Box::new(other)),
         }
@@ -36,9 +31,9 @@ impl From<StoreError> for BackendError {
 
 /// Database access for the web role.
 ///
-/// These five operations are all the `dc3_web` database user may perform
-/// (`docs/03-design.md` §10): reads of visible torrents and statistics, and
-/// the `submit_report` function. The trait is used generically, never as a
+/// These four operations are all the `dc3_web` database user may perform
+/// (`docs/03-design.md` §10): reads of visible torrents and statistics.
+/// The trait is used generically, never as a
 /// trait object, so tests can supply an in-memory implementation.
 pub trait Backend: Clone + Send + Sync + 'static {
     /// The visible torrent with this key, with every stored file.
@@ -54,12 +49,6 @@ pub trait Backend: Clone + Send + Sync + 'static {
         ids: &[i64],
     ) -> impl Future<Output = Result<Vec<TorrentRecord>, BackendError>> + Send;
 
-    /// Stores a visitor's report and says whether it hid the torrent.
-    fn submit_report(
-        &self,
-        report: &NewReport,
-    ) -> impl Future<Output = Result<SubmitOutcome, BackendError>> + Send;
-
     /// Totals for the home page.
     fn public_stats(&self) -> impl Future<Output = Result<PublicStats, BackendError>> + Send;
 
@@ -74,10 +63,6 @@ impl Backend for Store {
 
     async fn get_many(&self, ids: &[i64]) -> Result<Vec<TorrentRecord>, BackendError> {
         Ok(Store::get_many(self, ids).await?)
-    }
-
-    async fn submit_report(&self, report: &NewReport) -> Result<SubmitOutcome, BackendError> {
-        Ok(Store::submit_report(self, report).await?)
     }
 
     async fn public_stats(&self) -> Result<PublicStats, BackendError> {
@@ -111,10 +96,6 @@ mod tests {
 
     #[test]
     fn store_errors_map_to_backend_errors() {
-        assert!(matches!(
-            BackendError::from(StoreError::ReportsFull),
-            BackendError::ReportsFull
-        ));
         assert!(matches!(
             BackendError::from(StoreError::Invalid("x".into())),
             BackendError::Invalid(m) if m == "x"

@@ -64,7 +64,7 @@ Two capabilities are not part of the final cause but are required by other axiom
 
 | # | Capability | Required by |
 |---|---|---|
-| F8 | **Govern**: refuse denied keys and terms, accept reports, process takedowns | A7 |
+| F8 | **Govern**: refuse denied keys and terms, process takedowns | A7 |
 | F9 | **Observe**: expose metrics and health | A8, A9 |
 
 ## 4. Derived requirements
@@ -90,7 +90,7 @@ Two capabilities are not part of the final cause but are required by other axiom
 | **R15** | **Durable, resumable processing.** Use a database queue with leases and exponential backoff, idempotent upserts keyed by infohash, and a search index checkpoint committed atomically with the index. | A8 | Delete-before-process queue; lost hashes; Sphinx checkpoint not aligned with flushes. |
 | **R16** | **The index is a derived projection** of PostgreSQL. It can always be deleted and rebuilt. | A8, A5 | Sphinx doc IDs were a separate counter, so the index could not be reliably rebuilt. |
 | **R17** | **Multilingual search**: CJK without dictionaries (bigrams), file-name search, prefix matching, BM25 ranking, bounded queries (length, terms, page depth, time). | A1, A6 | Mongo `text` command (removed in later MongoDB versions), or an "all substrings" split that grows as the cube of name length. |
-| **R18** | **Governance.** Enforce a denylist of keys at ingest, at indexing and at query time. Filter CSAM terms at ingest (name and every path), at indexing, and at query time, matching whole tokens after NFKC, case folding and confusable folding. Do not index private torrents. Provide a report form and a takedown CLI, and keep an audit trail. | A7 | None. |
+| **R18** | **Governance.** Enforce a denylist of keys at ingest, at indexing and at query time. Filter CSAM terms at ingest (name and every path), at indexing, and at query time, matching whole tokens after NFKC, case folding and confusable folding. Do not index private torrents. Provide a takedown CLI, and keep an audit trail. | A7 | None. |
 | **R19** | **Observability.** Expose Prometheus metrics per pipeline stage, liveness and readiness endpoints for every role, and structured logs without personal data. | A8, A9 | Text stats files, with rates in the wrong units. |
 | **R20** | **Operable.** One self-contained binary (dynamically linked only against glibc) with subcommands, one config file with environment overrides, `docker compose up`, automatic migrations, and documented limits. | A1, A8 | Windows `.bat` launchers and hand-edited Erlang term files. |
 

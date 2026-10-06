@@ -63,7 +63,7 @@ The design is derived step by step, starting from definitions:
 | Search | MongoDB 2.4 text command or Sphinx | Embedded Tantivy, BM25, CJK bigrams, prefix and file-name search |
 | Data | MongoDB without auth; visitor IPs logged with queries | PostgreSQL with least-privilege roles; no peer or visitor IPs stored |
 | Reliability | Queue deleted before processing | Leased queue, backoff, idempotent writes, rebuildable index |
-| Governance | None | Denylist, CSAM term filter, report form, takedown CLI, audit log |
+| Governance | None | Denylist, CSAM term filter, takedown CLI, audit log |
 | Supply chain | Precompiled binaries, dependencies at git `HEAD` | Source-only builds, lockfile, pinned images, cargo-deny/audit |
 
 ## Quick start

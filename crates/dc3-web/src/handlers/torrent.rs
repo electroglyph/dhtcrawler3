@@ -9,7 +9,7 @@ use axum::response::Response;
 
 use super::{Lookup, fresh_seeders, lookup, parse_key};
 use crate::Backend;
-use crate::app::{AppState, routes};
+use crate::app::AppState;
 use crate::format::{date, grouped, human_size, rfc3339};
 use crate::render::{Flavor, error_response, html};
 use crate::templates::{FileView, TorrentPage, TorrentView};
@@ -64,7 +64,6 @@ pub(crate) async fn torrent_page<B: Backend>(
     let dht_key = record.dht_key.to_hex();
     let seeders = fresh_seeders(&record, st.seeder_freshness);
     let view = TorrentView {
-        report_href: format!("{}{dht_key}", routes::REPORT_PREFIX),
         dht_key,
         info_hash_v1: record.info_hash_v1.map(|k| k.to_hex()),
         info_hash_v2: record.info_hash_v2.map(|h| h.to_hex()),

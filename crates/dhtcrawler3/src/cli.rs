@@ -8,13 +8,12 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use dc3_core::AnyKey;
-use dc3_store::{DenyReason, MAX_PAGE, ReportStatus};
+use dc3_store::{DenyReason, MAX_PAGE};
 use tokio_util::sync::CancellationToken;
 
-use crate::admin::{self, Resolution};
+use crate::admin;
 use crate::config::{self, Config, DbRole};
 use crate::{healthcheck, logging, roles, signals};
 
@@ -61,9 +60,6 @@ pub enum Command {
     /// Manage the denylist.
     #[command(subcommand)]
     Deny(DenyCommand),
-    /// Review and resolve reports.
-    #[command(subcommand)]
-    Reports(ReportsCommand),
     /// Content-policy tasks.
     #[command(subcommand)]
     Policy(PolicyCommand),
@@ -109,32 +105,6 @@ pub enum DenyCommand {
     },
 }
 
-/// `reports` subcommands.
-#[derive(Debug, Subcommand)]
-pub enum ReportsCommand {
-    /// List reports, oldest first.
-    List {
-        /// Only reports in this state (default: all).
-        #[arg(long, value_enum)]
-        status: Option<StatusArg>,
-        #[arg(long, default_value_t = admin::DEFAULT_LIST_LIMIT,
-              value_parser = clap::value_parser!(i64).range(1..=MAX_PAGE))]
-        limit: i64,
-    },
-    /// Resolve an open report.
-    Resolve {
-        #[arg(value_parser = clap::value_parser!(i64).range(1..))]
-        id: i64,
-        #[arg(long, value_enum)]
-        action: ActionArg,
-        /// Denial reason for --action deny (default: from the report).
-        #[arg(long, value_enum)]
-        reason: Option<DenyReasonArg>,
-        #[arg(long)]
-        note: Option<String>,
-    },
-}
-
 /// `policy` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum PolicyCommand {
@@ -162,45 +132,9 @@ impl From<DenyReasonArg> for DenyReason {
     }
 }
 
-/// Report states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum StatusArg {
-    Open,
-    Actioned,
-    Dismissed,
-}
-
-impl From<StatusArg> for ReportStatus {
-    fn from(s: StatusArg) -> Self {
-        match s {
-            StatusArg::Open => ReportStatus::Open,
-            StatusArg::Actioned => ReportStatus::Actioned,
-            StatusArg::Dismissed => ReportStatus::Dismissed,
-        }
-    }
-}
-
-/// Ways to resolve a report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ActionArg {
-    Deny,
-    Dismiss,
-}
-
 impl Cli {
     /// Checks combinations clap cannot express.
     pub fn validate(&self) -> Result<(), clap::Error> {
-        if let Command::Reports(ReportsCommand::Resolve {
-            action: ActionArg::Dismiss,
-            reason: Some(_),
-            ..
-        }) = &self.command
-        {
-            return Err(Cli::command().error(
-                ErrorKind::ArgumentConflict,
-                "--reason applies only to --action deny",
-            ));
-        }
         Ok(())
     }
 }
@@ -303,7 +237,7 @@ async fn dispatch(
         Command::All { migrate } => logged(roles::all(&cfg, migrate, shutdown_token()).await),
         Command::Migrate => {
             let store = roles::connect(&cfg, DbRole::Main).await?;
-            admin::migrate(&store, cfg.web.autohide_per_hour, out).await?;
+            admin::migrate(&store, out).await?;
             Ok(())
         }
         Command::Deny(cmd) => {
@@ -314,27 +248,6 @@ async fn dispatch(
                 }
                 DenyCommand::Remove { key } => admin::deny_remove(&store, &key, out).await?,
                 DenyCommand::List { limit } => admin::deny_list(&store, limit, out).await?,
-            }
-            Ok(())
-        }
-        Command::Reports(cmd) => {
-            let store = roles::connect(&cfg, DbRole::Main).await?;
-            match cmd {
-                ReportsCommand::List { status, limit } => {
-                    admin::reports_list(&store, status.map(Into::into), limit, out).await?;
-                }
-                ReportsCommand::Resolve {
-                    id,
-                    action,
-                    reason,
-                    note,
-                } => {
-                    let resolution = match action {
-                        ActionArg::Deny => Resolution::Deny(reason.map(Into::into)),
-                        ActionArg::Dismiss => Resolution::Dismiss,
-                    };
-                    admin::reports_resolve(&store, id, resolution, note.as_deref(), out).await?;
-                }
             }
             Ok(())
         }
@@ -363,6 +276,7 @@ async fn dispatch(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("dhtcrawler3").chain(args.iter().copied()))
@@ -415,31 +329,6 @@ mod tests {
             Command::Deny(DenyCommand::List { limit }) => assert_eq!(limit, 100),
             other => panic!("{other:?}"),
         }
-        match parse(&["reports", "list", "--status", "open", "--limit", "5"])
-            .unwrap()
-            .command
-        {
-            Command::Reports(ReportsCommand::List { status, limit }) => {
-                assert_eq!(status.map(ReportStatus::from), Some(ReportStatus::Open));
-                assert_eq!(limit, 5);
-            }
-            other => panic!("{other:?}"),
-        }
-        match parse(&[
-            "reports", "resolve", "7", "--action", "deny", "--reason", "abuse",
-        ])
-        .unwrap()
-        .command
-        {
-            Command::Reports(ReportsCommand::Resolve {
-                id, action, reason, ..
-            }) => {
-                assert_eq!((id, action), (7, ActionArg::Deny));
-                assert_eq!(reason, Some(DenyReasonArg::Abuse));
-            }
-            other => panic!("{other:?}"),
-        }
-        assert!(parse(&["reports", "resolve", "7", "--action", "dismiss"]).is_ok());
         assert!(parse(&["policy", "rescan"]).is_ok());
         match parse(&["healthcheck", "http://127.0.0.1:9100/readyz"])
             .unwrap()
@@ -461,12 +350,6 @@ mod tests {
             vec!["deny", "add", "not-a-key", "--reason", "dmca"],
             vec!["deny", "list", "--limit", "0"],
             vec!["deny", "list", "--limit", "10001"],
-            vec!["reports", "list", "--status", "closed"],
-            vec!["reports", "resolve", "0", "--action", "deny"],
-            vec!["reports", "resolve", "7"],
-            vec![
-                "reports", "resolve", "7", "--action", "dismiss", "--reason", "dmca",
-            ],
             vec!["index", "--rebuild=maybe"],
             vec!["healthcheck"],
             vec!["policy"],

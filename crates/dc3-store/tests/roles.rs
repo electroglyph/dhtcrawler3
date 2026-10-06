@@ -8,10 +8,7 @@
 use std::time::Duration;
 
 use dc3_core::{AnyKey, DhtKey};
-use dc3_store::{
-    DenyReason, FileRow, NewReport, NewTorrent, Observation, ReportAction, ReportReason,
-    SETTING_AUTOHIDE_PER_HOUR, Store, StoreError,
-};
+use dc3_store::{DenyReason, FileRow, NewTorrent, Observation, Store, StoreError};
 
 struct Urls {
     owner: String,
@@ -72,15 +69,6 @@ fn obs(key: DhtKey, sightings: u32, priority: bool) -> Observation {
     }
 }
 
-fn report(key: DhtKey, reason: ReportReason) -> NewReport {
-    NewReport {
-        key: AnyKey::V1OrDht(key),
-        reason,
-        message: "please review".into(),
-        contact: None,
-    }
-}
-
 async fn idle_timeout(store: &Store) -> String {
     sqlx::query_scalar("SHOW idle_in_transaction_session_timeout")
         .fetch_one(store.pool())
@@ -108,16 +96,18 @@ async fn roles_have_least_privilege() {
     .unwrap();
     assert_eq!(compression.as_deref(), Some("l"));
 
-    // submit_report belongs to the migration role and runs with its rights.
-    let (fn_owner, secdef): (String, bool) = sqlx::query_as(
-        "SELECT pg_get_userbyid(proowner)::text, prosecdef FROM pg_proc \
-         WHERE oid = 'submit_report(bytea, text, text, text)'::regprocedure",
-    )
-    .fetch_one(owner.pool())
-    .await
-    .unwrap();
-    assert_eq!(fn_owner, "dc3_owner");
-    assert!(secdef);
+    // No report objects: no reports table, no submit_report function.
+    let regclass: Option<String> = sqlx::query_scalar("SELECT to_regclass('public.reports')::text")
+        .fetch_one(owner.pool())
+        .await
+        .unwrap();
+    assert_eq!(regclass, None);
+    let fn_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_proc WHERE proname = 'submit_report'")
+            .fetch_one(owner.pool())
+            .await
+            .unwrap();
+    assert_eq!(fn_count, 0);
 
     let crawler = Store::connect(&urls.crawler, 2).await.unwrap();
     let indexer = Store::connect(&urls.indexer, 2).await.unwrap();
@@ -174,38 +164,20 @@ async fn roles_have_least_privilege() {
         (id, vec!["f".to_owned()])
     );
     must_deny(&crawler, "DELETE FROM torrents").await;
-    // The moderation columns are out of the crawler's reach.
-    must_deny(&crawler, "UPDATE torrents SET hidden_at = NULL").await;
-    must_deny(&crawler, "UPDATE torrents SET hidden_at = now()").await;
-    must_deny(&crawler, "UPDATE torrents SET reviewed_at = now()").await;
-    must_deny(
-        &crawler,
-        "INSERT INTO torrents (dht_key, name, total_size, file_count, change_seq, reviewed_at) \
-         VALUES (decode(repeat('01', 20), 'hex'), 'x', 0, 0, 0, now())",
-    )
-    .await;
-    must_deny(
-        &crawler,
-        "INSERT INTO torrents (dht_key, name, total_size, file_count, change_seq, hidden_at) \
-         VALUES (decode(repeat('01', 20), 'hex'), 'x', 0, 0, 0, now())",
-    )
-    .await;
     must_allow(
         &crawler,
         "UPDATE torrents SET seen_count = seen_count WHERE false",
     )
     .await;
     must_deny(&crawler, "DELETE FROM denylist").await;
-    must_deny(&crawler, "SELECT * FROM reports").await;
     must_deny(&crawler, "SELECT * FROM audit_log").await;
     must_deny(&crawler, "SELECT * FROM settings").await;
     must_deny(&crawler, "CREATE TABLE evil (x int)").await;
-    must_deny(
-        &crawler,
-        "SELECT * FROM submit_report(decode(repeat('00', 20), 'hex'), 'other', '', NULL)",
-    )
-    .await;
-    assert_denied("crawler stats", crawler.stats().await);
+    // stats() reads only pending/denylist/torrents, which the crawler can
+    // already SELECT individually for the pipeline (it was denied before
+    // only via the reports table, now removed).
+    let stats = crawler.stats().await.unwrap();
+    assert_eq!((stats.torrents, stats.denylisted), (1, 1));
 
     // --- indexer: read-only, torrents and denylist only.
     let mark = indexer.high_water_mark().await.unwrap().unwrap();
@@ -218,19 +190,13 @@ async fn roles_have_least_privilege() {
     must_deny(&indexer, "UPDATE torrents SET name = 'x'").await;
     must_deny(&indexer, "INSERT INTO denylist (key, reason, created_by) VALUES (decode(repeat('00', 20), 'hex'), 'other', 'x')").await;
     must_deny(&indexer, "SELECT nextval('change_seq')").await;
-    must_deny(&indexer, "SELECT * FROM reports").await;
     must_deny(&indexer, "SELECT count(*) FROM pending").await;
     must_deny(&indexer, "SELECT * FROM stats_daily").await;
     must_deny(&indexer, "SELECT * FROM settings").await;
-    must_deny(
-        &indexer,
-        "SELECT * FROM submit_report(decode(repeat('00', 20), 'hex'), 'other', '', NULL)",
-    )
-    .await;
     must_allow(&indexer, "SELECT count(*) FROM denylist").await;
     assert_denied("indexer pending_depth", indexer.pending_depth().await);
 
-    // --- web: reads, and reports through submit_report only.
+    // --- web: reads only.
     assert!(web.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_some());
     assert_eq!(web.get_many(&[id]).await.unwrap().len(), 1);
     let stats = web.public_stats().await.unwrap();
@@ -238,35 +204,9 @@ async fn roles_have_least_privilege() {
     web.daily_stats(7).await.unwrap();
     assert_denied("web stats", web.stats().await);
 
-    let hid = web
-        .submit_report(&report(k, ReportReason::Csam))
-        .await
-        .unwrap();
-    assert!(hid.hidden);
-    assert!(web.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_none());
-    let other = web
-        .submit_report(&report(DhtKey([10; 20]), ReportReason::Copyright))
-        .await
-        .unwrap();
-    assert!(!other.hidden);
-    // The function still validates direct calls.
-    let err = sqlx::query("SELECT * FROM submit_report('\\x00'::bytea, 'csam', '', NULL)")
-        .execute(web.pool())
-        .await
-        .unwrap_err();
-    assert_eq!(sqlx_state(&err).as_deref(), Some("22023"));
-
-    must_deny(&web, "INSERT INTO reports (dht_key, reason, message) VALUES (decode(repeat('00', 20), 'hex'), 'other', '')").await;
-    must_deny(&web, "UPDATE torrents SET hidden_at = now()").await;
-    must_deny(&web, "UPDATE torrents SET hidden_at = NULL").await;
     must_deny(&web, "UPDATE torrents SET name = 'x'").await;
     must_deny(&web, "UPDATE torrents SET deleted_at = now()").await;
     must_deny(&web, "DELETE FROM torrents").await;
-    must_deny(&web, "SELECT id FROM reports").await;
-    must_deny(&web, "SELECT message FROM reports").await;
-    must_deny(&web, "SELECT contact FROM reports").await;
-    must_deny(&web, "DELETE FROM reports").await;
-    must_deny(&web, "UPDATE reports SET status = 'dismissed'").await;
     must_deny(&web, "SELECT gave_up FROM pending").await;
     must_deny(&web, "SELECT count(*) FROM pending").await;
     must_deny(&web, "SELECT nextval('change_seq')").await;
@@ -285,7 +225,7 @@ async fn roles_have_least_privilege() {
     must_deny(&web, "SELECT * FROM settings").await;
     must_deny(
         &web,
-        "UPDATE settings SET value = '100000' WHERE key = 'autohide_per_hour'",
+        "UPDATE settings SET value = 'hello' WHERE key = 'banner'",
     )
     .await;
     must_deny(
@@ -293,57 +233,20 @@ async fn roles_have_least_privilege() {
         "CREATE FUNCTION evil() RETURNS int LANGUAGE sql RETURN 1",
     )
     .await;
-    must_deny(
-        &web,
-        "ALTER FUNCTION submit_report(bytea, text, text, text) SECURITY INVOKER",
-    )
-    .await;
     must_deny(&web, "CREATE TEMP TABLE scratch (x int)").await;
-    assert_denied("web list_reports", web.list_reports(None, 10).await);
     assert_denied(
         "web deny",
         web.deny(k.as_bytes(), DenyReason::Other, None, "web").await,
     );
-    assert_denied(
-        "web resolve_report",
-        web.resolve_report(hid.report_id, ReportAction::Dismiss, None, "web")
-            .await,
-    );
-    assert_denied(
-        "web set_setting",
-        web.set_setting(SETTING_AUTOHIDE_PER_HOUR, "1000").await,
-    );
+    assert_denied("web set_setting", web.set_setting("banner", "hello").await);
     assert_denied("web pending_depth", web.pending_depth().await);
 
-    // --- owner: admin flows.
-    assert_eq!(owner.list_reports(None, 10).await.unwrap().len(), 2);
-    owner
-        .resolve_report(hid.report_id, ReportAction::Dismiss, None, "admin")
-        .await
-        .unwrap();
-    let back = web.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().unwrap();
-    assert!(back.reviewed_at.is_some());
-    // Reviewed: a new CSAM report does not hide it again.
-    assert!(
-        !web.submit_report(&report(k, ReportReason::Csam))
-            .await
-            .unwrap()
-            .hidden
-    );
-    assert!(
-        owner
-            .set_setting(SETTING_AUTOHIDE_PER_HOUR, "10")
-            .await
-            .unwrap()
-    );
+    // --- owner: admin flows (settings, stats, undeny).
+    assert!(owner.set_setting("banner", "hello").await.unwrap());
     assert_eq!(
-        owner
-            .get_setting(SETTING_AUTOHIDE_PER_HOUR)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("10")
+        owner.get_setting("banner").await.unwrap().as_deref(),
+        Some("hello")
     );
-    assert_eq!(owner.stats().await.unwrap().open_reports, 2);
+    assert_eq!(owner.stats().await.unwrap().torrents, 1);
     assert!(owner.undeny(bad.as_bytes(), "admin").await.unwrap());
 }

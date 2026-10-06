@@ -189,7 +189,7 @@ mod tests {
     use dc3_core::AnyKey;
     use dc3_policy::TermMatcher;
     use dc3_search::SearchHandle;
-    use dc3_store::{NewReport, PublicStats, SubmitOutcome, TorrentRecord};
+    use dc3_store::{PublicStats, TorrentRecord};
 
     use super::*;
     use crate::BackendError;
@@ -216,10 +216,6 @@ mod tests {
 
         async fn get_many(&self, _: &[i64]) -> Result<Vec<TorrentRecord>, BackendError> {
             Ok(Vec::new())
-        }
-
-        async fn submit_report(&self, _: &NewReport) -> Result<SubmitOutcome, BackendError> {
-            Err(BackendError::ReportsFull)
         }
 
         async fn public_stats(&self) -> Result<PublicStats, BackendError> {
@@ -317,9 +313,6 @@ mod tests {
             }
             async fn get_many(&self, _: &[i64]) -> Result<Vec<TorrentRecord>, BackendError> {
                 Ok(Vec::new())
-            }
-            async fn submit_report(&self, _: &NewReport) -> Result<SubmitOutcome, BackendError> {
-                Err(BackendError::ReportsFull)
             }
             async fn public_stats(&self) -> Result<PublicStats, BackendError> {
                 std::future::pending().await

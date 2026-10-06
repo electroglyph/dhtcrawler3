@@ -11,7 +11,6 @@
 mod api;
 mod common;
 mod pages;
-mod report;
 mod search;
 mod security;
 mod serve;

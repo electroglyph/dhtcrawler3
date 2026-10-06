@@ -152,7 +152,7 @@ async fn serve_keeps_running_without_statistics() {
 }
 
 #[tokio::test]
-async fn serve_reports_configuration_and_bind_errors() {
+async fn serve_configuration_and_bind_errors() {
     let _serial = serial().await;
     metrics();
     let index = index_of(&[]);

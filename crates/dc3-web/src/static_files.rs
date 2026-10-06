@@ -13,7 +13,6 @@ pub(crate) const STYLE_HASH: u64 = fnv1a64(STYLE_CSS.as_bytes());
 pub(crate) const ROBOTS_TXT: &str = "User-agent: *\n\
 Disallow: /search\n\
 Disallow: /api/\n\
-Disallow: /report/\n\
 Disallow: /t/\n";
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;

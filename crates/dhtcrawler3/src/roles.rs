@@ -161,7 +161,7 @@ async fn run_all(
     log_warnings(cfg);
     if migrate {
         let owner = connect(cfg, DbRole::Main).await?;
-        admin::migrate(&owner, cfg.web.autohide_per_hour, &mut std::io::sink()).await?;
+        admin::migrate(&owner, &mut std::io::sink()).await?;
         owner.pool().close().await;
     }
     let crawl_opts = CrawlOptions::from_config(cfg)?;

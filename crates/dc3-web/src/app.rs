@@ -15,8 +15,8 @@ use ipnet::IpNet;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::sync::Semaphore;
 
-use crate::handlers::{api, health, pages, report, search, torrent};
-use crate::middleware::{MAX_BODY_BYTES, MAX_CONCURRENT_REQUESTS, MAX_REPORT_BODY_BYTES, guard};
+use crate::handlers::{api, health, pages, search, torrent};
+use crate::middleware::{MAX_BODY_BYTES, MAX_CONCURRENT_REQUESTS, guard};
 use crate::ratelimit::{RATE_LIMIT_IDLE_EXPIRY, RATE_LIMIT_MAX_KEYS, RateLimiter};
 use crate::templates::PageMeta;
 use crate::{
@@ -29,7 +29,6 @@ pub(crate) mod routes {
     pub const HOME: &str = "/";
     pub const SEARCH: &str = "/search";
     pub const TORRENT: &str = "/t/{key}";
-    pub const REPORT: &str = "/report/{key}";
     pub const API_SEARCH: &str = "/api/v1/search";
     pub const API_TORRENT: &str = "/api/v1/torrents/{key}";
     pub const ABOUT: &str = "/about";
@@ -46,11 +45,10 @@ pub(crate) mod routes {
     pub const UNMATCHED: &str = "unmatched";
 
     /// Every fixed route template.
-    pub const ALL: [&str; 14] = [
+    pub const ALL: [&str; 13] = [
         HOME,
         SEARCH,
         TORRENT,
-        REPORT,
         API_SEARCH,
         API_TORRENT,
         ABOUT,
@@ -65,8 +63,6 @@ pub(crate) mod routes {
 
     /// Prefix of torrent page paths.
     pub const TORRENT_PREFIX: &str = "/t/";
-    /// Prefix of report form paths.
-    pub const REPORT_PREFIX: &str = "/report/";
     /// Prefix of every JSON API path.
     pub const API_PREFIX: &str = "/api/";
 }
@@ -85,8 +81,6 @@ const DEFAULT_SITE_NAME: &str = "dhtcrawler3";
 
 /// The configuration, cleaned up for use in pages and headers.
 pub(crate) struct Site {
-    /// Public origin without a trailing slash.
-    pub base_url: String,
     pub site_name: String,
     pub contact_email: String,
     pub dmca_agent: String,
@@ -113,7 +107,6 @@ impl Site {
             .to_owned();
         let security_txt = security_txt(&base_url, &contact_email, started);
         Site {
-            base_url,
             site_name,
             contact_email,
             dmca_agent,
@@ -214,12 +207,6 @@ pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Ar
         .route(routes::HOME, get(pages::home::<B>))
         .route(routes::SEARCH, get(search::search_page::<B>))
         .route(routes::TORRENT, get(torrent::torrent_page::<B>))
-        .route(
-            routes::REPORT,
-            get(report::report_form::<B>)
-                .post(report::report_submit::<B>)
-                .layer(DefaultBodyLimit::max(MAX_REPORT_BODY_BYTES)),
-        )
         .route(routes::API_SEARCH, get(api::search::<B>))
         .route(routes::API_TORRENT, get(api::torrent::<B>))
         .route(routes::ABOUT, get(pages::about::<B>))
@@ -395,10 +382,10 @@ mod tests {
             },
             Utc::now(),
         );
-        assert_eq!(site.base_url, "https://s.example");
+        assert!(site.security_txt.contains("Canonical: https://s.example/"));
         assert_eq!(site.site_name, DEFAULT_SITE_NAME);
         assert_eq!(site.dmca_agent, "Agent\nStreet 1[31m");
         assert_eq!(site.mailto().as_deref(), Some("mailto:a%20b@c"));
-        assert_eq!(routes::ALL.len(), 14);
+        assert_eq!(routes::ALL.len(), 13);
     }
 }

@@ -155,7 +155,7 @@ understood and not defined here. Each row says why it is not broken down further
 | **machine code** | instructions | in the form a CPU executes directly | |
 | **compiler** | program | translates source code into machine code | |
 | **binary (executable)** | file | holds machine code that the operating system can run as a process | *Precompiled* means shipped as a binary instead of as source code. |
-| **subroutine (function in code)** | named unit of code | can be called with inputs (arguments) and returns a result | "Function" in code names (`submit_report`, `binary_to_term`) has this sense. |
+| **subroutine (function in code)** | named unit of code | can be called with inputs (arguments) and returns a result | "Function" in code names (`binary_to_term`) has this sense. |
 | **recursion** | way of writing a subroutine | the subroutine calls itself, for example once per level of nesting | The opposite, **iterative** code, uses a loop and an explicit, bounded list instead. |
 | **stack (call stack)** | region of memory | a running program uses it to track subroutine calls; it has a fixed size, so very deep recursion overflows it | |
 | **library** | body of code | offers subroutines for programs to call; it does not run by itself | |
@@ -490,7 +490,7 @@ understood and not defined here. Each row says why it is not broken down further
 | **sequence (database)** | database object | hands out increasing integers (`nextval`) | Numbers taken by transactions that roll back are never reused, so gaps are normal. `CACHE 1` makes each session take one number at a time. `last_value` is the latest number handed out. |
 | **database role** | database account | a named set of privileges that a connection logs in as | Other senses: client/server roles (§2.1), and a third sense in §8.6. |
 | **database function** | subroutine | stored in a database and run by the database server | |
-| **SECURITY DEFINER function** | database function | runs with the privileges of its owner instead of its caller's, so a caller can do exactly what the function does and nothing more | 03 §10: `submit_report` is the only way the website's database account can write. |
+| **SECURITY DEFINER function** | database function | runs with the privileges of its owner instead of its caller's, so a caller can do exactly what the function does and nothing more | Used for least-privilege roles, where each role can execute only what it needs. |
 | **bound parameter** | value in a database query | sent separately from the SQL text, so it can never be read as SQL | |
 | **connection pool** | set of open database connections | shared and reused by a program's tasks | |
 | **upsert** | database write | inserts a row, or changes it if the key already exists | |
@@ -681,8 +681,6 @@ vocabulary (cause, function, axiom) is defined here too.
 | **IWF** | organisation | the Internet Watch Foundation, a UK charity; it gives its members lists of CSAM URLs and keywords | |
 | **denylist** | list | names torrents that must be refused, by DHT key, v1 infohash or v2 infohash (20 or 32 bytes) | 03 §10 compares 20-byte prefixes, so a v2 entry also blocks its truncated key. |
 | **blocked-term list** | list | words or phrases (here, CSAM indicators) whose presence as whole tokens in a name, a path or a query causes refusal | |
-| **abuse report** | message from a visitor | says that a torrent should be removed, and why | |
-| **auto-hide** | action | hides a torrent from search as soon as a CSAM report arrives, pending review by an admin; bounded by a budget per hour and recorded in the audit log | 03 §10. |
 | **takedown** | action | removes an item from a service after a valid notice | |
 | **safe harbour** | legal immunity | shields a service provider from liability for its users' infringement while it meets conditions set by law | |
 | **DMCA notice** | legal notice (US, 17 U.S.C. §512) | sent by a copyright holder to a service provider to identify allegedly infringing material or links | Search tools (§512(d)) keep safe-harbour protection only if they meet all of its conditions: no actual or "red flag" knowledge of infringement; no financial benefit directly attributable to infringement they can control; prompt removal after a valid notice sent to a **designated agent** registered with the US Copyright Office (the registration expires after 3 years); and a repeat-infringer policy (§512(i)). |

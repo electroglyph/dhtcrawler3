@@ -38,8 +38,6 @@ pub const RATE_LIMIT_IDLE_EXPIRY: Duration = Duration::from_secs(10 * 60);
 pub const PAGE_QUOTA: Quota = Quota::per_second(3, 30);
 /// Quota for the JSON API: 2 per second, burst 20.
 pub const API_QUOTA: Quota = Quota::per_second(2, 20);
-/// Quota for report submissions: 3 per minute, burst 3.
-pub const REPORT_QUOTA: Quota = Quota::per_minute(3, 3);
 /// IPv6 prefix lengths a client is limited on, with the factor applied to
 /// the class quota for each.
 pub const V6_QUOTA_MULTIPLIERS: [(u8, u32); 4] = [(64, 1), (56, 4), (48, 16), (32, 64)];
@@ -110,8 +108,6 @@ pub(crate) enum RateClass {
     Page,
     /// The JSON API.
     Api,
-    /// Report submissions (`POST /report/{key}`).
-    Report,
 }
 
 impl RateClass {
@@ -119,7 +115,6 @@ impl RateClass {
         match self {
             RateClass::Page => PAGE_QUOTA,
             RateClass::Api => API_QUOTA,
-            RateClass::Report => REPORT_QUOTA,
         }
     }
 }
@@ -424,8 +419,6 @@ mod tests {
         assert_eq!(PAGE_QUOTA.interval, Duration::from_nanos(333_333_333));
         assert_eq!(API_QUOTA.burst, 20);
         assert_eq!(API_QUOTA.interval, Duration::from_millis(500));
-        assert_eq!(REPORT_QUOTA.burst, 3);
-        assert_eq!(REPORT_QUOTA.interval, Duration::from_secs(20));
         let wide = API_QUOTA.scaled(16);
         assert_eq!(wide.burst, 320);
         assert_eq!(wide.interval, Duration::from_micros(31_250));
@@ -453,18 +446,8 @@ mod tests {
         let l = limiter();
         let t0 = Instant::now();
         let ip = v4("198.51.100.3");
-        assert_eq!(burst(&l, RateClass::Report, ip, t0, 10), 3);
         assert_eq!(burst(&l, RateClass::Api, ip, t0, 25), 20);
         assert_eq!(burst(&l, RateClass::Page, ip, t0, 35), 30);
-        // Reports refill one per 20 s.
-        assert_eq!(
-            l.check(RateClass::Report, ip, t0),
-            Verdict::Deny(Duration::from_secs(20))
-        );
-        assert_eq!(
-            burst(&l, RateClass::Report, ip, t0 + Duration::from_secs(20), 2),
-            1
-        );
     }
 
     #[test]
@@ -695,7 +678,7 @@ mod tests {
         );
         assert_eq!(p[0].quota(RateClass::Page), PAGE_QUOTA);
         assert_eq!(p[1].quota(RateClass::Page).burst, 120);
-        assert_eq!(p[2].quota(RateClass::Report).burst, 48);
+        assert_eq!(p[2].quota(RateClass::Page).burst, 480);
         assert_eq!(p[3].quota(RateClass::Page).burst, 1920);
         assert_eq!(Prefix::V4(1).quota(RateClass::Api), API_QUOTA);
     }

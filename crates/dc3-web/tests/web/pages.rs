@@ -36,7 +36,6 @@ async fn home_page_has_a_labelled_search_box_and_no_script() {
         r#"<a href="/about">About</a>"#,
         r#"<a href="/legal">Legal</a>"#,
         r#"<a href="/privacy">Privacy</a>"#,
-        r#"<a href="/legal#report">Report</a>"#,
     ] {
         assert!(r.body.contains(link), "{link}");
     }
@@ -93,7 +92,6 @@ async fn information_pages() {
         "IP addresses of BitTorrent peers",
         "forgotten after 10 minutes",
         "at most 45 minutes",
-        "reports visitors send",
     ] {
         assert!(privacy.body.contains(needle), "{needle}");
     }
@@ -127,7 +125,7 @@ async fn robots_and_security_txt() {
     assert_eq!(robots.header("content-type"), "text/plain; charset=utf-8");
     assert_eq!(
         robots.body,
-        "User-agent: *\nDisallow: /search\nDisallow: /api/\nDisallow: /report/\nDisallow: /t/\n"
+        "User-agent: *\nDisallow: /search\nDisallow: /api/\nDisallow: /t/\n"
     );
     assert_security_headers(&robots, true);
 
@@ -216,10 +214,7 @@ async fn wrong_method_gets_405_with_headers() {
     for (method, path) in [
         (Method::DELETE, "/about"),
         (Method::POST, "/search"),
-        (
-            Method::PUT,
-            "/report/0000000000000000000000000000000000000000",
-        ),
+        (Method::PUT, "/t/0000000000000000000000000000000000000000"),
         (Method::POST, "/api/v1/search"),
     ] {
         let r = send(&app.router, request(method, path, Body::empty(), CLIENT)).await;

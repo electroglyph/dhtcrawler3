@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use dc3_core::{DhtKey, InfoHashV2};
 use dc3_search::{IndexDoc, IndexRoot, SearchHandle};
 use dc3_store::sqlx::{self, AssertSqlSafe, Connection, PgConnection};
-use dc3_store::{FileRow, NewTorrent, PgConnectOptions, SETTING_OPEN_REPORTS_CAP, Store};
+use dc3_store::{FileRow, NewTorrent, PgConnectOptions, Store};
 use dc3_web::{Backend, WebDeps, router};
 
 use crate::common::*;
@@ -63,7 +63,7 @@ impl TempDatabase {
 }
 
 #[tokio::test]
-async fn search_detail_report_and_readiness_against_postgres() {
+async fn search_detail_and_readiness_against_postgres() {
     let _serial = serial().await;
     let Some(url) = std::env::var("DATABASE_URL").ok().filter(|u| !u.is_empty()) else {
         eprintln!("DATABASE_URL is not set; skipping the PostgreSQL test");
@@ -181,63 +181,6 @@ async fn exercise(options: PgConnectOptions) {
     let stats = Backend::public_stats(&store).await.unwrap();
     assert_eq!(stats.torrents, 1);
     assert_eq!(stats.added_today, 1);
-
-    // A CSAM report hides the torrent at once.
-    let hides = metrics().counter("dc3_autohide_total");
-    let r = send(
-        &app,
-        report_post(
-            &hex,
-            &SAME_ORIGIN_HEADERS,
-            "reason=csam&message=please+review",
-            "192.0.2.201:1",
-        ),
-    )
-    .await;
-    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
-    assert_eq!(metrics().counter("dc3_autohide_total"), hides + 1);
-    assert_eq!(
-        send(&app, get(&format!("/t/{hex}"))).await.status,
-        StatusCode::NOT_FOUND
-    );
-    // The index still has the document until the indexer catches up, but
-    // the page skips it.
-    let r = send(&app, get("/search?q=integration")).await;
-    assert_eq!(r.status, StatusCode::OK);
-    assert!(!r.body.contains("result-title"));
-    assert_eq!(Backend::public_stats(&store).await.unwrap().torrents, 0);
-
-    // A report about an unknown key is stored too.
-    let unknown = DhtKey([0x77; 20]).to_hex();
-    let r = send(
-        &app,
-        report_post(
-            &unknown,
-            &SAME_ORIGIN_HEADERS,
-            "reason=other",
-            "192.0.2.202:1",
-        ),
-    )
-    .await;
-    assert_eq!(r.status, StatusCode::OK);
-
-    // A full report queue gives 503.
-    store
-        .set_setting(SETTING_OPEN_REPORTS_CAP, "2")
-        .await
-        .unwrap();
-    let r = send(
-        &app,
-        report_post(
-            &unknown,
-            &SAME_ORIGIN_HEADERS,
-            "reason=other",
-            "192.0.2.203:1",
-        ),
-    )
-    .await;
-    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(r.body.contains("Reports are temporarily unavailable."));
 
     store.pool().close().await;
 }

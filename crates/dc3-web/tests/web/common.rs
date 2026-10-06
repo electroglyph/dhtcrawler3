@@ -15,7 +15,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use dc3_core::{AnyKey, DhtKey, InfoHashV2};
 use dc3_policy::TermMatcher;
 use dc3_search::{IndexDoc, IndexRoot, SearchHandle};
-use dc3_store::{FileRow, NewReport, PublicStats, SubmitOutcome, TorrentRecord};
+use dc3_store::{FileRow, PublicStats, TorrentRecord};
 use dc3_web::{Backend, BackendError, WebConfig, WebDeps, router};
 use metrics::{
     Counter, Gauge, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder, SharedString, Unit,
@@ -74,7 +74,7 @@ fn key_text(key: &Key) -> String {
 }
 
 impl TestRecorder {
-    /// The value of a counter, e.g. `dc3_reports_total{reason=csam}`.
+    /// The value of a counter, e.g. `dc3_rate_limited_total{route="/search"}`.
     pub fn counter(&self, key: &str) -> u64 {
         self.counters
             .lock()
@@ -139,25 +139,11 @@ pub fn metrics() -> &'static TestRecorder {
 
 // ----------------------------------------------------------------- backend
 
-/// What the fake backend's `submit_report` does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReportBehaviour {
-    #[default]
-    Stored,
-    Hidden,
-    BudgetExhausted,
-    Full,
-    Invalid,
-    Down,
-}
-
 #[derive(Default)]
 pub struct FakeState {
     pub torrents: Mutex<Vec<TorrentRecord>>,
     pub get_many_calls: AtomicUsize,
     pub get_by_key_calls: AtomicUsize,
-    pub reports: Mutex<Vec<NewReport>>,
-    pub behaviour: Mutex<ReportBehaviour>,
     pub ping_fails: AtomicBool,
     pub reads_fail: AtomicBool,
     pub stats: Mutex<Option<PublicStats>>,
@@ -174,14 +160,6 @@ impl FakeBackend {
         backend
     }
 
-    pub fn set_behaviour(&self, behaviour: ReportBehaviour) {
-        *self.0.behaviour.lock().unwrap() = behaviour;
-    }
-
-    pub fn reports(&self) -> Vec<NewReport> {
-        self.0.reports.lock().unwrap().clone()
-    }
-
     pub fn get_many_calls(&self) -> usize {
         self.0.get_many_calls.load(Ordering::SeqCst)
     }
@@ -190,11 +168,11 @@ impl FakeBackend {
         self.0.get_by_key_calls.load(Ordering::SeqCst)
     }
 
-    /// Hides the torrent with this id, as a CSAM report or denial would.
+    /// Hides the torrent with this id, as a denial would.
     pub fn hide(&self, id: i64) {
         for t in self.0.torrents.lock().unwrap().iter_mut() {
             if t.id == id {
-                t.hidden_at = Some(Utc::now());
+                t.deleted_at = Some(Utc::now());
             }
         }
     }
@@ -233,27 +211,6 @@ impl Backend for FakeBackend {
                 t
             })
             .collect())
-    }
-
-    async fn submit_report(&self, report: &NewReport) -> Result<SubmitOutcome, BackendError> {
-        let behaviour = *self.0.behaviour.lock().unwrap();
-        let outcome = |hidden, budget_exhausted| {
-            let mut reports = self.0.reports.lock().unwrap();
-            reports.push(report.clone());
-            SubmitOutcome {
-                report_id: i64::try_from(reports.len()).unwrap(),
-                hidden,
-                budget_exhausted,
-            }
-        };
-        match behaviour {
-            ReportBehaviour::Stored => Ok(outcome(false, false)),
-            ReportBehaviour::Hidden => Ok(outcome(true, false)),
-            ReportBehaviour::BudgetExhausted => Ok(outcome(false, true)),
-            ReportBehaviour::Full => Err(BackendError::ReportsFull),
-            ReportBehaviour::Invalid => Err(BackendError::Invalid("rejected".into())),
-            ReportBehaviour::Down => Err(FakeBackend::unavailable()),
-        }
     }
 
     async fn public_stats(&self) -> Result<PublicStats, BackendError> {
@@ -315,8 +272,6 @@ pub fn torrent(id: i64, name: &str, files: &[(&str, u64)]) -> TorrentRecord {
         last_scraped_at: None,
         seeders_est: None,
         change_seq: 99,
-        hidden_at: None,
-        reviewed_at: None,
         deleted_at: None,
     }
 }
@@ -457,33 +412,6 @@ pub fn get(uri: &str) -> Request<Body> {
 pub fn get_from(uri: &str, peer: &str) -> Request<Body> {
     request(Method::GET, uri, Body::empty(), peer)
 }
-
-/// A report form post with the given headers and body.
-pub fn report_post(key: &str, headers: &[(&str, &str)], body: &str, peer: &str) -> Request<Body> {
-    let mut req = request(
-        Method::POST,
-        &format!("/report/{key}"),
-        Body::from(body.to_owned()),
-        peer,
-    );
-    let h = req.headers_mut();
-    h.insert(
-        "content-type",
-        "application/x-www-form-urlencoded".parse().unwrap(),
-    );
-    h.insert("content-length", body.len().to_string().parse().unwrap());
-    for (name, value) in headers {
-        h.insert(
-            axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
-            value.parse().unwrap(),
-        );
-    }
-    req
-}
-
-/// Headers of a browser same-origin POST: fetch metadata plus origin.
-pub const SAME_ORIGIN_HEADERS: [(&str, &str); 2] =
-    [("sec-fetch-site", "same-origin"), ("origin", BASE_URL)];
 
 pub async fn send(router: &Router, req: Request<Body>) -> TestResponse {
     let response = router.clone().oneshot(req).await.unwrap();

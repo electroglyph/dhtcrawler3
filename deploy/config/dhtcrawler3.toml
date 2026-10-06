@@ -99,7 +99,7 @@ poll_interval_ms = 1000
 
 [web]
 listen = "127.0.0.1:8080"
-# Public origin, used for CSRF checks on the report form and in security.txt.
+# Public origin, used for CSRF checks on forms and in security.txt.
 base_url = "http://127.0.0.1:8080"
 site_name = "dhtcrawler3"
 # Shown on /legal and /.well-known/security.txt. Set these before going public.
@@ -110,9 +110,6 @@ hsts = false
 # Reverse proxies whose X-Forwarded-For header is trusted (CIDR list). Behind
 # Docker's published port this is the network the proxy connects from, not 127.0.0.1.
 trusted_proxies = []
-# Maximum torrents hidden automatically by CSAM reports per hour (stored in the
-# database by `migrate`). Reports beyond it wait for an admin.
-autohide_per_hour = 60
 
 [metrics]
 # Prometheus endpoint for whichever role is running. Keep it off the public network.

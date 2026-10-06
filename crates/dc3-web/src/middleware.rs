@@ -34,10 +34,8 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 pub const HSTS_VALUE: &str = "max-age=31536000; includeSubDomains";
 /// Longest time a request may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Largest request body, except for report submissions.
+/// Largest request body.
 pub const MAX_BODY_BYTES: usize = 4 * 1024;
-/// Largest body of `POST /report/{key}`.
-pub const MAX_REPORT_BODY_BYTES: usize = 32 * 1024;
 /// Longest path and query string.
 pub const MAX_URI_BYTES: usize = 4 * 1024;
 /// Most requests handled at once; more get 503.
@@ -73,7 +71,7 @@ pub(crate) async fn guard<B: Backend>(
     let method = req.method().clone();
     let route = route_label(req.extensions().get::<MatchedPath>());
     let flavor = Flavor::for_path(req.uri().path());
-    let no_store = method == Method::POST || route == routes::REPORT;
+    let no_store = method == Method::POST;
 
     let mut response = admit(&st, req, route, flavor, next).await;
 
@@ -120,13 +118,7 @@ async fn admit<B: Backend>(
         );
     }
 
-    let report_post = req.method() == Method::POST && route == routes::REPORT;
-    let body_limit = if report_post {
-        MAX_REPORT_BODY_BYTES
-    } else {
-        MAX_BODY_BYTES
-    };
-    let body_limit = u64::try_from(body_limit).unwrap_or(u64::MAX);
+    let body_limit = u64::try_from(MAX_BODY_BYTES).unwrap_or(u64::MAX);
     if declared_length(req.headers()).is_some_and(|len| len > body_limit) {
         return error_response(
             site,
@@ -151,9 +143,7 @@ async fn admit<B: Backend>(
         );
     };
     let ip = client_ip(peer, req.headers(), &site.trusted_proxies);
-    let class = if report_post {
-        RateClass::Report
-    } else if flavor == Flavor::Json {
+    let class = if flavor == Flavor::Json {
         RateClass::Api
     } else {
         RateClass::Page

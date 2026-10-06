@@ -466,8 +466,7 @@ fn v1_files(
         let attr = dict.get_bytes(b"attr");
         // A single file has no directory part, so the `.pad`-directory rule
         // cannot apply; only `attr` or the legacy padding name mark it.
-        let padding = is_padding(None, comp.as_deref(), attr)
-            || is_padding(None, Some(name), attr);
+        let padding = is_padding(None, comp.as_deref(), attr) || is_padding(None, Some(name), attr);
         if let Some(p) = &comp {
             if p != name && !files.show_joined(p) {
                 files.show(p);

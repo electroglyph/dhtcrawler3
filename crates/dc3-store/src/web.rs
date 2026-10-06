@@ -1,20 +1,13 @@
-//! Web operations: lookups, reports and public statistics. Every method here
+//! Web operations: lookups and public statistics. Every method here
 //! works for the `dc3_web` user, which can read `torrents`, `denylist` and
-//! `stats_daily` and execute `submit_report`, and nothing else.
-
-use std::borrow::Cow;
+//! `stats_daily`, and nothing else.
 
 use dc3_core::AnyKey;
 
-use crate::types::{
-    DailyStats, NewReport, PublicStats, SubmitOutcome, TorrentRecord, any_key_bytes,
-    torrent_columns_base, visible_sql,
-};
+use crate::types::{DailyStats, PublicStats, TorrentRecord, torrent_columns_base, visible_sql};
 use crate::{
     GET_BY_KEY_MAX_PATH_BYTES, GET_MANY_MAX_FILES, MAX_DAILY_STATS_DAYS, MAX_GET_MANY,
-    MAX_STORED_FILES, REPORT_CONTACT_MAX_CHARS, REPORT_MESSAGE_MAX_CHARS, Result,
-    SQLSTATE_INVALID_PARAMETER, SQLSTATE_REPORTS_FULL, Store, StoreError, check_len, db_message,
-    get, live_torrents, sqlstate,
+    MAX_STORED_FILES, Result, Store, StoreError, get, live_torrents,
 };
 
 /// Visible torrents by id, in the order given, with at most `$2` file rows
@@ -127,40 +120,6 @@ impl Store {
         rows.iter().map(TorrentRecord::from_row).collect()
     }
 
-    /// Stores a visitor's report through the `submit_report` database
-    /// function, the web user's only write path. In one transaction the
-    /// function links the report to the torrent its key names and, for a
-    /// [`crate::ReportReason::Csam`] report, may hide that torrent: only if it
-    /// is not already hidden, no admin has reviewed it, no other CSAM report
-    /// about it is open, and the hourly auto-hide budget (the
-    /// `autohide_per_hour` setting) is not used up. A hide bumps `change_seq`
-    /// and writes an `auto-hide` audit row.
-    ///
-    /// Fails with [`StoreError::ReportsFull`] when the `open_reports_cap`
-    /// setting's number of reports are already open, and with
-    /// [`StoreError::Invalid`] for a message or contact over its limit.
-    pub async fn submit_report(&self, r: &NewReport) -> Result<SubmitOutcome> {
-        check_len("report message", &r.message, 0, REPORT_MESSAGE_MAX_CHARS)?;
-        if let Some(c) = &r.contact {
-            check_len("report contact", c, 0, REPORT_CONTACT_MAX_CHARS)?;
-        }
-        let row = sqlx::query(
-            "SELECT report_id, hidden, budget_exhausted FROM submit_report($1, $2, $3, $4)",
-        )
-        .bind(any_key_bytes(&r.key))
-        .bind(r.reason.as_str())
-        .bind(r.message.as_str())
-        .bind(r.contact.as_deref())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(submit_error)?;
-        Ok(SubmitOutcome {
-            report_id: get(&row, "report_id")?,
-            hidden: get(&row, "hidden")?,
-            budget_exhausted: get(&row, "budget_exhausted")?,
-        })
-    }
-
     /// Totals for the public home page. `torrents` is counted as in
     /// [`Store::stats`]; the other two are `stats_daily.fetched` for today
     /// and yesterday (UTC), 0 for a day without a row.
@@ -196,15 +155,5 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(DailyStats::from_row).collect()
-    }
-}
-
-/// Maps the errors `submit_report` raises on purpose.
-pub(crate) fn submit_error(e: sqlx::Error) -> StoreError {
-    let code = sqlstate(&e).map(Cow::into_owned);
-    match code.as_deref() {
-        Some(SQLSTATE_REPORTS_FULL) => StoreError::ReportsFull,
-        Some(SQLSTATE_INVALID_PARAMETER) => StoreError::Invalid(db_message(&e)),
-        _ => StoreError::Database(e),
     }
 }

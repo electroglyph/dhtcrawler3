@@ -24,7 +24,7 @@ Each role connects with its own database user:
 |---|---|
 | `dc3_crawler` | reads and writes the torrent and queue tables; adds `csam-auto` and `private` denials |
 | `dc3_indexer` | read-only |
-| `dc3_web` | read-only, plus one function, `submit_report`, which stores a report and may auto-hide (bounded, audited) |
+| `dc3_web` | read-only |
 | `dc3_owner` | runs migrations and admin commands |
 
 Resource guide: each 10 million indexed torrents need very roughly 40–80 GB of disk. The
@@ -50,9 +50,8 @@ Work through this list before the site is reachable from the internet.
 - [ ] Set `web.contact_email` and `web.dmca_agent`. Both are shown on `/legal` and in `/.well-known/security.txt`.
 - [ ] **US:** register a DMCA designated agent with the U.S. Copyright Office. The registration expires after 3 years, so set a reminder.
 - [ ] **EU/UK:** get legal advice on the DSA and the Online Safety Act. Designate points of contact, and a legal representative if needed.
-- [ ] **CSAM:** register with NCMEC's CyberTipline (US), or the equivalent hotline where you operate. Decide who reviews reports, and how quickly.
+- [ ] **CSAM:** register with NCMEC's CyberTipline (US), or the equivalent hotline where you operate. Decide who reviews takedown requests, and how quickly.
 - [ ] Extend the blocked-term list (`policy.terms_file`). The built-in seed is intentionally short. IWF members can use the IWF Keywords List. After any change to the list, run `policy rescan` (§3).
-- [ ] Decide the CSAM auto-hide budget, `web.autohide_per_hour` (default 60). Reports beyond it are stored but do not hide anything until an admin acts.
 
 **Domain and DNS.** The btdig.com incident is the reason for these steps; see [02-legacy-audit §2](02-legacy-audit.md#2-what-happened-to-btdig).
 - [ ] Enable registrar lock **and** registry lock.
@@ -91,13 +90,10 @@ docker compose run --rm -e DC3_DATABASE__USER=dc3_owner \
 |---|---|
 | Take down a torrent (DMCA, abuse) | `deny add <infohash> --reason dmca --note "notice #123"` |
 | Undo a mistaken takedown | `deny remove <infohash>` |
-| Review reports | `reports list --status open` |
-| Act on a report | `reports resolve <id> --action deny` or `--action dismiss` |
 | Overall numbers | `stats` |
 | Re-check stored torrents after changing the term list | `policy rescan` |
 | Rebuild the search index | see below |
 | List takedowns | `deny list --limit 100` |
-| Resolve a report with an explicit reason | `reports resolve <id> --action deny --reason dmca` |
 | Run everything in one process (small installs) | `all --migrate` |
 
 **Rebuilding the index.** Run the rebuild inside the index service, so it uses the real index volume:
@@ -121,14 +117,7 @@ start if the index service is still running.
 The indexer then drops the torrent from search within seconds. The key stays blocked if
 it is seen again.
 
-A report with reason **csam** hides the torrent at once, pending review. Three limits apply:
-- only the first open CSAM report for a torrent hides it;
-- a torrent an admin has already reviewed and cleared is not hidden again automatically;
-- auto-hides stop after `web.autohide_per_hour`, and the count is kept in `dc3_autohide_budget_exhausted_total`.
-
-Every auto-hide writes an audit-log row. **Dismissing** the report un-hides the torrent
-and marks it reviewed. **Denying** it removes the torrent. You must also report
-apparent CSAM to your national hotline. dhtcrawler3 never downloads content, so the only
+Suspected CSAM must still be reported to your national hotline. dhtcrawler3 never downloads content, so the only
 material to report is the torrent's metadata and infohash.
 
 ## 4. What is and is not stored
@@ -137,7 +126,7 @@ material to report is the torrent's metadata and infohash.
 |---|---|
 | DHT key, v1/v2 infohashes, sanitised name, file paths and sizes (first 2 000), sizes and counts, first/last seen time, sighting count | Peer IP addresses (kept in memory only while fetching, at most 45 min in the DHT peer store) |
 | Queue of keys waiting for metadata, with retry state | Torrent content, `.torrent` files, trackers, comments |
-| Denylist, reports (reason, message, optional contact), audit log | Visitor IP addresses (rate limits are in memory only) |
+| Denylist, audit log | Visitor IP addresses (rate limits are in memory only) |
 | Daily counters | Search queries (logs record route and status only) |
 
 The crawl state file (`state_dir/dht-state.json`) holds our node IDs and a few hundred
@@ -172,7 +161,7 @@ Each role serves `/metrics`, `/healthz` (liveness) and `/readyz` (readiness) on 
 | Pipeline | `dc3_discovered_total{source,family}`, `dc3_admitted_total{source}`, `dc3_queue_depth`, `dc3_fetch_total{outcome}` (ok, no_peers, fetch_failed, parse_error, blocked, private, denied, store_error), `dc3_blocked_total{reason}` (peer_address, denylisted, queue_full, blocked_term, private), `dc3_destination_skipped_total{reason}` (busy, rate_limited, negative_cache, map_full) |
 | Scrape (BEP 33) | `dc3_scrape_total{outcome}` (live, dying, dead, unknown), `dc3_scrape_tombstones_total`, `dc3_purge_tombstoned_total`, `dc3_scrape_due_depth`, `dc3_removed_keys_count`, `dc3_scrape_zero_seeder_share`, `dc3_scrape_unaware_share` |
 | Index | `dc3_index_lag` (sequence numbers behind), `dc3_index_lag_seconds`, `dc3_index_docs` |
-| Web | `dc3_http_requests_total{route,status}`, `dc3_search_seconds`, `dc3_rate_limited_total{route}`, `dc3_blocked_queries_total`, `dc3_reports_total{reason}`, `dc3_autohide_total`, `dc3_autohide_budget_exhausted_total` |
+| Web | `dc3_http_requests_total{route,status}`, `dc3_search_seconds`, `dc3_rate_limited_total{route}`, `dc3_blocked_queries_total` |
 
 Access logs: the web role writes one line per request at `info` level under the log
 target `dc3_web::access`. Each line has the method, route template, status and latency,
@@ -181,8 +170,7 @@ and never an address or query.
 Suggested alerts:
 - `dc3_dht_sampler_early_total` > 0;
 - the rate of `dc3_fetch_total{outcome="ok"}` falls below half of last week's rate;
-- `dc3_index_lag_seconds` > 300;
-- `dc3_autohide_total` rises (someone needs to review reports).
+- `dc3_index_lag_seconds` > 300.
 
 ## 7. Upgrading
 

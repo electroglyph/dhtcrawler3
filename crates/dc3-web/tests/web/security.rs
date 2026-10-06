@@ -200,8 +200,6 @@ async fn every_kind_of_response_has_the_security_headers() {
         (Method::GET, format!("/t/{key}"), StatusCode::OK),
         (Method::GET, "/t/not-a-key".into(), StatusCode::BAD_REQUEST),
         (Method::GET, format!("/t/{missing}"), StatusCode::NOT_FOUND),
-        (Method::GET, format!("/report/{key}"), StatusCode::OK),
-        (Method::GET, "/report/zz".into(), StatusCode::BAD_REQUEST),
         (
             Method::GET,
             "/api/v1/search?q=hostile".into(),
@@ -265,29 +263,6 @@ async fn every_kind_of_response_has_the_security_headers() {
             assert_safe_html(&r.body);
         }
     }
-
-    // A refused report (CSRF) and an oversized one.
-    let r = send(
-        &app.router,
-        report_post(
-            &key,
-            &[("sec-fetch-site", "cross-site")],
-            "reason=other",
-            CLIENT,
-        ),
-    )
-    .await;
-    assert_eq!(r.status, StatusCode::FORBIDDEN);
-    assert_security_headers(&r, true);
-    assert_eq!(r.header("cache-control"), "no-store");
-    let big = format!("reason=other&message={}", "a".repeat(40_000));
-    let r = send(
-        &app.router,
-        report_post(&key, &SAME_ORIGIN_HEADERS, &big, CLIENT),
-    )
-    .await;
-    assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_security_headers(&r, true);
 
     // The redirect goes to the home page only.
     let r = send(&app.router, get_from("/search?q=", "192.0.2.200:1")).await;
@@ -394,7 +369,7 @@ async fn hsts_is_only_sent_when_configured() {
 }
 
 #[tokio::test]
-async fn request_bodies_are_limited_outside_reports_too() {
+async fn request_bodies_are_limited() {
     let _serial = serial().await;
     let app = app(Vec::new());
     let mut req = request(

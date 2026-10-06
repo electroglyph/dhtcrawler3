@@ -7,12 +7,12 @@
 <ul>
 <li>For each torrent: its DHT key and info hashes (v1 and v2), its name after cleaning, the paths and sizes of its first {{ stored_files }} files, its total size and number of files, when it was first and last seen, and how many times it was seen.</li>
 <li>A queue of torrent keys waiting for their metadata, with retry information.</li>
-<li>A list of blocked torrents; the reports visitors send (the reason, the message and, only if you give one, a contact address); and an audit log of moderation actions.</li>
+<li>A list of blocked torrents and an audit log of moderation actions.</li>
 <li>Daily counters of the crawler's work.</li>
 </ul>
 <h2>What is never stored</h2>
 <ul>
-<li>Your IP address. To protect the site from overload, recent request counts per address are kept in memory only, and are forgotten after {{ rate_limit_minutes }} minutes without requests. No address is stored with a report.</li>
+<li>Your IP address. To protect the site from overload, recent request counts per address are kept in memory only, and are forgotten after {{ rate_limit_minutes }} minutes without requests.</li>
 <li>Your searches. The software logs only which kind of page was requested, the response status and how long it took.</li>
 <li>The IP addresses of BitTorrent peers. They are kept in memory only while metadata is being fetched, and for at most 45 minutes in the crawler's DHT peer store.</li>
 <li>The content of torrents, .torrent files, tracker lists and comments.</li>

@@ -32,7 +32,7 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 async fn search_json_has_exactly_the_documented_fields() {
     let _serial = serial().await;
     let mut hidden = torrent(3, "api example three", &[("c", 3)]);
-    hidden.hidden_at = Some(at(2));
+    hidden.deleted_at = Some(at(2));
     let app = app(vec![
         hybrid(1, "api example one"),
         torrent(2, "api example two", &[("b", 2)]),

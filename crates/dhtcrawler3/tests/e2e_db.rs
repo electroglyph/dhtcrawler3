@@ -1,5 +1,5 @@
 //! End to end with PostgreSQL (design §13): discovery → pending → fetch →
-//! torrents → index → web search → report → auto-hide → deny.
+//! torrents → index → web search → deny.
 //!
 //! Runs only when `DATABASE_URL` names a superuser connection; the test
 //! creates and drops its own database and never touches the one in the URL.
@@ -28,12 +28,9 @@ use dc3_dht::Dht;
 use dc3_search::{SearchHandle, SearchQuery};
 use dc3_store::sqlx::postgres::PgConnection;
 use dc3_store::sqlx::{self, AssertSqlSafe, Connection};
-use dc3_store::{
-    DenyReason, Observation, PgConnectOptions, ReportReason, ReportStatus,
-    SETTING_AUTOHIDE_PER_HOUR, Store, StoreError,
-};
+use dc3_store::{DenyReason, Observation, PgConnectOptions, Store, StoreError};
 use dc3_web::{WebConfig, WebDeps};
-use dhtcrawler3::admin::{self, Resolution};
+use dhtcrawler3::admin;
 use dhtcrawler3::crawl::Crawler;
 use dhtcrawler3::fetch::new_torrent;
 use dhtcrawler3::index::{self, IndexOptions, READY_MAX_LAG};
@@ -127,7 +124,7 @@ async fn drop_database(admin: &PgConnectOptions, name: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn crawl_index_search_report_and_deny() {
+async fn crawl_index_search_and_deny() {
     let Some(url) = database_url() else {
         eprintln!("skipping the database end-to-end test: DATABASE_URL is not set");
         return;
@@ -176,15 +173,7 @@ async fn scenario(options: PgConnectOptions) {
     let started = Instant::now();
     let store = Store::connect_with(options, POOL_SIZE).await.unwrap();
     let mut out: Vec<u8> = Vec::new();
-    admin::migrate(&store, 5, &mut out).await.unwrap();
-    assert_eq!(
-        store
-            .get_setting(SETTING_AUTOHIDE_PER_HOUR)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("5")
-    );
+    admin::migrate(&store, &mut out).await.unwrap();
     let policy = seed_policy();
 
     // --- Crawl: discovery → pending → fetch → torrents ---
@@ -327,61 +316,6 @@ async fn scenario(options: PgConnectOptions) {
     assert!(detail.body.contains("e2e test torrent"));
     assert!(detail.body.contains("two.bin"));
 
-    // --- Report → auto-hide ---
-    let report_path = format!("/report/{}", clean.key.to_hex());
-    let form = b"reason=csam&message=e2e+test+report&contact=";
-    let refused = http(
-        web_addr,
-        "POST",
-        &report_path,
-        &[
-            ("Content-Type", "application/x-www-form-urlencoded"),
-            ("Sec-Fetch-Site", "cross-site"),
-        ],
-        form,
-    )
-    .await;
-    assert_eq!(refused.status, 403, "a cross-site post must be refused");
-    let reported = http(
-        web_addr,
-        "POST",
-        &report_path,
-        &[
-            ("Content-Type", "application/x-www-form-urlencoded"),
-            ("Sec-Fetch-Site", "same-origin"),
-            ("Origin", BASE_URL),
-        ],
-        form,
-    )
-    .await;
-    assert_eq!(reported.status, 200, "{reported:?}");
-    assert!(
-        store.get_by_key(&clean_key).await.unwrap().is_none(),
-        "the csam report did not hide the torrent"
-    );
-    let open = store
-        .list_reports(Some(ReportStatus::Open), 10)
-        .await
-        .unwrap();
-    assert_eq!(open.len(), 1);
-    assert_eq!(open[0].reason, ReportReason::Csam);
-    assert_eq!(open[0].torrent_id, Some(record.id));
-    assert_eq!(open[0].message, "e2e test report");
-
-    wait_until(
-        "the hidden torrent to leave the index",
-        Duration::from_secs(20),
-        || {
-            let search = search.clone();
-            async move { search_ids(&search, "e2e").await.is_empty() }
-        },
-    )
-    .await;
-    let page = http(web_addr, "GET", "/search?q=e2e", &[], b"").await;
-    assert_eq!(page.status, 200);
-    assert!(!page.body.contains("e2e test torrent"), "{}", page.body);
-    note(started, "reported and hidden");
-
     // --- Admin deny: removed for good ---
     let outcome = admin::deny_add(
         &store,
@@ -420,22 +354,6 @@ async fn scenario(options: PgConnectOptions) {
     assert_eq!(store.stats().await.unwrap().pending, 0);
     let detail = http(web_addr, "GET", &detail_path, &[], b"").await;
     assert_eq!(detail.status, 404, "{detail:?}");
-    admin::reports_resolve(
-        &store,
-        open[0].id,
-        Resolution::Deny(None),
-        Some("e2e"),
-        &mut out,
-    )
-    .await
-    .unwrap();
-    assert!(
-        store
-            .list_reports(Some(ReportStatus::Open), 10)
-            .await
-            .unwrap()
-            .is_empty()
-    );
     // The policy rescan finds nothing new: the blocked torrent was never stored.
     let rescan = admin::policy_rescan(&store, &policy, &mut out)
         .await

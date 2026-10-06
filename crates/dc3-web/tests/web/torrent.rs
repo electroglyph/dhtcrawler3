@@ -60,9 +60,6 @@ async fn detail_page_shows_everything() {
     )));
     assert!(body.contains(r#"<td class="path"><bdi>Big Buck Bunny/movie.mkv</bdi></td><td class="num"><span title="1,234,567,890 bytes">1.1 GiB</span></td>"#));
     assert!(body.contains(r#"<span title="512 bytes">512 B</span>"#));
-    assert!(body.contains(&format!(
-        r#"<a href="/report/{v1}">Report this torrent</a>"#
-    )));
     assert!(!body.contains("are listed."));
 
     // The same torrent by its v2 hash, and by its key in upper case and base32.
@@ -154,8 +151,6 @@ async fn invalid_keys_give_400() {
         let api = send(&app.router, get(&format!("/api/v1/torrents/{key}"))).await;
         assert_eq!(api.status, StatusCode::BAD_REQUEST, "{key}");
         assert!(api.json()["error"].is_string());
-        let report = send(&app.router, get(&format!("/report/{key}"))).await;
-        assert_eq!(report.status, StatusCode::BAD_REQUEST, "{key}");
     }
     assert_eq!(app.backend.get_by_key_calls(), calls);
 }

@@ -73,38 +73,9 @@ text_enum!(
     }
 );
 
-text_enum!(
-    /// The reason a visitor gave for a report.
-    ReportReason, "report reason", {
-        Csam => "csam",
-        Copyright => "copyright",
-        Malware => "malware",
-        Other => "other",
-    }
-);
-
-text_enum!(
-    /// Review state of a report.
-    ReportStatus, "report status", {
-        Open => "open",
-        Actioned => "actioned",
-        Dismissed => "dismissed",
-    }
-);
-
 fn parse_enum<T: FromStr<Err = ParseEnumError>>(s: &str) -> Result<T> {
     s.parse()
         .map_err(|e: ParseEnumError| StoreError::Corrupt(e.to_string()))
-}
-
-/// What to do when resolving a report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReportAction {
-    /// Deny the reported key (see [`crate::Store::deny`]) and mark the report actioned.
-    Deny(DenyReason),
-    /// Mark the report dismissed and un-hide the torrent unless another open
-    /// CSAM report exists for it.
-    Dismiss,
 }
 
 /// One stored file entry.
@@ -189,13 +160,6 @@ pub struct TorrentRecord {
     /// Displayed only while fresh (see the web role); never indexed.
     pub seeders_est: Option<u64>,
     pub change_seq: i64,
-    /// Hidden pending review (a CSAM report).
-    pub hidden_at: Option<DateTime<Utc>>,
-    /// When an admin last dismissed a report about the torrent; it is then
-    /// not hidden again automatically. Moderation history, so it is left out
-    /// of the serialized form.
-    #[serde(skip_serializing)]
-    pub reviewed_at: Option<DateTime<Utc>>,
     /// Tombstoned by a denial.
     pub deleted_at: Option<DateTime<Utc>>,
 }
@@ -206,8 +170,8 @@ macro_rules! torrent_columns_base {
     () => {
         "t.id, t.dht_key, t.info_hash_v1, t.info_hash_v2, t.name, t.total_size, t.file_count, \
          t.files_truncated, t.piece_length, t.seen_count, t.first_seen_at, \
-         t.last_seen_at, t.last_scraped_at, t.seeders_est, t.change_seq, t.hidden_at, \
-         t.reviewed_at, t.deleted_at"
+         t.last_seen_at, t.last_scraped_at, t.seeders_est, t.change_seq, \
+         t.deleted_at"
     };
 }
 pub(crate) use torrent_columns_base;
@@ -215,7 +179,7 @@ pub(crate) use torrent_columns_base;
 /// SQL expression: the row (alias `t`) may be shown and indexed.
 macro_rules! visible_sql {
     () => {
-        "(t.hidden_at IS NULL AND t.deleted_at IS NULL \
+        "(t.deleted_at IS NULL \
           AND NOT dc3_key_denied(t.dht_key, t.info_hash_v1, t.info_hash_v2))"
     };
 }
@@ -251,14 +215,6 @@ pub(crate) fn any_key_from_bytes(b: &[u8]) -> Result<AnyKey, ()> {
     InfoHashV2::from_slice(b).map(AnyKey::V2).map_err(|_| ())
 }
 
-/// Raw bytes of an [`AnyKey`].
-pub(crate) fn any_key_bytes(k: &AnyKey) -> &[u8] {
-    match k {
-        AnyKey::V1OrDht(k) => k.as_bytes(),
-        AnyKey::V2(h) => h.as_bytes(),
-    }
-}
-
 fn opt_u64(what: &str, v: Option<i64>) -> Result<Option<u64>> {
     v.map(|v| to_u64(what, v)).transpose()
 }
@@ -286,17 +242,15 @@ impl TorrentRecord {
                     .transpose()?
             },
             change_seq: get(row, "change_seq")?,
-            hidden_at: get(row, "hidden_at")?,
-            reviewed_at: get(row, "reviewed_at")?,
             deleted_at: get(row, "deleted_at")?,
         })
     }
 
-    /// True when the row is neither hidden nor tombstoned. (Rows returned by
+    /// True when the row is not tombstoned. (Rows returned by
     /// [`crate::Store::get_by_key`] and [`crate::Store::get_many`] are also
     /// checked against the denylist.)
     pub fn is_live(&self) -> bool {
-        self.hidden_at.is_none() && self.deleted_at.is_none()
+        self.deleted_at.is_none()
     }
 }
 
@@ -420,66 +374,6 @@ impl DenyEntry {
     }
 }
 
-/// A report as submitted by a visitor. No IP address is ever stored.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewReport {
-    /// The key the visitor reported. The database links the report to the
-    /// torrent this key names, if one is stored.
-    pub key: AnyKey,
-    pub reason: ReportReason,
-    /// At most [`crate::REPORT_MESSAGE_MAX_CHARS`] characters.
-    pub message: String,
-    /// At most [`crate::REPORT_CONTACT_MAX_CHARS`] characters.
-    pub contact: Option<String>,
-}
-
-/// Result of [`crate::Store::submit_report`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SubmitOutcome {
-    pub report_id: i64,
-    /// The report hid the torrent (a CSAM auto-hide).
-    pub hidden: bool,
-    /// The report would have hidden the torrent, but the hourly auto-hide
-    /// budget was used up.
-    pub budget_exhausted: bool,
-}
-
-/// A stored report.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Report {
-    pub id: i64,
-    pub torrent_id: Option<i64>,
-    pub key: AnyKey,
-    pub reason: ReportReason,
-    pub message: String,
-    pub contact: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub status: ReportStatus,
-    pub resolved_at: Option<DateTime<Utc>>,
-    pub resolved_by: Option<String>,
-    pub resolution_note: Option<String>,
-}
-
-impl Report {
-    pub(crate) fn from_row(row: &PgRow) -> Result<Report> {
-        let reason: String = get(row, "reason")?;
-        let status: String = get(row, "status")?;
-        Ok(Report {
-            id: get(row, "id")?,
-            torrent_id: get(row, "torrent_id")?,
-            key: any_key_col(row, "dht_key")?,
-            reason: parse_enum(&reason)?,
-            message: get(row, "message")?,
-            contact: get(row, "contact")?,
-            created_at: get(row, "created_at")?,
-            status: parse_enum(&status)?,
-            resolved_at: get(row, "resolved_at")?,
-            resolved_by: get(row, "resolved_by")?,
-            resolution_note: get(row, "resolution_note")?,
-        })
-    }
-}
-
 /// Pipeline counters for one UTC day.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DailyStats {
@@ -513,7 +407,6 @@ pub struct StoreStats {
     pub pending: u64,
     pub gave_up: u64,
     pub denylisted: u64,
-    pub open_reports: u64,
 }
 
 /// Totals for the public home page, readable by the web user.

@@ -14,13 +14,6 @@ pub mod metric_names {
     pub const RATE_LIMITED: &str = "dc3_rate_limited_total";
     /// Counter: searches refused by the blocked-term policy.
     pub const BLOCKED_QUERIES: &str = "dc3_blocked_queries_total";
-    /// Counter `{reason}`: reports stored.
-    pub const REPORTS: &str = "dc3_reports_total";
-    /// Counter: torrents hidden automatically by a CSAM report.
-    pub const AUTOHIDE: &str = "dc3_autohide_total";
-    /// Counter: CSAM reports that would have hidden a torrent but found the
-    /// hourly budget used up.
-    pub const AUTOHIDE_BUDGET_EXHAUSTED: &str = "dc3_autohide_budget_exhausted_total";
 }
 
 /// Registers help texts for the metrics above with the installed recorder.
@@ -45,16 +38,5 @@ pub fn describe_metrics() {
         BLOCKED_QUERIES,
         Unit::Count,
         "Searches refused because they contain a blocked term"
-    );
-    describe_counter!(REPORTS, Unit::Count, "Reports stored, by reason");
-    describe_counter!(
-        AUTOHIDE,
-        Unit::Count,
-        "Torrents hidden automatically by a CSAM report"
-    );
-    describe_counter!(
-        AUTOHIDE_BUDGET_EXHAUSTED,
-        Unit::Count,
-        "CSAM reports that did not hide a torrent because the hourly budget was used up"
     );
 }

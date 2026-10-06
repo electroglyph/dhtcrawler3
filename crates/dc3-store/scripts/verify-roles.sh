@@ -86,23 +86,16 @@ DO $$
 DECLARE
     r   record;
     bad text := '';
-    fn  constant text := 'public.submit_report(bytea, text, text, text)';
 BEGIN
     FOR r IN
         SELECT * FROM (VALUES
-            -- web: SELECT on three tables, EXECUTE on submit_report, nothing else.
-            ('web may execute submit_report',
-             has_function_privilege('dc3_web', fn, 'EXECUTE'), true),
+            -- web: SELECT on three tables, nothing else.
             ('web may select torrents',
              has_table_privilege('dc3_web', 'public.torrents', 'SELECT'), true),
             ('web may select denylist',
              has_table_privilege('dc3_web', 'public.denylist', 'SELECT'), true),
             ('web may select stats_daily',
              has_table_privilege('dc3_web', 'public.stats_daily', 'SELECT'), true),
-            ('web may insert into reports',
-             has_any_column_privilege('dc3_web', 'public.reports', 'INSERT'), false),
-            ('web may read reports',
-             has_any_column_privilege('dc3_web', 'public.reports', 'SELECT'), false),
             ('web may update torrents',
              has_any_column_privilege('dc3_web', 'public.torrents', 'UPDATE'), false),
             ('web may insert into torrents',
@@ -130,32 +123,18 @@ BEGIN
             ('web may create temp tables',
              has_database_privilege('dc3_web', 'dc3', 'TEMPORARY'), false),
             -- crawler and indexer.
-            ('crawler may execute submit_report',
-             has_function_privilege('dc3_crawler', fn, 'EXECUTE'), false),
             ('crawler may use change_seq',
              has_sequence_privilege('dc3_crawler', 'public.change_seq', 'USAGE'), true),
             ('crawler may delete pending',
              has_table_privilege('dc3_crawler', 'public.pending', 'DELETE'), true),
-            ('crawler may update torrents.hidden_at',
-             has_column_privilege('dc3_crawler', 'public.torrents', 'hidden_at', 'UPDATE'), false),
-            ('crawler may update torrents.reviewed_at',
-             has_column_privilege('dc3_crawler', 'public.torrents', 'reviewed_at', 'UPDATE'), false),
-            ('crawler may insert torrents.hidden_at',
-             has_column_privilege('dc3_crawler', 'public.torrents', 'hidden_at', 'INSERT'), false),
-            ('crawler may insert torrents.reviewed_at',
-             has_column_privilege('dc3_crawler', 'public.torrents', 'reviewed_at', 'INSERT'), false),
             ('crawler has table-wide UPDATE on torrents',
              has_table_privilege('dc3_crawler', 'public.torrents', 'UPDATE'), false),
             ('crawler may update torrents.deleted_at',
              has_column_privilege('dc3_crawler', 'public.torrents', 'deleted_at', 'UPDATE'), true),
             ('crawler may delete torrents',
              has_table_privilege('dc3_crawler', 'public.torrents', 'DELETE'), false),
-            ('crawler may read reports',
-             has_any_column_privilege('dc3_crawler', 'public.reports', 'SELECT'), false),
             ('crawler may read settings',
              has_any_column_privilege('dc3_crawler', 'public.settings', 'SELECT'), false),
-            ('indexer may execute submit_report',
-             has_function_privilege('dc3_indexer', fn, 'EXECUTE'), false),
             ('indexer may read pending',
              has_any_column_privilege('dc3_indexer', 'public.pending', 'SELECT'), false),
             ('indexer may read stats_daily',
@@ -167,18 +146,9 @@ BEGIN
              has_sequence_privilege('dc3_indexer', 'public.change_seq', 'SELECT'), true),
             ('indexer may use change_seq',
              has_sequence_privilege('dc3_indexer', 'public.change_seq', 'USAGE'), false),
-            -- The function itself.
-            ('PUBLIC may execute submit_report',
-             has_function_privilege('public', fn, 'EXECUTE'), false),
+            -- Functions.
             ('PUBLIC may execute dc3_key_denied',
-             has_function_privilege('public', 'public.dc3_key_denied(bytea, bytea, bytea)', 'EXECUTE'), false),
-            ('submit_report is owned by dc3_owner',
-             (SELECT pg_get_userbyid(proowner) = 'dc3_owner' FROM pg_proc WHERE oid = fn::regprocedure), true),
-            ('submit_report is SECURITY DEFINER',
-             (SELECT prosecdef FROM pg_proc WHERE oid = fn::regprocedure), true),
-            ('submit_report pins search_path',
-             (SELECT proconfig = ARRAY['search_path=pg_catalog, public, pg_temp']
-                FROM pg_proc WHERE oid = fn::regprocedure), true)
+             has_function_privilege('public', 'public.dc3_key_denied(bytea, bytea, bytea)', 'EXECUTE'), false)
         ) AS v(what, actual, expected)
     LOOP
         IF r.actual IS DISTINCT FROM r.expected THEN

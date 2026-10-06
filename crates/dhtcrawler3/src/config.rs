@@ -73,8 +73,6 @@ pub const MAX_DMCA_AGENT_CHARS: usize = 2000;
 pub const MAX_BASE_URL_CHARS: usize = 2048;
 /// Most entries in `web.trusted_proxies`.
 pub const MAX_TRUSTED_PROXIES: usize = 1024;
-/// Largest `web.autohide_per_hour` (the database accepts nine digits).
-pub const MAX_AUTOHIDE_PER_HOUR: u32 = dc3_store::MAX_NUMERIC_SETTING;
 /// Name of the DHT state file inside `crawl.state_dir`.
 pub const DHT_STATE_FILE: &str = "dht-state.json";
 /// Replaces a password when a URL is printed.
@@ -296,8 +294,6 @@ pub struct WebSettings {
     pub hsts: bool,
     /// CIDR networks (or single addresses) whose `X-Forwarded-For` is trusted.
     pub trusted_proxies: Vec<String>,
-    /// Written to the `settings` table by `migrate`.
-    pub autohide_per_hour: u32,
 }
 
 impl Default for WebSettings {
@@ -310,7 +306,6 @@ impl Default for WebSettings {
             dmca_agent: String::new(),
             hsts: false,
             trusted_proxies: Vec::new(),
-            autohide_per_hour: dc3_store::DEFAULT_AUTOHIDE_PER_HOUR,
         }
     }
 }
@@ -899,12 +894,6 @@ impl Config {
             )));
         }
         self.trusted_proxies()?;
-        check_range(
-            "web.autohide_per_hour",
-            w.autohide_per_hour,
-            0,
-            MAX_AUTOHIDE_PER_HOUR,
-        )?;
         Ok(())
     }
 
@@ -1481,7 +1470,6 @@ mod tests {
             ("DC3_WEB__SITE_NAME", ""),
             ("DC3_WEB__CONTACT_EMAIL", "a b@c"),
             ("DC3_WEB__TRUSTED_PROXIES", "not-a-net"),
-            ("DC3_WEB__AUTOHIDE_PER_HOUR", "1000000000"),
             ("DC3_METRICS__LISTEN", "127.0.0.1:8080"),
             ("DC3_DATABASE__URL", "mysql://h/db"),
             ("DC3_DATABASE__USER", ""),

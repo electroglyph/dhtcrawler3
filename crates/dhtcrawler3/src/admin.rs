@@ -1,19 +1,15 @@
 //! Admin subcommands (design §13; 04-operations §3). They connect with the
 //! `[database]` credentials, which compose sets to the owner for admin runs.
 //!
-//! Text that came from visitors or torrents (report messages, contacts,
-//! notes) is sanitised before it is printed, so it cannot carry terminal
-//! control sequences.
+//! Text that came from torrents (notes) is sanitised before it is printed,
+//! so it cannot carry terminal control sequences.
 
 use std::io::Write;
 
 use dc3_core::AnyKey;
 use dc3_core::text::sanitize_display;
 use dc3_policy::TermMatcher;
-use dc3_store::{
-    DenyOutcome, DenyReason, MAX_FEED_PAGE, ReportAction, ReportReason, ReportStatus,
-    SETTING_AUTOHIDE_PER_HOUR, Store, StoreError,
-};
+use dc3_store::{DenyOutcome, DenyReason, MAX_FEED_PAGE, Store, StoreError};
 
 use crate::config::{Config, DbRole};
 
@@ -65,22 +61,11 @@ fn clean(text: &str) -> String {
     sanitize_display(text, LIST_TEXT_CHARS)
 }
 
-/// `migrate`: applies the migrations and stores `web.autohide_per_hour`.
-pub async fn migrate(
-    store: &Store,
-    autohide_per_hour: u32,
-    out: Out<'_>,
-) -> Result<(), AdminError> {
+/// `migrate`: applies the migrations.
+pub async fn migrate(store: &Store, out: Out<'_>) -> Result<(), AdminError> {
     store.migrate().await?;
-    let changed = store
-        .set_setting(SETTING_AUTOHIDE_PER_HOUR, &autohide_per_hour.to_string())
-        .await?;
-    tracing::info!(autohide_per_hour, changed, "database migrated");
-    writeln!(
-        out,
-        "migrations applied; {SETTING_AUTOHIDE_PER_HOUR} = {autohide_per_hour}{}",
-        if changed { " (updated)" } else { "" }
-    )?;
+    tracing::info!("database migrated");
+    writeln!(out, "migrations applied")?;
     Ok(())
 }
 
@@ -152,97 +137,6 @@ fn plural_y(n: usize) -> &'static str {
     if n == 1 { "y" } else { "ies" }
 }
 
-/// `reports list`.
-pub async fn reports_list(
-    store: &Store,
-    status: Option<ReportStatus>,
-    limit: i64,
-    out: Out<'_>,
-) -> Result<(), AdminError> {
-    let reports = store.list_reports(status, limit).await?;
-    for r in &reports {
-        writeln!(
-            out,
-            "#{} {} {} {} key={} torrent={}",
-            r.id,
-            r.created_at.format("%Y-%m-%d %H:%M:%S"),
-            r.status,
-            r.reason,
-            key_hex(&r.key),
-            r.torrent_id
-                .map_or_else(|| "-".to_owned(), |id| id.to_string())
-        )?;
-        if !r.message.is_empty() {
-            writeln!(out, "    message: {}", clean(&r.message))?;
-        }
-        if let Some(contact) = r.contact.as_deref().filter(|c| !c.is_empty()) {
-            writeln!(out, "    contact: {}", clean(contact))?;
-        }
-        if let Some(at) = r.resolved_at {
-            writeln!(
-                out,
-                "    resolved {} by {}{}",
-                at.format("%Y-%m-%d %H:%M:%S"),
-                clean(r.resolved_by.as_deref().unwrap_or("?")),
-                r.resolution_note
-                    .as_deref()
-                    .map(|n| format!(": {}", clean(n)))
-                    .unwrap_or_default()
-            )?;
-        }
-    }
-    writeln!(out, "{} report(s)", reports.len())?;
-    Ok(())
-}
-
-/// What `reports resolve` does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Resolution {
-    /// Deny the key; without a reason, one is derived from the report.
-    Deny(Option<DenyReason>),
-    Dismiss,
-}
-
-/// The denial reason that fits a report reason.
-pub fn deny_reason_for(report: ReportReason) -> DenyReason {
-    match report {
-        ReportReason::Csam => DenyReason::Csam,
-        ReportReason::Copyright => DenyReason::Dmca,
-        ReportReason::Malware => DenyReason::Abuse,
-        ReportReason::Other => DenyReason::Other,
-    }
-}
-
-/// `reports resolve`.
-pub async fn reports_resolve(
-    store: &Store,
-    id: i64,
-    resolution: Resolution,
-    note: Option<&str>,
-    out: Out<'_>,
-) -> Result<(), AdminError> {
-    let report = store
-        .get_report(id)
-        .await?
-        .ok_or_else(|| AdminError::Refused(format!("report #{id} does not exist")))?;
-    let action = match resolution {
-        Resolution::Dismiss => ReportAction::Dismiss,
-        Resolution::Deny(reason) => {
-            ReportAction::Deny(reason.unwrap_or_else(|| deny_reason_for(report.reason)))
-        }
-    };
-    store.resolve_report(id, action, note, ADMIN_ACTOR).await?;
-    match action {
-        ReportAction::Dismiss => writeln!(out, "report #{id} dismissed")?,
-        ReportAction::Deny(reason) => writeln!(
-            out,
-            "report #{id} actioned: {} denied ({reason})",
-            key_hex(&report.key)
-        )?,
-    }
-    Ok(())
-}
-
 /// Counts from `policy rescan`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RescanSummary {
@@ -309,7 +203,6 @@ pub async fn stats(store: &Store, out: Out<'_>) -> Result<(), AdminError> {
     writeln!(out, "pending       {}", s.pending)?;
     writeln!(out, "gave up       {}", s.gave_up)?;
     writeln!(out, "denylisted    {}", s.denylisted)?;
-    writeln!(out, "open reports  {}", s.open_reports)?;
     writeln!(out)?;
     writeln!(
         out,
@@ -392,14 +285,6 @@ mod tests {
         assert_eq!(key_bytes(&v2).len(), 32);
         assert!(parse_key("xyz").is_err());
         assert!(parse_key(&"a".repeat(41)).is_err());
-    }
-
-    #[test]
-    fn report_reasons_map_to_denials() {
-        assert_eq!(deny_reason_for(ReportReason::Csam), DenyReason::Csam);
-        assert_eq!(deny_reason_for(ReportReason::Copyright), DenyReason::Dmca);
-        assert_eq!(deny_reason_for(ReportReason::Malware), DenyReason::Abuse);
-        assert_eq!(deny_reason_for(ReportReason::Other), DenyReason::Other);
     }
 
     #[test]

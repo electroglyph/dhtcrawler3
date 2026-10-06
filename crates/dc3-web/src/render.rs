@@ -15,7 +15,7 @@ pub(crate) const JSON: HeaderValue = HeaderValue::from_static("application/json"
 pub(crate) const TEXT: HeaderValue = HeaderValue::from_static("text/plain; charset=utf-8");
 pub(crate) const CSS: HeaderValue = HeaderValue::from_static("text/css; charset=utf-8");
 
-/// Dynamic responses, report pages and form posts.
+/// Dynamic responses and form posts.
 pub(crate) const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 /// Information pages, robots.txt, security.txt and the unhashed stylesheet.
 pub(crate) const STATIC_PAGE_CACHE: HeaderValue = HeaderValue::from_static("public, max-age=300");

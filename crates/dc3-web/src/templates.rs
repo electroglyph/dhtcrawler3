@@ -94,7 +94,6 @@ pub(crate) struct TorrentView {
     pub scraped: Option<String>,
     pub scraped_iso: Option<String>,
     pub magnet: Option<String>,
-    pub report_href: String,
 }
 
 /// One row of a torrent's file list.
@@ -111,35 +110,6 @@ pub(crate) struct TorrentPage<'a> {
     pub t: TorrentView,
     pub files: Vec<FileView>,
     pub files_note: Option<String>,
-}
-
-/// A report reason radio button.
-pub(crate) struct ReasonChoice {
-    pub value: &'static str,
-    pub label: &'static str,
-    pub checked: bool,
-}
-
-#[derive(Template)]
-#[template(path = "report.html")]
-pub(crate) struct ReportPage<'a> {
-    pub page: PageMeta<'a>,
-    pub key: String,
-    pub action: String,
-    pub torrent_href: String,
-    pub reasons: Vec<ReasonChoice>,
-    pub message: &'a str,
-    pub contact: &'a str,
-    pub error: Option<&'a str>,
-    pub message_max: usize,
-    pub contact_max: usize,
-}
-
-#[derive(Template)]
-#[template(path = "report_done.html")]
-pub(crate) struct ReportDonePage<'a> {
-    pub page: PageMeta<'a>,
-    pub csam: bool,
 }
 
 #[derive(Template)]
