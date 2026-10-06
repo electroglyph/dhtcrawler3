@@ -20,6 +20,21 @@ impl OwnedValue {
     pub fn dict() -> BTreeMap<Vec<u8>, OwnedValue> {
         BTreeMap::new()
     }
+
+    /// Tears down a (possibly deeply nested) `OwnedValue` iteratively.
+    ///
+    /// The compiler-generated `Drop` recurses; use this for values built
+    /// with large depths instead of plain `drop`.
+    pub fn drop_deep(value: OwnedValue) {
+        let mut stack = vec![value];
+        while let Some(v) = stack.pop() {
+            match v {
+                OwnedValue::List(items) => stack.extend(items),
+                OwnedValue::Dict(map) => stack.extend(map.into_values()),
+                OwnedValue::Bytes(_) | OwnedValue::Int(_) => {}
+            }
+        }
+    }
 }
 
 impl From<i64> for OwnedValue {

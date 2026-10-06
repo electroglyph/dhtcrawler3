@@ -5,8 +5,11 @@
 //! `docs/01-first-principles.md`):
 //!
 //! 1. **It cannot crash.** Decoding is iterative with an explicit stack, so
-//!    nesting depth can never exhaust the thread stack, and every limit in
-//!    [`Limits`] is checked before memory is committed.
+//!    nesting depth can never exhaust the thread stack during decoding, and
+//!    every limit in [`Limits`] is checked before memory is committed.
+//!    `Value`/`OwnedValue` drop/clone/`to_owned_value` recurse; keep
+//!    `max_depth` small or use the iterative [`Value::drop_deep`] /
+//!    [`OwnedValue::drop_deep`] / [`Value::to_owned_value`] helpers.
 //! 2. **It is strict where strictness matters.** Leading zeros, `-0`, empty
 //!    integers, integers outside `i64`, non-string keys, duplicate keys and
 //!    trailing bytes are errors.
@@ -138,17 +141,75 @@ impl<'a> Value<'a> {
     }
 
     /// Copies the value into an owned tree.
+    ///
+    /// Iterative: uses an explicit heap work-stack, so arbitrarily deep
+    /// values cannot overflow the thread stack (unlike the previous
+    /// recursive implementation).
     pub fn to_owned_value(&self) -> OwnedValue {
-        match self {
-            Value::Bytes(b) => OwnedValue::Bytes(b.to_vec()),
-            Value::Int(i) => OwnedValue::Int(*i),
-            Value::List(l) => OwnedValue::List(l.iter().map(Value::to_owned_value).collect()),
-            Value::Dict(d) => OwnedValue::Dict(
-                d.entries
-                    .iter()
-                    .map(|e| (e.key.to_vec(), e.value.to_owned_value()))
-                    .collect::<BTreeMap<_, _>>(),
-            ),
+        enum Work<'x> {
+            Visit(&'x Value<'x>),
+            PushKey(Vec<u8>),
+            CollectList(usize),
+            CollectDict(usize),
+        }
+        let mut work = vec![Work::Visit(self)];
+        let mut results: Vec<OwnedValue> = Vec::new();
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        while let Some(task) = work.pop() {
+            match task {
+                Work::Visit(v) => match v {
+                    Value::Bytes(b) => results.push(OwnedValue::Bytes(b.to_vec())),
+                    Value::Int(i) => results.push(OwnedValue::Int(*i)),
+                    Value::List(items) => {
+                        work.push(Work::CollectList(items.len()));
+                        for child in items.iter().rev() {
+                            work.push(Work::Visit(child));
+                        }
+                    }
+                    Value::Dict(d) => {
+                        work.push(Work::CollectDict(d.entries.len()));
+                        for e in d.entries.iter().rev() {
+                            work.push(Work::Visit(&e.value));
+                            work.push(Work::PushKey(e.key.to_vec()));
+                        }
+                    }
+                },
+                Work::PushKey(k) => keys.push(k),
+                Work::CollectList(n) => {
+                    let start = results.len().saturating_sub(n);
+                    let items: Vec<OwnedValue> = results.drain(start..).collect();
+                    results.push(OwnedValue::List(items));
+                }
+                Work::CollectDict(n) => {
+                    let vstart = results.len().saturating_sub(n);
+                    let kstart = keys.len().saturating_sub(n);
+                    let vals: Vec<OwnedValue> = results.drain(vstart..).collect();
+                    let ks: Vec<Vec<u8>> = keys.drain(kstart..).collect();
+                    let mut map = BTreeMap::new();
+                    for (k, v) in ks.into_iter().zip(vals) {
+                        map.insert(k, v);
+                    }
+                    results.push(OwnedValue::Dict(map));
+                }
+            }
+        }
+        results.pop().expect("to_owned_value produced no value")
+    }
+
+    /// Tears down a (possibly deeply nested) `Value` iteratively.
+    ///
+    /// The compiler-generated `Drop` for `Value::List`/`Value::Dict`
+    /// recurses; dropping a value decoded with a large `max_depth` via
+    /// plain `drop` can overflow the thread stack. This helper moves
+    /// children onto an explicit heap stack instead.
+    pub fn drop_deep(value: Value<'a>) {
+        let mut stack = vec![value];
+        while let Some(v) = stack.pop() {
+            match v {
+                Value::List(items) => stack.extend(items),
+                Value::Dict(d) => stack.extend(d.entries.into_iter().map(|e| e.value)),
+                Value::Bytes(_) | Value::Int(_) => {}
+            }
         }
     }
 }

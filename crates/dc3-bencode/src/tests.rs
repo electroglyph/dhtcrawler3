@@ -202,6 +202,59 @@ fn item_limit() {
 }
 
 #[test]
+fn regression_f01_to_owned_value_is_iterative() {
+    // F-01: to_owned_value on a deep value must not overflow the stack.
+    // Build depth-5000 iteratively via decode, convert on a small stack.
+    let depth = 5000;
+    let mut raw = vec![b'l'; depth];
+    raw.extend(std::iter::repeat_n(b'e', depth));
+    let limits = Limits {
+        max_depth: depth + 10,
+        max_items: usize::MAX / 2,
+        max_string_len: 16,
+    };
+    let raw: &'static [u8] = Box::leak(raw.into_boxed_slice());
+    let v = decode(raw, &limits).unwrap();
+    let owned = std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(move || v.to_owned_value())
+        .unwrap()
+        .join()
+        .unwrap();
+    OwnedValue::drop_deep(owned);
+}
+
+#[test]
+fn regression_f01_drop_deep_handles_dicts() {
+    // F-01: drop_deep must tear down nested dicts iteratively too
+    // (the old test helper only handled lists).
+    let depth = 1000;
+    let mut raw = Vec::new();
+    for _ in 0..depth {
+        raw.extend_from_slice(b"d1:a");
+    }
+    raw.push(b'i');
+    raw.push(b'1');
+    raw.push(b'e');
+    for _ in 0..depth {
+        raw.push(b'e');
+    }
+    let limits = Limits {
+        max_depth: depth + 10,
+        max_items: usize::MAX / 2,
+        max_string_len: 16,
+    };
+    let raw: &'static [u8] = Box::leak(raw.into_boxed_slice());
+    let v = decode(raw, &limits).unwrap();
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(move || Value::drop_deep(v))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn encoder_is_canonical() {
     let mut m = OwnedValue::dict();
     m.insert(b"z".to_vec(), OwnedValue::Int(-1));
