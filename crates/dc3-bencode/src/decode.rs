@@ -60,11 +60,17 @@ impl<'a> Decoder<'a> {
 
     fn advance(&mut self, n: usize) {
         // `n` is only ever a length already checked against `input.len()`.
-        self.pos = self.pos.saturating_add(n);
+        self.pos = self
+            .pos
+            .checked_add(n)
+            .expect("decoder position overflow");
     }
 
     fn count_item(&mut self) -> Result<(), Error> {
-        self.items = self.items.saturating_add(1);
+        self.items = self.items.checked_add(1).ok_or(Error {
+            kind: ErrorKind::TooManyItems,
+            pos: self.pos,
+        })?;
         if self.items > self.limits.max_items {
             return self.err(ErrorKind::TooManyItems);
         }
@@ -186,7 +192,11 @@ impl<'a> Decoder<'a> {
             }
             Some((Frame::Dict { builder, key }, _)) => match key.take() {
                 Some((k, value_start)) => {
-                    let raw = self.input.get(value_start..self.pos).unwrap_or_default();
+                    let raw =
+                        self.input.get(value_start..self.pos).ok_or(Error {
+                            kind: ErrorKind::UnexpectedEof,
+                            pos: start,
+                        })?;
                     builder.push(k, value, raw);
                     Ok(None)
                 }

@@ -288,6 +288,21 @@ fn regression_f03_length_digit_overflow_is_string_too_long() {
 }
 
 #[test]
+fn regression_f04_raw_spans_never_default_to_empty() {
+    // F-04: dict value raw spans must be the exact input slice; a
+    // fallback to b"" would corrupt infohash-style hashing.
+    let input = b"d4:infod4:name1:ae5:outeri1e1:x1:ye";
+    let v = decode(input, &L).unwrap();
+    let d = v.as_dict().unwrap();
+    assert_eq!(d.raw_value(b"info"), Some(&b"d4:name1:ae"[..]));
+    assert_eq!(d.raw_value(b"outer"), Some(&b"i1e"[..]));
+    assert_eq!(d.raw_value(b"x"), Some(&b"1:y"[..]));
+    assert!(!d.raw_value(b"info").unwrap().is_empty());
+    let info = d.get_dict(b"info").unwrap();
+    assert_eq!(info.raw_value(b"name"), Some(&b"1:a"[..]));
+}
+
+#[test]
 fn encoder_is_canonical() {
     let mut m = OwnedValue::dict();
     m.insert(b"z".to_vec(), OwnedValue::Int(-1));
