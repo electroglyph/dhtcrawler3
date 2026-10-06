@@ -370,19 +370,19 @@ fn decode_response(top: &Dict<'_>) -> Option<Response> {
 }
 
 /// Peer values: one compact endpoint per string. A single string holding
-/// several concatenated IPv4 endpoints (old Mainline format) is also accepted,
-/// but only when its length is unambiguous: a multiple of 6 that is not also
-/// a multiple of 18. A length that is a multiple of 18 could equally be
-/// concatenated 18-byte IPv6 endpoints, which no specification defines; those
-/// fall through to the per-element path (which drops the string) rather than
-/// fabricating IPv4 peers out of IPv6 bytes.
+/// several concatenated IPv4 endpoints (old Mainline format) is also accepted
+/// whenever its length is a multiple of 6 (other than one endpoint exactly).
+/// Lengths that are also a multiple of 18 could in theory be concatenated
+/// 18-byte IPv6 endpoints, but no specification defines such a form for
+/// `values`, while the Mainline concatenated-V4 form is observed on the
+/// wire — so the V4 reading wins rather than dropping all peers. A single
+/// 18-byte string still decodes as one IPv6 peer via the per-element path.
 fn decode_values(list: &[Value<'_>]) -> Vec<SocketAddr> {
     if let [only] = list
         && let Some(b) = only.as_bytes()
         && b.len() != compact::COMPACT_PEER_V4_LEN
         && b.len() != compact::COMPACT_PEER_V6_LEN
         && b.len().is_multiple_of(compact::COMPACT_PEER_V4_LEN)
-        && !b.len().is_multiple_of(compact::COMPACT_PEER_V6_LEN)
     {
         let (chunks, _) = b.as_chunks::<{ compact::COMPACT_PEER_V4_LEN }>();
         return chunks
@@ -1050,6 +1050,27 @@ mod tests {
             panic!("not a response")
         };
         assert_eq!(r.values, Some(vec![]));
+        // A concatenated-V4 string whose length is also a multiple of 18
+        // still reads as V4 peers: no spec defines concatenated V6 `values`.
+        let concat36 = b"\x01\x02\x03\x04\x00\x05\x06\x07\x08\x09\x00\x0a".repeat(3);
+        let mut raw = b"d1:rd2:id20:mnopqrstuvwxyz1234566:valuesl36:".to_vec();
+        raw.extend_from_slice(&concat36);
+        raw.extend_from_slice(b"ee1:t2:aa1:y1:re");
+        let m = decode(&raw).unwrap();
+        let Body::Response(r) = m.body else {
+            panic!("not a response")
+        };
+        assert_eq!(
+            r.values,
+            Some(vec![
+                sa("1.2.3.4:5"),
+                sa("6.7.8.9:10"),
+                sa("1.2.3.4:5"),
+                sa("6.7.8.9:10"),
+                sa("1.2.3.4:5"),
+                sa("6.7.8.9:10"),
+            ])
+        );
     }
 
     #[test]
