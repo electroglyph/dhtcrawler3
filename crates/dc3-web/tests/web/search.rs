@@ -81,7 +81,7 @@ async fn results_follow_the_index_order_and_skip_missing_hits() {
     );
     assert!(
         r.body
-            .contains(r#"<a href="/search?q=ubuntu&#38;p=1&#38;sort=newest">Newest</a>"#)
+            .contains(r#"<a href="/search?q=ubuntu&#38;p=1&#38;sort=newest&#38;per_page=20">Newest</a>"#)
     );
     // The query is shown in the heading and the search box.
     assert!(r.body.contains("Results for <bdi>ubuntu</bdi>"));
@@ -125,7 +125,7 @@ async fn pagination_links_are_percent_encoded() {
     assert_eq!(result_names(&r.body)[0], "common item 45");
     assert!(r.body.contains(r#"<ol class="results" start="1">"#));
     assert!(r.body.contains(&format!(
-        r#"<a rel="next" href="/search?q={encoded}&#38;p=2&#38;sort=relevance">"#
+        r#"<a rel="next" href="/search?q={encoded}&#38;p=2&#38;sort=relevance&#38;per_page=20">"#
     )));
     assert!(!r.body.contains("rel=\"prev\""));
     // No href carries the raw query.
@@ -143,7 +143,7 @@ async fn pagination_links_are_percent_encoded() {
     assert_eq!(result_names(&r.body).len(), 5);
     assert!(r.body.contains(r#"<ol class="results" start="41">"#));
     assert!(r.body.contains(&format!(
-        r#"<a rel="prev" href="/search?q={encoded}&#38;p=2&#38;sort=relevance">"#
+        r#"<a rel="prev" href="/search?q={encoded}&#38;p=2&#38;sort=relevance&#38;per_page=20">"#
     )));
     assert!(!r.body.contains("rel=\"next\""));
     assert!(r.body.contains("<span>Page 3</span>"));
