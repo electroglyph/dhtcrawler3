@@ -370,16 +370,20 @@ fn decode_response(top: &Dict<'_>) -> Option<Response> {
 }
 
 /// Peer values: one compact endpoint per string. A single string holding
-/// several concatenated IPv4 endpoints (old Mainline format) is also accepted.
+/// several concatenated IPv4 endpoints (old Mainline format) is also accepted,
+/// but only when its length is unambiguous: a multiple of 6 that is not also
+/// a multiple of 18. A length that is a multiple of 18 could equally be
+/// concatenated 18-byte IPv6 endpoints, which no specification defines; those
+/// fall through to the per-element path (which drops the string) rather than
+/// fabricating IPv4 peers out of IPv6 bytes.
 fn decode_values(list: &[Value<'_>]) -> Vec<SocketAddr> {
     if let [only] = list
         && let Some(b) = only.as_bytes()
         && b.len() != compact::COMPACT_PEER_V4_LEN
         && b.len() != compact::COMPACT_PEER_V6_LEN
+        && b.len().is_multiple_of(compact::COMPACT_PEER_V4_LEN)
+        && !b.len().is_multiple_of(compact::COMPACT_PEER_V6_LEN)
     {
-        if !b.len().is_multiple_of(compact::COMPACT_PEER_V4_LEN) {
-            return Vec::new();
-        }
         let (chunks, _) = b.as_chunks::<{ compact::COMPACT_PEER_V4_LEN }>();
         return chunks
             .iter()
