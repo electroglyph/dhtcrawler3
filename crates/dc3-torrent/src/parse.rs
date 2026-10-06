@@ -198,7 +198,11 @@ impl<'v> Collector<'v> {
 
     /// Shows `text` to the visitor.
     fn show(&mut self, text: &str) {
-        self.shown = self.shown.saturating_add(text.chars().count());
+        self.show_counted(text, text.chars().count());
+    }
+
+    fn show_counted(&mut self, text: &str, chars: usize) {
+        self.shown = self.shown.saturating_add(chars);
         (self.visit)(text);
     }
 
@@ -212,7 +216,7 @@ impl<'v> Collector<'v> {
             self.over_budget = true;
             return false;
         }
-        self.show(path);
+        self.show_counted(path, chars);
         true
     }
 
@@ -275,7 +279,8 @@ struct CappedPath {
 }
 
 impl CappedPath {
-    /// Appends a sanitised component.
+    /// Appends a sanitised component in one pass: walks at most `room`
+    /// characters and counts while walking, instead of `nth(room)` + recount.
     fn push(&mut self, comp: &str) {
         if self.chars >= PATH_MAX_CHARS {
             self.cut = true;
@@ -286,14 +291,19 @@ impl CappedPath {
             self.chars = self.chars.saturating_add(1);
         }
         let room = PATH_MAX_CHARS.saturating_sub(self.chars);
-        let taken = comp
-            .char_indices()
-            .nth(room)
-            .and_then(|(at, _)| comp.get(..at))
-            .unwrap_or(comp);
+        let mut end = comp.len();
+        let mut count = 0usize;
+        for (at, _) in comp.char_indices() {
+            if count >= room {
+                end = at;
+                break;
+            }
+            count = count.saturating_add(1);
+        }
+        let taken = comp.get(..end).unwrap_or(comp);
         self.cut |= taken.len() < comp.len();
         self.text.push_str(taken);
-        self.chars = self.chars.saturating_add(taken.chars().count());
+        self.chars = self.chars.saturating_add(count);
     }
 
     /// The finished path, without a trailing separator left by the cap;
@@ -305,8 +315,20 @@ impl CappedPath {
     }
 }
 
-fn raw_bytes_list<'a>(d: &Dict<'a>, key: &[u8]) -> Option<Vec<&'a [u8]>> {
-    d.get_list(key)?.iter().map(Value::as_bytes).collect()
+/// Decodes one path list, or `None` when the key is missing or any element
+/// is not a byte string. Decodes inline so the intermediate `Vec<&[u8]>`
+/// (`raw_bytes_list`) is gone: one allocation per list, not two.
+fn decoded_list<'a>(
+    d: &'a Dict<'a>,
+    key: &[u8],
+    enc: Option<&'static Encoding>,
+) -> Option<Vec<Cow<'a, str>>> {
+    let list = d.get_list(key)?;
+    let mut out = Vec::with_capacity(list.len());
+    for v in list {
+        out.push(decode_text(v.as_bytes()?, enc));
+    }
+    Some(out)
 }
 
 /// Decoded components plus sanitised components for one v1 file, preferring
@@ -314,22 +336,19 @@ fn raw_bytes_list<'a>(d: &Dict<'a>, key: &[u8]) -> Option<Vec<&'a [u8]>> {
 /// sanitises to nothing. When both lists exist with equal length, falls back
 /// per component so one blank `utf-8` entry does not hide a valid `path`
 /// entry.
+///
+/// Each list is decoded at most once and moved (never re-decoded): the old
+/// code re-decoded the legacy list (`leg_dec2`) and decoded the preferred
+/// list again in the counted-but-unlisted fallback (up to 4 list-decodes).
 fn sanitised_path_components<'a>(
     fd: &'a Dict<'a>,
     enc: Option<&'static Encoding>,
 ) -> Result<(Vec<Cow<'a, str>>, Vec<String>), ParseError> {
-    let pref = raw_bytes_list(fd, b"path.utf-8");
-    let leg = raw_bytes_list(fd, b"path");
-    let (pref_raw, leg_raw) = match (&pref, &leg) {
-        (None, None) => return Err(ParseError::InvalidField("path")),
-        _ => (pref, leg),
-    };
-    let pref_dec: Option<Vec<Cow<'a, str>>> = pref_raw.as_ref().map(|list| {
-        list.iter().map(|b| decode_text(b, enc)).collect()
-    });
-    let leg_dec: Option<Vec<Cow<'a, str>>> = leg_raw.as_ref().map(|list| {
-        list.iter().map(|b| decode_text(b, enc)).collect()
-    });
+    let pref_dec = decoded_list(fd, b"path.utf-8", enc);
+    let leg_dec = decoded_list(fd, b"path", enc);
+    if pref_dec.is_none() && leg_dec.is_none() {
+        return Err(ParseError::InvalidField("path"));
+    }
     // Equal-length per-component fallback preserves the most valid entries.
     if let (Some(p), Some(l)) = (&pref_dec, &leg_dec) {
         if p.len() == l.len() {
@@ -359,11 +378,9 @@ fn sanitised_path_components<'a>(
         if !san.is_empty() {
             return Ok((comps, san));
         }
-        // Preferred sanitised to nothing: try legacy with fresh decode.
-        let leg_dec2: Option<Vec<Cow<'a, str>>> = leg_raw.as_ref().map(|list| {
-            list.iter().map(|b| decode_text(b, enc)).collect()
-        });
-        if let Some(comps) = leg_dec2 {
+        // Preferred sanitised to nothing: fall back to the already-decoded
+        // legacy list.
+        if let Some(comps) = leg_dec {
             let san: Vec<String> = comps
                 .iter()
                 .filter_map(|c| sanitize_path_component(c))
@@ -372,24 +389,20 @@ fn sanitised_path_components<'a>(
                 return Ok((comps, san));
             }
         }
-    } else if let Some(comps) = leg_dec {
-        let san: Vec<String> = comps
-            .iter()
-            .filter_map(|c| sanitize_path_component(c))
-            .collect();
-        if !san.is_empty() {
-            return Ok((comps, san));
-        }
+        // Both sanitise to nothing: the preferred decoded list is counted
+        // but unlisted, matching existing unlistable handling.
+        return Ok((comps, Vec::new()));
     }
-    // Both sanitise to nothing but at least one list exists: return the
-    // preferred raw (or legacy) with an empty sanitised list so the entry
-    // is counted but unlisted, matching existing unlistable handling.
-    let comps = pref_raw
-        .map(|list| list.into_iter().map(|b| decode_text(b, enc)).collect())
-        .or_else(|| {
-            leg_raw.map(|list| list.into_iter().map(|b| decode_text(b, enc)).collect())
-        })
-        .unwrap_or_default();
+    // Only the legacy list exists (preferred was missing).
+    let comps = leg_dec.unwrap_or_default();
+    let san: Vec<String> = comps
+        .iter()
+        .filter_map(|c| sanitize_path_component(c))
+        .collect();
+    if !san.is_empty() {
+        return Ok((comps, san));
+    }
+    // Legacy sanitised to nothing: counted but unlisted.
     Ok((comps, Vec::new()))
 }
 
@@ -406,14 +419,15 @@ fn v1_files(
             let fd = item.as_dict().ok_or(ParseError::InvalidField("files"))?;
             let length = file_length(fd)?;
             let (components, sanitised) = sanitised_path_components(fd, enc)?;
+            let attr = fd.get_bytes(b"attr");
             let padding = is_padding(
                 components.first().map(AsRef::as_ref),
                 components.last().map(AsRef::as_ref),
-                fd.get_bytes(b"attr"),
+                attr,
             ) || is_padding(
                 sanitised.first().map(String::as_str),
                 sanitised.last().map(String::as_str),
-                fd.get_bytes(b"attr"),
+                attr,
             );
             // Past the budget the joined path is not needed: parsing fails.
             let mut path = None;
@@ -440,11 +454,9 @@ fn v1_files(
     } else {
         let length = file_length(dict)?;
         let comp = sanitize_path_component(name);
-        let padding = is_padding(
-            comp.as_deref(),
-            comp.as_deref(),
-            dict.get_bytes(b"attr"),
-        ) || is_padding(Some(name), Some(name), dict.get_bytes(b"attr"));
+        let attr = dict.get_bytes(b"attr");
+        let padding = is_padding(comp.as_deref(), comp.as_deref(), attr)
+            || is_padding(Some(name), Some(name), attr);
         if let Some(p) = &comp {
             if p != name && !files.show_joined(p) {
                 files.show(p);
