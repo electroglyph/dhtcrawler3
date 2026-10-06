@@ -275,6 +275,28 @@ impl QuerySpacing {
         self.next_free.put(key, after(send_at, self.spacing));
         Some(wait)
     }
+
+    /// Undoes one [`reserve`](Self::reserve): moves the send slot for `to`
+    /// earlier by one spacing, dropping it when it is due. Call it when a
+    /// reserved query never leaves the socket, so a failed attempt does not
+    /// throttle the next query to the same address.
+    pub(crate) fn release(&mut self, to: &SocketAddr, now: Instant) {
+        if self.spacing.is_zero() {
+            return;
+        }
+        let key = self.policy.host_key(to);
+        let Some(free_at) = self.next_free.get(&key).copied() else {
+            return;
+        };
+        match free_at.checked_sub(self.spacing) {
+            Some(prev) if prev > now => {
+                self.next_free.put(key, prev);
+            }
+            _ => {
+                self.next_free.pop(&key);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -589,6 +611,24 @@ mod tests {
             Some(Duration::ZERO)
         );
         assert_eq!(t.reserve(&sa("127.0.0.1:1"), t0, Duration::ZERO), None);
+    }
+
+    #[test]
+    fn spacing_release_undoes_reserve() {
+        let t0 = Instant::now();
+        let second = Duration::from_secs(1);
+        let mut s = QuerySpacing::new(second, PRODUCTION);
+        let a = sa("8.8.8.8:1");
+        assert_eq!(s.reserve(&a, t0, second * 4), Some(Duration::ZERO));
+        // Without a release the next query waits.
+        assert_eq!(s.reserve(&a, t0, second * 4), Some(second));
+        // Undo one reservation: back to a single wait.
+        s.release(&a, t0);
+        assert_eq!(s.reserve(&a, t0, second * 4), Some(second));
+        s.release(&a, t0);
+        s.release(&a, t0);
+        // Fully released: no wait again.
+        assert_eq!(s.reserve(&a, t0, second * 4), Some(Duration::ZERO));
     }
 
     #[test]

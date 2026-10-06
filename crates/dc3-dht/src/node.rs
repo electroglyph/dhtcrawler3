@@ -485,9 +485,11 @@ impl Inner {
             return Err(QueryError::Throttled);
         };
         if !wait.is_zero() && !self.sleep(wait).await {
+            lock(&self.shared).spacing.release(&addr, Instant::now());
             return Err(QueryError::Cancelled);
         }
         if !self.acquire_budget(tuning.max_send_wait).await {
+            lock(&self.shared).spacing.release(&addr, Instant::now());
             if self.cancel.is_cancelled() {
                 return Err(QueryError::Cancelled);
             }
@@ -496,6 +498,8 @@ impl Inner {
         }
         let now = Instant::now();
         if !gate(now) {
+            lock(&self.budget).refund(1);
+            lock(&self.shared).spacing.release(&addr, Instant::now());
             return Err(QueryError::Gated);
         }
 
@@ -514,6 +518,9 @@ impl Inner {
                 },
                 now,
             ) else {
+                drop(st);
+                lock(&self.budget).refund(1);
+                lock(&self.shared).spacing.release(&addr, Instant::now());
                 counters.drop_packet(DropReason::Throttled);
                 return Err(QueryError::Busy);
             };
