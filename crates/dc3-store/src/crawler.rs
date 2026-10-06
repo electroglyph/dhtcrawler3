@@ -660,9 +660,10 @@ async fn observe_chunk(
     Ok(out)
 }
 
-/// The keys and counts of `entries`, as bind arrays.
-fn columns<'a>(entries: impl Iterator<Item = &'a Merged>) -> (Vec<Vec<u8>>, Vec<i64>) {
-    entries.map(|m| (m.key.clone(), m.n)).unzip()
+/// The keys and counts of `entries`, as bind arrays. The keys are borrowed:
+/// each statement needs only a pointer per key, not a cloned heap buffer.
+fn columns<'a>(entries: impl Iterator<Item = &'a Merged>) -> (Vec<&'a [u8]>, Vec<i64>) {
+    entries.map(|m| (m.key.as_slice(), m.n)).unzip()
 }
 
 fn validate_torrent(t: &NewTorrent) -> Result<()> {
