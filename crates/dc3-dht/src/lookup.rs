@@ -263,26 +263,30 @@ impl Lookup {
                 (None, None) => {
                     self.unaware = self.unaware.saturating_add(1);
                 }
-                (sd, pe) => {
+                (Some(sd), Some(pe)) => {
                     self.aware = self.aware.saturating_add(1);
                     // A class the responder had no members of arrives as
-                    // an empty (all-zero) filter estimating to 0; a missing
-                    // half (never sent by our responder) counts the same.
-                    // A response whose own seeds filter estimates nonzero
+                    // an empty (all-zero) filter estimating to 0; a
+                    // response whose own seeds filter estimates nonzero
                     // is one live proof for the early exit (win 2); zeros
                     // and saturated filters prove nothing and never count.
-                    let live = sd
-                        .as_deref()
-                        .and_then(|b| crate::bloom::ScrapeBloom::from_bytes(b))
+                    let live = crate::bloom::ScrapeBloom::from_bytes(&sd[..])
                         .and_then(|f| f.estimate())
                         .is_some_and(|e| e > 0.0);
                     if live {
                         self.live_proofs = self.live_proofs.saturating_add(1);
                     }
-                    self.seed_filters
-                        .push(sd.map(|b| *b).unwrap_or([0u8; crate::bloom::BLOOM_LEN]));
-                    self.peer_filters
-                        .push(pe.map(|b| *b).unwrap_or([0u8; crate::bloom::BLOOM_LEN]));
+                    self.seed_filters.push(*sd);
+                    self.peer_filters.push(*pe);
+                }
+                // One half present without the other: our responder always
+                // sends both or neither, so this is a malformed reply. It
+                // counts as unaware, never aware: an aware count plus a
+                // zero seed filter would turn UNKNOWN (no estimate) into a
+                // zero estimate (dead), letting one malformed reply steer
+                // a swarm toward a tombstone.
+                _ => {
+                    self.unaware = self.unaware.saturating_add(1);
                 }
             }
         }
@@ -777,4 +781,33 @@ mod tests {
         assert_eq!(l.live_proofs, 2);
         assert_eq!(l.aware, 4);
     }
+
+    #[test]
+    fn scrape_half_present_filters_count_as_unaware() {
+        // Our responder sends both filters or neither; a reply with only
+        // one half is malformed and must not become an aware zero estimate.
+        let target = NodeId([0; 20]);
+        let mut l = lookup(target, Kind::Scrape, OwnAddrs::default());
+        for i in 1..=2u8 {
+            l.add(node(i, NodeId([i; 20])));
+        }
+        let batch = l.pick(2);
+        let best = l.best_live();
+        let mut only_sd = reply(NodeId([1; 20]), vec![]);
+        only_sd.bf_sd = Some(Box::new([0u8; crate::bloom::BLOOM_LEN]));
+        only_sd.bf_pe = None;
+        assert!(!l.complete(batch[0].addr, Ok(only_sd), best));
+        let mut only_pe = reply(NodeId([2; 20]), vec![]);
+        only_pe.bf_sd = None;
+        only_pe.bf_pe = Some(Box::new([0u8; crate::bloom::BLOOM_LEN]));
+        assert!(!l.complete(batch[1].addr, Ok(only_pe), best));
+        assert_eq!(l.aware, 0);
+        assert_eq!(l.unaware, 2);
+        let out = l.scrape_outcome();
+        assert!(out.seed_filters.is_empty());
+        assert!(out.peer_filters.is_empty());
+        // No aware response: UNKNOWN, not a zero (dead) estimate.
+        assert_eq!(out.seeders_est(), None);
+    }
+
 }
