@@ -42,6 +42,7 @@ pub fn web_config(cfg: &Config) -> Result<WebConfig, ConfigError> {
         dmca_agent: w.dmca_agent.clone(),
         hsts: w.hsts,
         trusted_proxies: cfg.trusted_proxies()?,
+        seeder_freshness: Duration::from_secs(cfg.crawl.scrape_interval_secs),
     })
 }
 

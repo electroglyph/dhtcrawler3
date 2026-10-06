@@ -7,7 +7,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 
-use super::{Lookup, lookup, parse_key};
+use super::{Lookup, fresh_seeders, lookup, parse_key};
 use crate::Backend;
 use crate::app::{AppState, routes};
 use crate::format::{date, grouped, human_size, rfc3339};
@@ -62,6 +62,7 @@ pub(crate) async fn torrent_page<B: Backend>(
             )
         });
     let dht_key = record.dht_key.to_hex();
+    let seeders = fresh_seeders(&record, st.seeder_freshness);
     let view = TorrentView {
         report_href: format!("{}{dht_key}", routes::REPORT_PREFIX),
         dht_key,
@@ -75,6 +76,9 @@ pub(crate) async fn torrent_page<B: Backend>(
         last_seen: date(record.last_seen_at),
         last_seen_iso: rfc3339(record.last_seen_at),
         seen_count: grouped(record.seen_count),
+        seeders: seeders.map(grouped),
+        scraped: record.last_scraped_at.map(date),
+        scraped_iso: record.last_scraped_at.map(rfc3339),
         magnet: shown.magnet,
         name: shown.name,
     };

@@ -252,6 +252,7 @@ mod tests {
             dmca_agent: String::new(),
             hsts: false,
             trusted_proxies: Vec::new(),
+            seeder_freshness: Duration::from_secs(604800),
         };
         let deps = WebDeps {
             backend: backend.clone(),
@@ -336,6 +337,7 @@ mod tests {
             dmca_agent: String::new(),
             hsts: false,
             trusted_proxies: Vec::new(),
+            seeder_freshness: Duration::from_secs(604800),
         };
         let deps = WebDeps {
             backend: Slow,

@@ -30,7 +30,7 @@ WITH page AS (
       FROM page p
 )
 SELECT t.id, t.change_seq, t.dht_key, t.info_hash_v1, t.info_hash_v2, t.name, x.files_text,
-       t.total_size, t.file_count, t.first_seen_at, t.seen_count, ",
+       t.total_size, t.file_count, t.first_seen_at, t.seen_count, t.last_scraped_at, t.seeders_est, ",
     visible_sql!(),
     " AS visible
   FROM sized s

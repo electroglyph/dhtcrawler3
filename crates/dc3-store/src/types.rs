@@ -181,6 +181,12 @@ pub struct TorrentRecord {
     pub seen_count: u64,
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
+    /// Last BEP 33 scrape (`None` until the first scrape); also the claim
+    /// lease, so it can be newer than the estimate it guards.
+    pub last_scraped_at: Option<DateTime<Utc>>,
+    /// Estimated seeders from the last aware scrape (`None` until one).
+    /// Displayed only while fresh (see the web role); never indexed.
+    pub seeders_est: Option<u64>,
     pub change_seq: i64,
     /// Hidden pending review (a CSAM report).
     pub hidden_at: Option<DateTime<Utc>>,
@@ -199,7 +205,8 @@ macro_rules! torrent_columns_base {
     () => {
         "t.id, t.dht_key, t.info_hash_v1, t.info_hash_v2, t.name, t.total_size, t.file_count, \
          t.files_truncated, t.piece_length, t.seen_count, t.first_seen_at, \
-         t.last_seen_at, t.change_seq, t.hidden_at, t.reviewed_at, t.deleted_at"
+         t.last_seen_at, t.last_scraped_at, t.seeders_est, t.change_seq, t.hidden_at, \
+         t.reviewed_at, t.deleted_at"
     };
 }
 pub(crate) use torrent_columns_base;
@@ -271,6 +278,11 @@ impl TorrentRecord {
             seen_count: to_u64("seen_count", get(row, "seen_count")?)?,
             first_seen_at: get(row, "first_seen_at")?,
             last_seen_at: get(row, "last_seen_at")?,
+            last_scraped_at: get(row, "last_scraped_at")?,
+            seeders_est: {
+                let est: Option<i32> = get(row, "seeders_est")?;
+                est.map(|e| to_u64("seeders_est", i64::from(e))).transpose()?
+            },
             change_seq: get(row, "change_seq")?,
             hidden_at: get(row, "hidden_at")?,
             reviewed_at: get(row, "reviewed_at")?,
@@ -534,6 +546,12 @@ pub struct IndexRow {
     pub file_count: u64,
     pub first_seen_at: DateTime<Utc>,
     pub seen_count: u64,
+    /// Last BEP 33 scrape, if any. Carried for readers that join the feed
+    /// (the indexer itself never scores on it: scrape writes must not bump
+    /// `change_seq`, and reindexing per scrape would churn the index).
+    pub last_scraped_at: Option<DateTime<Utc>>,
+    /// Estimated seeders from the last aware scrape, if any. Same caveat.
+    pub seeders_est: Option<u64>,
     /// False when the row is hidden, tombstoned or any of its keys is
     /// denylisted; the indexer must then delete the document.
     pub visible: bool,
@@ -553,6 +571,11 @@ impl IndexRow {
             file_count: to_u64("file_count", get(row, "file_count")?)?,
             first_seen_at: get(row, "first_seen_at")?,
             seen_count: to_u64("seen_count", get(row, "seen_count")?)?,
+            last_scraped_at: get(row, "last_scraped_at")?,
+            seeders_est: {
+                let est: Option<i32> = get(row, "seeders_est")?;
+                est.map(|e| to_u64("seeders_est", i64::from(e))).transpose()?
+            },
             visible: get(row, "visible")?,
         })
     }

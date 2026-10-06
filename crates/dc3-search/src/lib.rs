@@ -33,8 +33,8 @@ pub use handle::{MIN_WATCH_INTERVAL, SearchHandle};
 pub use index::{
     DEFAULT_WRITER_HEAP_BYTES, FILES_TEXT_MAX_BYTES, Hit, IndexDoc, IndexWriterHandle,
     MAX_CONCURRENT_SEARCHES, NAME_BOOST, POPULARITY_WEIGHT, PREFIX_BOOST, Result, SEARCH_TIMEOUT,
-    SearchError, SearchIndex, SearchResults, field_names, popularity_multiplier, schema,
-    truncate_on_char_boundary,
+    SEEDER_WEIGHT, SearchError, SearchIndex, SearchResults, field_names, popularity_multiplier,
+    schema, seeder_multiplier, truncate_on_char_boundary,
 };
 pub use query::{
     DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, MAX_TOKENS_PER_WORD,

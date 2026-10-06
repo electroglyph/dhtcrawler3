@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
@@ -13,12 +13,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use dc3_search::{
     DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, ParsedQuery, QueryError,
-    SEARCH_TIMEOUT, SearchError, SearchQuery, Sort, parse_query,
+    SEARCH_TIMEOUT, SearchError, SearchQuery, Sort, parse_query, seeder_multiplier,
 };
 use dc3_store::TorrentRecord;
 use serde::Deserialize;
 
-use super::{Detail, Shown, encode_query_value, log_backend_error, show_all, torrent_href};
+use super::{Detail, Shown, encode_query_value, fresh_seeders, log_backend_error, show_all, torrent_href};
 use crate::Backend;
 use crate::app::{AppState, routes};
 use crate::format::{date, grouped, human_size, plural, rfc3339};
@@ -36,11 +36,12 @@ pub(crate) struct SearchParams {
 }
 
 /// Sort orders offered on the results page, with their link text.
-const SORT_CHOICES: [(Sort, &str); 4] = [
+const SORT_CHOICES: [(Sort, &str); 5] = [
     (Sort::Relevance, "Relevance"),
     (Sort::Newest, "Newest"),
     (Sort::Size, "Largest"),
     (Sort::Seen, "Most seen"),
+    (Sort::Seeders, "Most seeders"),
 ];
 
 /// A parameter that is present but unusable.
@@ -55,7 +56,7 @@ impl BadParam {
     pub(crate) fn message(self) -> String {
         match self {
             BadParam::Page => format!("The page number must be between 1 and {MAX_PAGE}."),
-            BadParam::Sort => "The sort order must be relevance, newest, size or seen.".into(),
+            BadParam::Sort => "The sort order must be relevance, newest, size, seen or seeders.".into(),
             BadParam::PerPage => {
                 format!("The page size must be between 1 and {MAX_PER_PAGE}.")
             }
@@ -235,14 +236,62 @@ pub(crate) async fn execute<B: Backend>(
     };
     let mut by_id: HashMap<i64, TorrentRecord> = records.into_iter().map(|r| (r.id, r)).collect();
     let ordered = ids.iter().filter_map(|id| by_id.remove(id)).collect();
-    let Some(torrents) = show_all(ordered, &st.policy, Detail::NameOnly).await else {
+    let Some(mut torrents) = show_all(ordered, &st.policy, Detail::NameOnly).await else {
         tracing::error!("preparing search results failed");
         return Err(Failure::Broken);
     };
+    let scores: HashMap<i64, f32> = results.hits.iter().map(|hit| (hit.id, hit.score)).collect();
+    order_page(&mut torrents, &scores, sort, st.seeder_freshness);
     Ok(Found {
         total: results.total,
         torrents,
     })
+}
+
+/// Re-sorts one hydrated page for the seeder orderings (bep33.md §7).
+///
+/// The index has no seeder field (scrape writes must not churn it), so both
+/// apply web-side, after hydration, to this page only (approximate across
+/// pages):
+///
+/// * `Seeders`: estimate descending, unknown last.
+/// * `Relevance`: each hit's index score times the seeder boost
+///   ([`boosted`]), fresh estimates only.
+/// * Anything else: untouched (the index already ordered it).
+pub(crate) fn order_page(
+    torrents: &mut Vec<(TorrentRecord, Shown)>,
+    scores: &HashMap<i64, f32>,
+    sort: Sort,
+    freshness: Duration,
+) {
+    match sort {
+        Sort::Seeders => {
+            torrents.sort_by(|a, b| {
+                fresh_seeders(&b.0, freshness).cmp(&fresh_seeders(&a.0, freshness))
+            });
+        }
+        Sort::Relevance => {
+            torrents.sort_by(|a, b| {
+                boosted(&b.0, scores.get(&b.0.id), freshness)
+                    .total_cmp(&boosted(&a.0, scores.get(&a.0.id), freshness))
+            });
+        }
+        Sort::Newest | Sort::Size | Sort::Seen => {}
+    }
+}
+
+/// `score` with the web-side seeder boost (bep33.md §7): fresh estimates
+/// multiply by `1 + SEEDER_WEIGHT·log10(1+est)`; anything else is unchanged.
+pub(crate) fn boosted(record: &TorrentRecord, score: Option<&f32>, freshness: Duration) -> f32 {
+    let base = score.copied().unwrap_or(0.0);
+    match fresh_seeders(record, freshness) {
+        Some(est) => {
+            #[allow(clippy::cast_possible_truncation)]
+            let boost = seeder_multiplier(est) as f32;
+            base * boost
+        }
+        None => base,
+    }
 }
 
 /// A short name for an index failure. The message is not logged, so no
@@ -366,7 +415,7 @@ pub(crate) async fn search_page<B: Backend>(
     let rows = found
         .torrents
         .into_iter()
-        .map(|(record, shown)| result_row(&record, shown))
+        .map(|(record, shown)| result_row(&record, shown, st.seeder_freshness))
         .collect();
     let page = SearchPage {
         page: site.page(format!("{q} - search"), q, true),
@@ -383,7 +432,7 @@ pub(crate) async fn search_page<B: Backend>(
     html(StatusCode::OK, &page)
 }
 
-fn result_row(record: &TorrentRecord, shown: Shown) -> ResultRow {
+fn result_row(record: &TorrentRecord, shown: Shown, freshness: Duration) -> ResultRow {
     ResultRow {
         href: torrent_href(record),
         name: shown.name,
@@ -393,6 +442,7 @@ fn result_row(record: &TorrentRecord, shown: Shown) -> ResultRow {
         first_seen: date(record.first_seen_at),
         first_seen_iso: rfc3339(record.first_seen_at),
         seen: plural(record.seen_count, "time", "times"),
+        seeders: fresh_seeders(record, freshness).map(grouped),
         magnet: shown.magnet,
     }
 }
@@ -422,6 +472,7 @@ mod tests {
         assert_eq!(parse_sort(Some("newest")), Ok(Sort::Newest));
         assert_eq!(parse_sort(Some("size")), Ok(Sort::Size));
         assert_eq!(parse_sort(Some("seen")), Ok(Sort::Seen));
+        assert_eq!(parse_sort(Some("seeders")), Ok(Sort::Seeders));
         assert_eq!(parse_sort(Some("NEWEST")), Err(BadParam::Sort));
         assert_eq!(parse_sort(Some("random")), Err(BadParam::Sort));
     }

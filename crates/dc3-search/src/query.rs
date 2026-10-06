@@ -59,6 +59,10 @@ pub enum Sort {
     Size,
     /// Most `seen` first.
     Seen,
+    /// Most estimated seeders first. The index has no seeder field (scrape
+    /// writes must not churn it), so this orders like [`Sort::Seen`] there;
+    /// the web role re-sorts the hydrated page by the estimate.
+    Seeders,
 }
 
 impl Sort {
@@ -69,6 +73,7 @@ impl Sort {
             Sort::Newest => "newest",
             Sort::Size => "size",
             Sort::Seen => "seen",
+            Sort::Seeders => "seeders",
         }
     }
 
@@ -79,6 +84,7 @@ impl Sort {
             "newest" => Some(Sort::Newest),
             "size" => Some(Sort::Size),
             "seen" => Some(Sort::Seen),
+            "seeders" => Some(Sort::Seeders),
             _ => None,
         }
     }

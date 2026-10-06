@@ -297,6 +297,7 @@ async fn scenario(options: PgConnectOptions) {
         dmca_agent: String::new(),
         hsts: false,
         trusted_proxies: Vec::new(),
+        seeder_freshness: Duration::from_secs(7 * 24 * 60 * 60),
     };
     let app = dc3_web::router(
         web_cfg,

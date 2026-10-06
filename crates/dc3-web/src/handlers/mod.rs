@@ -8,9 +8,11 @@ pub(crate) mod search;
 pub(crate) mod torrent;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::Path;
 use axum::extract::rejection::PathRejection;
+use chrono::Utc;
 use dc3_core::{AnyKey, magnet_link, text};
 use dc3_policy::TermMatcher;
 use dc3_store::{FileRow, MAX_NAME_CHARS, MAX_PATH_CHARS, TorrentRecord};
@@ -56,6 +58,17 @@ pub(crate) fn key_hex(key: &AnyKey) -> String {
 /// The path of a torrent's page.
 pub(crate) fn torrent_href(record: &TorrentRecord) -> String {
     format!("{}{}", routes::TORRENT_PREFIX, record.dht_key.to_hex())
+}
+
+/// The seeder estimate to show and rank on: `Some` only while the scrape
+/// that produced it is still fresh (bep33.md §7). Stale or missing
+/// estimates display and rank as if missing.
+pub(crate) fn fresh_seeders(record: &TorrentRecord, freshness: Duration) -> Option<u64> {
+    let est = record.seeders_est?;
+    let scraped = record.last_scraped_at?;
+    let age = Utc::now().signed_duration_since(scraped);
+    (age <= chrono::Duration::from_std(freshness).unwrap_or(chrono::Duration::MAX))
+        .then_some(est)
 }
 
 /// A stored torrent's text, cleaned for display and checked against the
@@ -224,6 +237,8 @@ mod tests {
             seen_count: 1,
             first_seen_at: Utc::now(),
             last_seen_at: Utc::now(),
+            last_scraped_at: None,
+            seeders_est: None,
             change_seq: 1,
             hidden_at: None,
             reviewed_at: None,
@@ -375,5 +390,119 @@ mod tests {
             "a%20b%26c%3Dd%23e%2Ff%3Fg%2Bh%25i%22%3C%3E%27%E6%9D%B1"
         );
         assert_eq!(encode_query_value("safe-._~"), "safe-._~");
+    }
+
+    fn scraped_record(est: Option<u64>, scraped_ago_secs: Option<i64>) -> TorrentRecord {
+        let mut r = record("x", &[]);
+        r.seeders_est = est;
+        r.last_scraped_at = scraped_ago_secs
+            .map(|s| Utc::now() - chrono::Duration::seconds(s));
+        r
+    }
+
+    fn shown_of(r: &TorrentRecord) -> Shown {
+        Shown {
+            name: r.name.clone(),
+            files: Vec::new(),
+            files_cut: false,
+            magnet: None,
+        }
+    }
+
+    #[test]
+    fn fresh_seeders_hides_missing_and_stale_estimates() {
+        use std::time::Duration;
+        let freshness = Duration::from_secs(7 * 24 * 60 * 60);
+        assert_eq!(fresh_seeders(&scraped_record(None, None), freshness), None);
+        assert_eq!(
+            fresh_seeders(&scraped_record(Some(5), None), freshness),
+            None
+        );
+        assert_eq!(
+            fresh_seeders(&scraped_record(Some(5), Some(100)), freshness),
+            Some(5)
+        );
+        // Older than the window: hidden (stale).
+        assert_eq!(
+            fresh_seeders(&scraped_record(Some(5), Some(8 * 24 * 60 * 60)), freshness),
+            None
+        );
+        // Zero is a measured value, shown like any other.
+        assert_eq!(
+            fresh_seeders(&scraped_record(Some(0), Some(100)), freshness),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn seeder_ordering_sorts_estimates_first() {
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        use super::search::order_page;
+        let freshness = Duration::from_secs(7 * 24 * 60 * 60);
+        let mut page: Vec<(TorrentRecord, Shown)> = [None, Some(0), Some(30), Some(5)]
+            .into_iter()
+            .map(|est| {
+                let r = scraped_record(est, est.map(|_| 100));
+                let s = shown_of(&r);
+                (r, s)
+            })
+            .collect();
+        order_page(&mut page, &HashMap::new(), dc3_search::Sort::Seeders, freshness);
+        let ests: Vec<Option<u64>> = page.iter().map(|(r, _)| r.seeders_est).collect();
+        assert_eq!(ests, [Some(30), Some(5), Some(0), None]);
+
+        // Other sorts leave the page alone.
+        let mut page: Vec<(TorrentRecord, Shown)> = [Some(30), Some(5)]
+            .into_iter()
+            .map(|est| {
+                let r = scraped_record(est, est.map(|_| 100));
+                let s = shown_of(&r);
+                (r, s)
+            })
+            .collect();
+        order_page(
+            &mut page,
+            &HashMap::new(),
+            dc3_search::Sort::Seen,
+            freshness,
+        );
+        let ests: Vec<Option<u64>> = page.iter().map(|(r, _)| r.seeders_est).collect();
+        assert_eq!(ests, [Some(30), Some(5)]);
+    }
+
+    #[test]
+    fn relevance_boost_prefers_fresh_seeders() {
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        use super::search::{boosted, order_page};
+        let freshness = Duration::from_secs(7 * 24 * 60 * 60);
+        // A fresh estimate multiplies the score; stale and missing do not.
+        let fresh = scraped_record(Some(99), Some(100));
+        let stale = scraped_record(Some(9999), Some(8 * 24 * 60 * 60));
+        let missing = scraped_record(None, None);
+        let base = 2.0f32;
+        assert!(boosted(&fresh, Some(&base), freshness) > base);
+        assert_eq!(boosted(&stale, Some(&base), freshness), base);
+        assert_eq!(boosted(&missing, Some(&base), freshness), base);
+        assert_eq!(boosted(&fresh, None, freshness), 0.0);
+
+        // The boost re-ranks the page: the lower BM25 score with many
+        // fresh seeders comes first; a stale swarm does not move.
+        let mk = [missing, fresh, stale].into_iter().enumerate().map(|(i, mut r)| {
+            r.id = i as i64 + 1;
+            (r.clone(), shown_of(&r))
+        });
+        let mut page: Vec<(TorrentRecord, Shown)> = mk.collect();
+        // Fresh (id 2) is boosted past the leader; stale (id 3) is not.
+        let scores: HashMap<i64, f32> =
+            [(1, 3.0), (2, 2.9), (3, 2.95)].into_iter().collect();
+        order_page(&mut page, &scores, dc3_search::Sort::Relevance, freshness);
+        let ids: Vec<i64> = page.iter().map(|(r, _)| r.id).collect();
+        // Fresh (id 2, boosted past 3.0) first; stale (id 3) and missing
+        // (id 1) keep index order.
+        assert_eq!(ids, [2, 1, 3]);
     }
 }

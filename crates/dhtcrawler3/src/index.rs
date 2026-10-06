@@ -574,6 +574,8 @@ mod tests {
                 file_count: 1,
                 first_seen_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                 seen_count: 1,
+                last_scraped_at: None,
+                seeders_est: None,
                 visible,
             });
         }

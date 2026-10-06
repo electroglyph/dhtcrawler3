@@ -522,9 +522,25 @@ fn sort_orders() {
     assert_eq!(order(Sort::Newest), [2, 4, 3, 1]);
     assert_eq!(order(Sort::Seen), [2, 4, 3, 1]);
     assert_eq!(order(Sort::Relevance), [2, 4, 3, 1]);
+    // No seeder field is indexed: Seeders orders like Seen there (the web
+    // role re-sorts the hydrated page by the estimate).
+    assert_eq!(order(Sort::Seeders), order(Sort::Seen));
     assert_eq!(Sort::parse("size"), Some(Sort::Size));
+    assert_eq!(Sort::parse("seeders"), Some(Sort::Seeders));
+    assert_eq!(Sort::Seeders.as_str(), "seeders");
     assert_eq!(Sort::parse("bogus"), None);
     assert_eq!(Sort::Newest.as_str(), "newest");
+}
+
+#[test]
+fn seeder_multiplier_mirrors_popularity() {
+    assert_eq!(seeder_multiplier(0), 1.0);
+    let some = seeder_multiplier(99);
+    assert!(some > 1.0);
+    // Sublinear: a hundred times the seeders is far from a hundred times
+    // the boost, and the weight matches popularity's.
+    assert!(seeder_multiplier(9999) < 1.0 + 100.0 * (some - 1.0));
+    assert_eq!(SEEDER_WEIGHT, POPULARITY_WEIGHT);
 }
 
 #[test]

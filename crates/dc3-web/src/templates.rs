@@ -43,6 +43,8 @@ pub(crate) struct ResultRow {
     pub first_seen: String,
     pub first_seen_iso: String,
     pub seen: String,
+    /// Fresh seeder estimate, if any (stale estimates are hidden).
+    pub seeders: Option<String>,
     pub magnet: Option<String>,
 }
 
@@ -86,6 +88,11 @@ pub(crate) struct TorrentView {
     pub last_seen: String,
     pub last_seen_iso: String,
     pub seen_count: String,
+    /// Fresh seeder estimate, if any (stale estimates are hidden).
+    pub seeders: Option<String>,
+    /// When the shown estimate was scraped, if one is shown.
+    pub scraped: Option<String>,
+    pub scraped_iso: Option<String>,
     pub magnet: Option<String>,
     pub report_href: String,
 }

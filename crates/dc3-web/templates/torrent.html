@@ -11,6 +11,9 @@
 <div><dt>First seen</dt><dd><time datetime="{{ t.first_seen_iso }}">{{ t.first_seen }}</time></dd></div>
 <div><dt>Last seen</dt><dd><time datetime="{{ t.last_seen_iso }}">{{ t.last_seen }}</time></dd></div>
 <div><dt>Times seen</dt><dd>{{ t.seen_count }}</dd></div>
+{%- if let Some(seeders) = t.seeders %}
+<div><dt>Seeders (estimate)</dt><dd>{{ seeders }}{% if let Some(scraped) = t.scraped %}{% if let Some(iso) = t.scraped_iso %} as of <time datetime="{{ iso }}">{{ scraped }}</time>{% endif %}{% endif %}</dd></div>
+{%- endif %}
 <div><dt>DHT key</dt><dd><code>{{ t.dht_key }}</code></dd></div>
 {%- if let Some(v1) = t.info_hash_v1 %}
 <div><dt>Info hash (v1)</dt><dd><code>{{ v1 }}</code></dd></div>

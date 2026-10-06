@@ -5,6 +5,7 @@
 //! `{"error": "..."}`. No CORS headers are sent.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
@@ -19,7 +20,7 @@ use super::search::{
     Failure, SearchParams, execute, expansion_blocked, is_blocked, parse_page, parse_per_page,
     parse_sort, too_long, too_long_message,
 };
-use super::{Lookup, Shown, lookup, parse_key};
+use super::{Lookup, Shown, fresh_seeders, lookup, parse_key};
 use crate::Backend;
 use crate::app::AppState;
 use crate::format::rfc3339;
@@ -37,11 +38,18 @@ pub(crate) struct ApiTorrent {
     pub first_seen: String,
     pub last_seen: String,
     pub seen_count: u64,
+    /// Fresh seeder estimate, if any (stale estimates are omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeders_est: Option<u64>,
+    /// When the shown estimate was scraped, if one is shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_scraped_at: Option<String>,
     pub magnet: Option<String>,
 }
 
 impl ApiTorrent {
-    fn new(record: &TorrentRecord, shown: &Shown) -> ApiTorrent {
+    fn new(record: &TorrentRecord, shown: &Shown, freshness: Duration) -> ApiTorrent {
+        let seeders = fresh_seeders(record, freshness);
         ApiTorrent {
             dht_key: record.dht_key.to_hex(),
             info_hash_v1: record.info_hash_v1.map(|k| k.to_hex()),
@@ -52,6 +60,8 @@ impl ApiTorrent {
             first_seen: rfc3339(record.first_seen_at),
             last_seen: rfc3339(record.last_seen_at),
             seen_count: record.seen_count,
+            seeders_est: seeders,
+            last_scraped_at: seeders.and(record.last_scraped_at.map(rfc3339)),
             magnet: shown.magnet.clone(),
         }
     }
@@ -159,7 +169,7 @@ pub(crate) async fn search<B: Backend>(
                 results: found
                     .torrents
                     .iter()
-                    .map(|(record, shown)| ApiTorrent::new(record, shown))
+                    .map(|(record, shown)| ApiTorrent::new(record, shown, st.seeder_freshness))
                     .collect(),
             };
             json(StatusCode::OK, &body)
@@ -194,7 +204,7 @@ pub(crate) async fn torrent<B: Backend>(
                 })
                 .collect();
             let body = ApiTorrentDetail {
-                torrent: ApiTorrent::new(&record, &shown),
+                torrent: ApiTorrent::new(&record, &shown, st.seeder_freshness),
                 files,
                 files_truncated: record.files_truncated || shown.files_cut,
             };

@@ -2,6 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, PoisonError, RwLock};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -167,6 +168,8 @@ pub(crate) struct AppState<B> {
     pub details: Semaphore,
     /// Set once the missing-peer-address misconfiguration has been logged.
     pub warned_no_peer: AtomicBool,
+    /// How long a BEP 33 seeder estimate counts as fresh (display + rank).
+    pub seeder_freshness: Duration,
 }
 
 impl<B> AppState<B> {
@@ -193,6 +196,7 @@ pub fn router<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> Router {
 
 /// The router and the state it shares with the background tasks.
 pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Arc<AppState<B>>) {
+    let seeder_freshness = cfg.seeder_freshness;
     let state = Arc::new(AppState {
         site: Site::new(cfg, Utc::now()),
         backend: deps.backend,
@@ -203,6 +207,7 @@ pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Ar
         requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
         details: Semaphore::new(MAX_CONCURRENT_DETAILS),
         warned_no_peer: AtomicBool::new(false),
+        seeder_freshness,
     });
 
     let router = Router::new()
@@ -386,6 +391,7 @@ mod tests {
                 dmca_agent: " Agent\nStreet 1\u{1b}[31m ".into(),
                 hsts: false,
                 trusted_proxies: Vec::new(),
+                seeder_freshness: Duration::from_secs(604800),
             },
             Utc::now(),
         );

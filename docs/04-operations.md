@@ -170,6 +170,7 @@ Each role serves `/metrics`, `/healthz` (liveness) and `/readyz` (readiness) on 
 |---|---|
 | DHT | `dc3_dht_good_nodes`, `dc3_dht_discovered_dropped_total`, `dc3_dht_peer_store_keys`, `dc3_dht_packets_in_total{family}`, `dc3_dht_packets_out_total{family}`, `dc3_dht_packets_dropped_total{family,reason}`, `dc3_dht_queries_received_total{method}`, `dc3_dht_timeouts_total`, `dc3_dht_routing_nodes{family}`, `dc3_dht_samples_total{family}`, `dc3_dht_sampler_early_total` (must stay 0), `dc3_dht_sampler_visited_full_total`, `dc3_dht_responder_dropped_total` |
 | Pipeline | `dc3_discovered_total{source,family}`, `dc3_admitted_total{source}`, `dc3_queue_depth`, `dc3_fetch_total{outcome}` (ok, no_peers, fetch_failed, parse_error, blocked, private, denied, store_error), `dc3_blocked_total{reason}` (peer_address, denylisted, queue_full, blocked_term, private), `dc3_destination_skipped_total{reason}` (busy, rate_limited, negative_cache, map_full) |
+| Scrape (BEP 33) | `dc3_scrape_total{outcome}` (live, dying, dead, unknown), `dc3_scrape_tombstones_total`, `dc3_purge_tombstoned_total`, `dc3_scrape_due_depth`, `dc3_removed_keys_count`, `dc3_scrape_zero_seeder_share`, `dc3_scrape_unaware_share` |
 | Index | `dc3_index_lag` (sequence numbers behind), `dc3_index_lag_seconds`, `dc3_index_docs` |
 | Web | `dc3_http_requests_total{route,status}`, `dc3_search_seconds`, `dc3_rate_limited_total{route}`, `dc3_blocked_queries_total`, `dc3_reports_total{reason}`, `dc3_autohide_total`, `dc3_autohide_budget_exhausted_total` |
 

@@ -41,11 +41,13 @@ pub const SCRAPE_REMOVED_KEYS_CAP: i64 = dc3_store::MAX_REMOVED_KEYS;
 /// rest go on the next sweep, biggest first).
 pub const MAX_PURGE_BATCH: i64 = 10_000;
 
-const METRIC_SCRAPES: &str = "dc3_scrapes_total";
+const METRIC_SCRAPES: &str = "dc3_scrape_total";
 const METRIC_TOMBSTONES: &str = "dc3_scrape_tombstones_total";
 const METRIC_PURGED: &str = "dc3_purge_tombstoned_total";
 const METRIC_DUE_DEPTH: &str = "dc3_scrape_due_depth";
 const METRIC_REMOVED_KEYS: &str = "dc3_removed_keys_count";
+const METRIC_ZERO_SEEDER_SHARE: &str = "dc3_scrape_zero_seeder_share";
+const METRIC_UNAWARE_SHARE: &str = "dc3_scrape_unaware_share";
 
 /// Everything the scrape worker needs from `[crawl]`.
 #[derive(Debug, Clone)]
@@ -182,7 +184,9 @@ impl<S: CrawlStore> Scraper<S> {
         }
     }
 
-    /// Scrapes every claimed item with bounded concurrency.
+    /// Scrapes every claimed item with bounded concurrency, then exports
+    /// the batch's outcome shares (skipped for an empty batch: div-zero
+    /// guard).
     async fn scrape_all(self: &Arc<Self>, items: &[ScrapeItem], stop: &CancellationToken) {
         let semaphore = Arc::new(Semaphore::new(self.tuning.concurrency.max(1)));
         let mut in_flight = FuturesUnordered::new();
@@ -195,28 +199,49 @@ impl<S: CrawlStore> Scraper<S> {
             let item = item.clone();
             in_flight.push(async move {
                 let _permit = permit.acquire_owned().await;
-                this.scrape_one(&item).await;
+                this.scrape_one(&item).await
             });
         }
-        while in_flight.next().await.is_some() {}
+        let mut dead = 0u64;
+        let mut unknown = 0u64;
+        let mut total = 0u64;
+        while let Some(verdict) = in_flight.next().await {
+            let Some(verdict) = verdict else {
+                continue;
+            };
+            total = total.saturating_add(1);
+            match verdict {
+                ScrapeVerdict::Dead { .. } => dead = dead.saturating_add(1),
+                ScrapeVerdict::Unknown => unknown = unknown.saturating_add(1),
+                ScrapeVerdict::Live { .. } => {}
+            }
+        }
+        if total > 0 {
+            metrics::gauge!(METRIC_ZERO_SEEDER_SHARE).set(dead as f64 / total as f64);
+            metrics::gauge!(METRIC_UNAWARE_SHARE).set(unknown as f64 / total as f64);
+        }
     }
 
-    /// Scrapes one claimed row and writes its outcome.
-    async fn scrape_one(&self, item: &ScrapeItem) {
+    /// Scrapes one claimed row, writes its outcome, and returns the verdict
+    /// for the batch shares (`None` when the row was skipped before any
+    /// lookup, so skips never dilute the shares).
+    async fn scrape_one(&self, item: &ScrapeItem) -> Option<ScrapeVerdict> {
         // Skip rows denied or hidden since the claim: the claim filter
         // already excluded them, this only closes the race cheaply. (Hidden
         // rows have no cheap check; recording stats on one is harmless and
         // the tombstone below still cannot clobber fresh data.)
         match self.store.is_denied(&[item.dht_key.as_bytes()]).await {
-            Ok(true) => return,
+            Ok(true) => return None,
             Err(e) => {
                 tracing::error!(error = %e, id = item.id, "scrape deny recheck failed");
-                return;
+                return None;
             }
             Ok(false) => {}
         }
         let report = self.dht.scrape(item.dht_key, self.tuning.lookup_timeout).await;
-        self.apply(item, classify(&report, self.tuning.threshold)).await;
+        let verdict = classify(&report, self.tuning.threshold);
+        self.apply(item, verdict).await;
+        Some(verdict)
     }
 
     /// Writes one verdict. Unknown keeps the old estimate and failures.

@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -311,6 +312,8 @@ pub fn torrent(id: i64, name: &str, files: &[(&str, u64)]) -> TorrentRecord {
         seen_count: 7,
         first_seen_at: at(1),
         last_seen_at: at(15),
+        last_scraped_at: None,
+        seeders_est: None,
         change_seq: 99,
         hidden_at: None,
         reviewed_at: None,
@@ -370,6 +373,7 @@ pub fn config() -> WebConfig {
         dmca_agent: "Example DMCA Agent\n1 Example Street".into(),
         hsts: true,
         trusted_proxies: Vec::new(),
+        seeder_freshness: Duration::from_secs(7 * 24 * 60 * 60),
     }
 }
 

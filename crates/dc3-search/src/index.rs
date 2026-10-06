@@ -65,6 +65,9 @@ pub const NAME_BOOST: Score = 3.0;
 pub const PREFIX_BOOST: Score = 0.5;
 /// Weight of `log10(1 + seen)` in the relevance multiplier.
 pub const POPULARITY_WEIGHT: f64 = 0.15;
+/// Weight of `log10(1 + seeders_est)` in the web-side seeder boost, mirroring
+/// [`POPULARITY_WEIGHT`]. Applied after hydration, fresh estimates only.
+pub const SEEDER_WEIGHT: f64 = 0.15;
 
 /// Schema field names.
 pub mod field_names {
@@ -674,7 +677,7 @@ impl SortKeyComputer for RankKeyComputer {
     fn segment_sort_key_computer(&self, reader: &SegmentReader) -> tantivy::Result<RankSegment> {
         let fast = reader.fast_fields();
         let primary = match self.sort {
-            Sort::Relevance | Sort::Seen => fast.u64(field_names::SEEN)?,
+            Sort::Relevance | Sort::Seen | Sort::Seeders => fast.u64(field_names::SEEN)?,
             Sort::Size => fast.u64(field_names::SIZE)?,
             Sort::Newest => fast.i64(field_names::CREATED)?.to_u64_monotonic(),
         };
@@ -694,6 +697,16 @@ pub fn popularity_multiplier(seen: u64) -> f64 {
     1.0 + POPULARITY_WEIGHT * (1.0 + seen).log10()
 }
 
+/// `1 + SEEDER_WEIGHT * log10(1 + seeders_est)`: the web-side seeder boost
+/// for relevance order (bep33.md §7). Fresh estimates only; stale or
+/// missing estimates rank exactly as today.
+pub fn seeder_multiplier(seeders_est: u64) -> f64 {
+    // u64 -> f64 may round, which is irrelevant for a logarithm.
+    #[allow(clippy::cast_precision_loss)]
+    let est = seeders_est as f64;
+    1.0 + SEEDER_WEIGHT * (1.0 + est).log10()
+}
+
 impl SegmentSortKeyComputer for RankSegment {
     type SortKey = RankKey;
     type SegmentSortKey = RankKey;
@@ -708,7 +721,7 @@ impl SegmentSortKeyComputer for RankSegment {
                 let tweaked = (f64::from(score) * popularity_multiplier(value)) as Score;
                 (tweaked, 0, id)
             }
-            Sort::Newest | Sort::Size | Sort::Seen => (0.0, value, id),
+            Sort::Newest | Sort::Size | Sort::Seen | Sort::Seeders => (0.0, value, id),
         }
     }
 

@@ -22,6 +22,9 @@
 <span>{{ row.files }}</span>
 <span>First seen <time datetime="{{ row.first_seen_iso }}">{{ row.first_seen }}</time></span>
 <span>Seen {{ row.seen }}</span>
+{%- if let Some(seeders) = row.seeders %}
+<span>Seeders {{ seeders }}</span>
+{%- endif %}
 </p>
 {%- if let Some(magnet) = row.magnet %}
 <p class="actions"><a href="{{ magnet }}">Magnet link</a></p>

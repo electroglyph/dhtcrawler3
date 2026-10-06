@@ -92,6 +92,10 @@ pub struct WebConfig {
     pub hsts: bool,
     /// Reverse proxies whose `X-Forwarded-For` header is trusted.
     pub trusted_proxies: Vec<IpNet>,
+    /// How long a BEP 33 seeder estimate is shown and used for ranking
+    /// after its scrape. Older estimates are hidden (stale) and rank as
+    /// if missing. The crawl role sets this to `scrape_interval_secs`.
+    pub seeder_freshness: Duration,
 }
 
 impl WebConfig {
