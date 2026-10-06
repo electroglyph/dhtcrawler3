@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use dc3_core::DhtKey;
 use dc3_store::{
     DenyOutcome, DenyReason, IndexRow, NewTorrent, Observation, ObserveOutcome, PendingItem,
-    Result, ScrapeItem, Store,
+    RemovalCooldown, Result, ScrapeItem, Store,
 };
 
 /// What the crawl role needs from the database (the `dc3_crawler` user).
@@ -58,6 +58,11 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
         seeders_est: Option<u32>,
         scrape_failures: u32,
     ) -> impl Future<Output = Result<bool>> + Send;
+    /// See [`Store::record_scrapes`].
+    fn record_scrapes(
+        &self,
+        rows: &[(i64, Option<u32>, u32)],
+    ) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::tombstone_dead`].
     fn tombstone_dead(
         &self,
@@ -87,7 +92,9 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
     fn removal_cooldowns(
         &self,
         keys: &[DhtKey],
-    ) -> impl Future<Output = Result<Vec<(DhtKey, Duration)>>> + Send;
+        base_days: u64,
+        strong_evidence: &[DhtKey],
+    ) -> impl Future<Output = Result<Vec<RemovalCooldown>>> + Send;
     /// See [`Store::note_removed_sightings`].
     fn note_removed_sightings(&self, keys: &[DhtKey]) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::refresh_scraped`].
@@ -161,6 +168,13 @@ impl CrawlStore for Store {
         Store::record_scrape(self, id, seeders_est, scrape_failures)
     }
 
+    fn record_scrapes(
+        &self,
+        rows: &[(i64, Option<u32>, u32)],
+    ) -> impl Future<Output = Result<u64>> + Send {
+        Store::record_scrapes(self, rows)
+    }
+
     fn tombstone_dead(
         &self,
         id: i64,
@@ -201,8 +215,10 @@ impl CrawlStore for Store {
     fn removal_cooldowns(
         &self,
         keys: &[DhtKey],
-    ) -> impl Future<Output = Result<Vec<(DhtKey, Duration)>>> + Send {
-        Store::removal_cooldowns(self, keys)
+        base_days: u64,
+        strong_evidence: &[DhtKey],
+    ) -> impl Future<Output = Result<Vec<RemovalCooldown>>> + Send {
+        Store::removal_cooldowns(self, keys, base_days, strong_evidence)
     }
 
     fn note_removed_sightings(&self, keys: &[DhtKey]) -> impl Future<Output = Result<u64>> + Send {

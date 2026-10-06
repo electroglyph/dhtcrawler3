@@ -2,9 +2,12 @@
 -- known-live keys: `CLAIM_SQL` orders by `seeders_est DESC NULLS LAST`
 -- (unscraped keys sink; the scrape queue instead prefers unchecked rows
 -- with NULLS FIRST, intentionally asymmetric). Estimates arrive for free
--- via the piggybacked fetch scrape lookups (`note_fetch_estimate`) and via
--- backfill from `torrents` on re-queue (`OBSERVE_QUEUE_SQL`); unaware
--- lookups leave NULL, never 0 (0 means measured dead).
+-- via the piggybacked fetch scrape lookups (`note_fetch_estimate`).
+-- There is no backfill from `torrents` on re-queue (`OBSERVE_QUEUE_SQL`
+-- deliberately queues without joining: a queued key has no `torrents` row
+-- by construction, so first attempts are always NULL and the liveness
+-- ordering helps retries). Unaware lookups leave NULL, never 0 (0 means
+-- measured dead).
 --
 -- No new grants: the crawler already holds full SELECT/INSERT/UPDATE/DELETE
 -- on `pending` (03_grants.sql).

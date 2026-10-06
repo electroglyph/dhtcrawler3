@@ -13,7 +13,8 @@ use chrono::{DateTime, Utc};
 use dc3_core::DhtKey;
 use dc3_store::{
     DenyOutcome, DenyReason, MAX_FETCH_ATTEMPTS, NewTorrent, Observation, ObserveOutcome,
-    PendingItem, Result, ScrapeItem, StoreError,
+    PendingItem, REMOVAL_STRONG_EVIDENCE_SIGHTINGS, RemovalCooldown, Result, ScrapeItem,
+    StoreError,
 };
 use tokio::time::Instant;
 
@@ -94,6 +95,36 @@ fn prefix(key: &[u8]) -> [u8; DENY_PREFIX_LEN] {
         *dst = *src;
     }
     out
+}
+
+/// Mirrors the database store's base/×4/90d-cap schedule (§4a).
+fn mem_cooldown(base_days: u64, removals: u32) -> Duration {
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    let base = DAY.saturating_mul(u32::try_from(base_days.max(1)).unwrap_or(u32::MAX));
+    let cap = DAY.saturating_mul(90);
+    match removals {
+        0 | 1 => base.min(cap),
+        2 => base.saturating_mul(4).min(cap),
+        _ => cap,
+    }
+}
+
+/// Remaining cooldown with the ÷4 strong-evidence shortening (sightings
+/// at the threshold, or an explicit `strong` flag for seed announces) —
+/// shortening, never bypassing.
+fn mem_remaining(
+    now: Instant,
+    removed_at: Instant,
+    base_days: u64,
+    removals: u32,
+    sightings: u32,
+    strong: bool,
+) -> Duration {
+    let mut cooldown = mem_cooldown(base_days, removals);
+    if strong || sightings >= u32::try_from(REMOVAL_STRONG_EVIDENCE_SIGHTINGS).unwrap_or(u32::MAX) {
+        cooldown = cooldown.checked_div(4).unwrap_or(Duration::ZERO);
+    }
+    cooldown.saturating_sub(now.saturating_duration_since(removed_at))
 }
 
 impl MemoryStore {
@@ -499,6 +530,21 @@ impl CrawlStore for MemoryStore {
         }
     }
 
+    async fn record_scrapes(&self, rows: &[(i64, Option<u32>, u32)]) -> Result<u64> {
+        let mut state = self.lock();
+        let now = Instant::now();
+        let mut n = 0u64;
+        for (id, est, failures) in rows.iter().copied() {
+            if let Some(sc) = state.scrapes.values_mut().find(|sc| sc.id == id) {
+                sc.est = est;
+                sc.failures = failures;
+                sc.last_scraped = Some(now);
+                n = n.saturating_add(1);
+            }
+        }
+        Ok(n)
+    }
+
     async fn tombstone_dead(
         &self,
         id: i64,
@@ -597,24 +643,31 @@ impl CrawlStore for MemoryStore {
         Ok(Self::is_denied(&self.lock(), keys))
     }
 
-    async fn removal_cooldowns(&self, keys: &[DhtKey]) -> Result<Vec<(DhtKey, Duration)>> {
+    async fn removal_cooldowns(
+        &self,
+        keys: &[DhtKey],
+        base_days: u64,
+        strong_evidence: &[DhtKey],
+    ) -> Result<Vec<RemovalCooldown>> {
         let state = self.lock();
         let now = Instant::now();
         Ok(keys
             .iter()
             .filter_map(|key| {
                 state.removed.get(&prefix(key.as_bytes())).map(|e| {
-                    // Same 7d -> 30d -> 90d schedule as the database store.
-                    let days = match e.removals {
-                        0 | 1 => 7,
-                        2 => 30,
-                        _ => 90,
-                    };
-                    let cooldown = Duration::from_secs(days * 24 * 60 * 60);
-                    (
-                        *key,
-                        cooldown.saturating_sub(now.saturating_duration_since(e.removed_at)),
-                    )
+                    let strong = strong_evidence.contains(key);
+                    RemovalCooldown {
+                        key: *key,
+                        remaining: mem_remaining(
+                            now,
+                            e.removed_at,
+                            base_days,
+                            e.removals,
+                            e.sightings,
+                            strong,
+                        ),
+                        sightings: e.sightings,
+                    }
                 })
             })
             .collect())
@@ -807,6 +860,83 @@ mod scrape_tests {
             files_truncated: false,
             piece_length: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn removal_cooldown_respects_base_and_shortens_on_evidence() {
+        use std::time::Duration as StdDuration;
+
+        let s = MemoryStore::new();
+        let k = key(9);
+        let id = s.complete(&k, &torrent(k)).await.unwrap();
+        let items = s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap();
+        let snap = items.iter().find(|c| c.id == id).unwrap().clone();
+        assert!(
+            s.tombstone_dead(id, snap.last_seen_at, snap.change_seq)
+                .await
+                .unwrap()
+        );
+
+        let day = StdDuration::from_secs(24 * 60 * 60);
+        // Base 7: blocked ~7d; base 1: blocked ~1d, not 7d.
+        let rows = s.removal_cooldowns(&[k], 7, &[]).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].remaining > day * 6 && rows[0].remaining <= day * 7);
+        let rows = s.removal_cooldowns(&[k], 1, &[]).await.unwrap();
+        assert!(rows[0].remaining > StdDuration::ZERO && rows[0].remaining <= day);
+
+        // Three sightings: ÷4 (7d → 1.75d), still blocking while fresh.
+        for _ in 0..3 {
+            assert_eq!(s.note_removed_sightings(&[k]).await.unwrap(), 1);
+        }
+        let rows = s.removal_cooldowns(&[k], 7, &[]).await.unwrap();
+        assert_eq!(rows[0].sightings, 3);
+        assert!(rows[0].remaining > StdDuration::ZERO && rows[0].remaining <= day * 2);
+
+        // A seed announce shortens the same way, without any sightings.
+        let other = key(10);
+        let oid = s.complete(&other, &torrent(other)).await.unwrap();
+        let items = s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap();
+        let snap = items.iter().find(|c| c.id == oid).unwrap().clone();
+        assert!(
+            s.tombstone_dead(oid, snap.last_seen_at, snap.change_seq)
+                .await
+                .unwrap()
+        );
+        let rows = s.removal_cooldowns(&[other], 7, &[other]).await.unwrap();
+        assert!(rows[0].remaining > StdDuration::ZERO && rows[0].remaining <= day * 2);
+
+        // Two days later the shortened cooldown has expired while the
+        // unshortened one still blocks: shortening, never bypassing.
+        // (`k` carries its sighting shortening intrinsically; `other`
+        // needs the explicit seed evidence.)
+        advance(day * 2).await;
+        let rows = s.removal_cooldowns(&[k, other], 7, &[]).await.unwrap();
+        let rk = rows.iter().find(|r| r.key == k).unwrap();
+        let ro = rows.iter().find(|r| r.key == other).unwrap();
+        assert_eq!(rk.remaining, StdDuration::ZERO);
+        assert!(ro.remaining > day * 4);
+        let rows = s.removal_cooldowns(&[other], 7, &[other]).await.unwrap();
+        assert_eq!(rows[0].remaining, StdDuration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn record_scrapes_batches_stats_only_writes() {
+        let s = MemoryStore::new();
+        let mut ids = Vec::new();
+        for n in [11u8, 12] {
+            let k = key(n);
+            ids.push(s.complete(&k, &torrent(k)).await.unwrap());
+        }
+        let n = s
+            .record_scrapes(&[(ids[0], Some(3), 0), (ids[1], None, 1), (9999, Some(1), 0)])
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "unknown ids match nothing");
+        assert_eq!(s.record_scrapes(&[]).await.unwrap(), 0);
+        // Unknown outcomes keep the old estimate and failures.
+        let items = s.claim_scrape_due(10, LIVE, LIVE).await.unwrap();
+        assert!(items.is_empty(), "claims just stamped both rows");
     }
 
     #[tokio::test(start_paused = true)]

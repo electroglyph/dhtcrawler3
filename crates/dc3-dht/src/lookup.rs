@@ -328,6 +328,17 @@ impl Lookup {
             unaware: self.unaware,
         }
     }
+
+    /// Closest responded nodes, for the scrape node-list cache (win 2).
+    /// Borrowed so the outcome stays available to the caller.
+    fn closest_responded(&self) -> Vec<(CompactNode, Option<Vec<u8>>)> {
+        self.cands
+            .iter()
+            .filter(|c| c.state == CandState::Responded)
+            .take(K)
+            .map(|c| (c.node, c.token.clone()))
+            .collect()
+    }
 }
 
 async fn ask(
@@ -479,24 +490,27 @@ pub(crate) async fn get_peers(
 }
 
 /// Iterative BEP 33 scrape for `key`: a `get_peers` traversal with
-/// `scrape=1` on the dedicated scrape budget. Unions and estimation
-/// happen in the caller via [`ScrapeOutcome`].
+/// `scrape=1` on the dedicated scrape budget, seeded from the node-list
+/// cache when warm (win 2) and writing its closest nodes back after.
+/// Unions and estimation happen in the caller via [`ScrapeOutcome`].
 pub(crate) async fn scrape(
     inner: &Inner,
     sock: &SocketNode,
     key: DhtKey,
     deadline: Instant,
 ) -> ScrapeOutcome {
-    run(
+    let seeds = inner.scrape_cache_seeds(&key);
+    let lookup = run(
         inner,
         sock,
         NodeId::from(key),
         Kind::Scrape,
-        Vec::new(),
+        seeds,
         deadline,
     )
-    .await
-    .scrape_outcome()
+    .await;
+    inner.scrape_cache_store(key, &lookup.closest_responded());
+    lookup.scrape_outcome()
 }
 
 /// Iterative `find_node` towards `target`, starting from the routing table plus `seeds`.
@@ -701,6 +715,24 @@ mod tests {
             unaware: 3,
         };
         assert_eq!(empty.seeders_est(), None);
+    }
+
+    #[test]
+    fn closest_responded_feeds_the_node_cache() {
+        let target = NodeId([0; 20]);
+        let mut l = lookup(target, Kind::Scrape, OwnAddrs::default());
+        for i in 1..=4u8 {
+            l.add(node(i, NodeId([i; 20])));
+        }
+        let batch = l.pick(2);
+        let best = l.best_live();
+        assert!(!l.complete(batch[0].addr, Ok(reply(NodeId([1; 20]), vec![])), best));
+        assert!(!l.complete(batch[1].addr, Err(QueryError::Timeout), best));
+        // Only responded candidates are remembered, with their tokens.
+        let closest = l.closest_responded();
+        assert_eq!(closest.len(), 1);
+        assert_eq!(closest[0].0.id, NodeId([1; 20]));
+        assert!(closest[0].1.is_none());
     }
 
     #[test]

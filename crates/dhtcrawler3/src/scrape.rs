@@ -1,8 +1,8 @@
 //! BEP 33 scrape worker (bep33.md §4): re-polls stored torrents for their
 //! current seeder estimate and tombstones dead swarms.
 //!
-//! Each worker loops: claim due rows, scrape each key with [`Dht::scrape`],
-//! classify the report, and write back the outcome. Classification:
+//! Each worker loops: claim due rows, scrape each key with
+//! [`Dht::scrape_v4_first`], classify the report, and write back the outcome.
 //!
 //! * **live** (an aware estimate above the threshold): store the estimate,
 //!   reset failures. A live verdict from one family is safe: the union is a
@@ -185,9 +185,10 @@ impl<S: CrawlStore> Scraper<S> {
         }
     }
 
-    /// Scrapes every claimed item with bounded concurrency, then exports
-    /// the batch's outcome shares (skipped for an empty batch: div-zero
-    /// guard).
+    /// Scrapes every claimed item with bounded concurrency, writes
+    /// tombstones per row (conditional, one transaction each) and all other
+    /// outcomes in one batched stats-only write (win 7), then exports the
+    /// batch's outcome shares (skipped for an empty batch: div-zero guard).
     async fn scrape_all(self: &Arc<Self>, items: &[ScrapeItem], stop: &CancellationToken) {
         let semaphore = Arc::new(Semaphore::new(self.tuning.concurrency.max(1)));
         let mut in_flight = FuturesUnordered::new();
@@ -203,30 +204,82 @@ impl<S: CrawlStore> Scraper<S> {
                 this.scrape_one(&item).await
             });
         }
-        let mut dead = 0u64;
-        let mut unknown = 0u64;
-        let mut total = 0u64;
-        while let Some(verdict) = in_flight.next().await {
-            let Some(verdict) = verdict else {
-                continue;
-            };
-            total = total.saturating_add(1);
-            match verdict {
-                ScrapeVerdict::Dead { .. } => dead = dead.saturating_add(1),
-                ScrapeVerdict::Unknown => unknown = unknown.saturating_add(1),
-                ScrapeVerdict::Live { .. } => {}
+        let mut batch = Vec::new();
+        while let Some(done) = in_flight.next().await {
+            if let Some(done) = done {
+                batch.push(done);
             }
         }
-        if total > 0 {
-            metrics::gauge!(METRIC_ZERO_SEEDER_SHARE).set(dead as f64 / total as f64);
-            metrics::gauge!(METRIC_UNAWARE_SHARE).set(unknown as f64 / total as f64);
-        }
+        self.finish(batch).await;
     }
 
-    /// Scrapes one claimed row, writes its outcome, and returns the verdict
-    /// for the batch shares (`None` when the row was skipped before any
-    /// lookup, so skips never dilute the shares).
-    async fn scrape_one(&self, item: &ScrapeItem) -> Option<ScrapeVerdict> {
+    /// Writes one batch of verdicts: tombstone-ready rows per row (the
+    /// conditional wipe must stay its own transaction with `note_removal`),
+    /// everything else in one [`CrawlStore::record_scrapes`] call.
+    async fn finish(&self, batch: Vec<(ScrapeItem, ScrapeVerdict)>) {
+        let total = batch.len();
+        if total == 0 {
+            return;
+        }
+        let mut dead = 0u64;
+        let mut unknown = 0u64;
+        let mut records = Vec::with_capacity(total);
+        for (item, verdict) in &batch {
+            match verdict {
+                ScrapeVerdict::Live { est } => {
+                    metrics::counter!(METRIC_SCRAPES, "outcome" => "live").increment(1);
+                    records.push((item.id, Some(*est), 0));
+                }
+                ScrapeVerdict::Dead { est } => {
+                    dead = dead.saturating_add(1);
+                    let failures = item.scrape_failures.saturating_add(1);
+                    if failures >= self.tuning.max_failures {
+                        metrics::counter!(METRIC_SCRAPES, "outcome" => "dead").increment(1);
+                        match self
+                            .store
+                            .tombstone_dead(item.id, item.last_seen_at, item.change_seq)
+                            .await
+                        {
+                            Ok(true) => {
+                                metrics::counter!(METRIC_TOMBSTONES).increment(1);
+                            }
+                            Ok(false) => {
+                                // The row changed since the claim (a fetch won
+                                // the race): record the scrape instead of
+                                // wiping fresh data.
+                                records.push((item.id, Some(*est), failures));
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, id = item.id, "tombstone_dead failed");
+                            }
+                        }
+                    } else {
+                        metrics::counter!(METRIC_SCRAPES, "outcome" => "dying").increment(1);
+                        records.push((item.id, Some(*est), failures));
+                    }
+                }
+                ScrapeVerdict::Unknown => {
+                    metrics::counter!(METRIC_SCRAPES, "outcome" => "unknown").increment(1);
+                    unknown = unknown.saturating_add(1);
+                    records.push((item.id, item.seeders_est, item.scrape_failures));
+                }
+            }
+        }
+        if !records.is_empty()
+            && let Err(e) = self.store.record_scrapes(&records).await
+        {
+            tracing::error!(error = %e, rows = records.len(), "record_scrapes failed");
+        }
+        let total = total as f64;
+        metrics::gauge!(METRIC_ZERO_SEEDER_SHARE).set(dead as f64 / total);
+        metrics::gauge!(METRIC_UNAWARE_SHARE).set(unknown as f64 / total);
+    }
+
+    /// Scrapes one claimed row and returns its verdict for the batch
+    /// (`None` when the row was skipped before any lookup, so skips never
+    /// dilute the shares). The lookup tries IPv4 first and skips IPv6 only
+    /// on proven-live (win 3); death always needs both families.
+    async fn scrape_one(&self, item: &ScrapeItem) -> Option<(ScrapeItem, ScrapeVerdict)> {
         // Skip rows denied or hidden since the claim: the claim filter
         // already excluded them, this only closes the race cheaply. (Hidden
         // rows have no cheap check; recording stats on one is harmless and
@@ -241,66 +294,14 @@ impl<S: CrawlStore> Scraper<S> {
         }
         let report = self
             .dht
-            .scrape(item.dht_key, self.tuning.lookup_timeout)
+            .scrape_v4_first(
+                item.dht_key,
+                self.tuning.lookup_timeout,
+                self.tuning.threshold,
+            )
             .await;
         let verdict = classify(&report, self.tuning.threshold);
-        self.apply(item, verdict).await;
-        Some(verdict)
-    }
-
-    /// Writes one verdict. Unknown keeps the old estimate and failures.
-    async fn apply(&self, item: &ScrapeItem, verdict: ScrapeVerdict) {
-        match verdict {
-            ScrapeVerdict::Live { est } => {
-                metrics::counter!(METRIC_SCRAPES, "outcome" => "live").increment(1);
-                if let Err(e) = self.store.record_scrape(item.id, Some(est), 0).await {
-                    tracing::error!(error = %e, id = item.id, "record_scrape failed");
-                }
-            }
-            ScrapeVerdict::Dead { est } => {
-                let failures = item.scrape_failures.saturating_add(1);
-                if failures >= self.tuning.max_failures {
-                    metrics::counter!(METRIC_SCRAPES, "outcome" => "dead").increment(1);
-                    match self
-                        .store
-                        .tombstone_dead(item.id, item.last_seen_at, item.change_seq)
-                        .await
-                    {
-                        Ok(true) => {
-                            metrics::counter!(METRIC_TOMBSTONES).increment(1);
-                        }
-                        Ok(false) => {
-                            // The row changed since the claim (a fetch won
-                            // the race): record the scrape instead of
-                            // wiping fresh data.
-                            if let Err(e) =
-                                self.store.record_scrape(item.id, Some(est), failures).await
-                            {
-                                tracing::error!(error = %e, id = item.id, "record_scrape failed");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, id = item.id, "tombstone_dead failed");
-                        }
-                    }
-                } else {
-                    metrics::counter!(METRIC_SCRAPES, "outcome" => "dying").increment(1);
-                    if let Err(e) = self.store.record_scrape(item.id, Some(est), failures).await {
-                        tracing::error!(error = %e, id = item.id, "record_scrape failed");
-                    }
-                }
-            }
-            ScrapeVerdict::Unknown => {
-                metrics::counter!(METRIC_SCRAPES, "outcome" => "unknown").increment(1);
-                if let Err(e) = self
-                    .store
-                    .record_scrape(item.id, item.seeders_est, item.scrape_failures)
-                    .await
-                {
-                    tracing::error!(error = %e, id = item.id, "record_scrape failed");
-                }
-            }
-        }
+        Some((item.clone(), verdict))
     }
 
     /// Purges old scrape tombstones and trims removal memory.

@@ -152,6 +152,30 @@ impl ScrapeReport {
     pub fn seeders_est(&self) -> Option<u64> {
         crate::bloom::estimate_or(&self.seed_filters)
     }
+
+    /// True when the report already proves a live swarm: an aware estimate
+    /// above `threshold`. Only a live report may skip the second family
+    /// (win 3); anything else needs the full traversal, and death always
+    /// needs both families attempted (see the scrape worker).
+    pub fn is_live(&self, threshold: u64) -> bool {
+        self.seeders_est().is_some_and(|est| est > threshold)
+    }
+
+    /// Merges one per-socket traversal outcome, counting the family as
+    /// attempted and deduplicating peers across families.
+    fn merge_outcome(&mut self, outcome: lookup::ScrapeOutcome) {
+        self.families_attempted = self.families_attempted.saturating_add(1);
+        let mut seen: HashSet<SocketAddr> = self.peers.iter().copied().collect();
+        for peer in outcome.peers {
+            if seen.insert(peer) {
+                self.peers.push(peer);
+            }
+        }
+        self.seed_filters.extend(outcome.seed_filters);
+        self.peer_filters.extend(outcome.peer_filters);
+        self.aware = self.aware.saturating_add(outcome.aware);
+        self.unaware = self.unaware.saturating_add(outcome.unaware);
+    }
 }
 
 /// A running DHT node. Cheap to clone; the node stops when
@@ -235,33 +259,45 @@ impl Dht {
             .sockets
             .iter()
             .map(|sock| lookup::scrape(&self.inner, sock, key, deadline));
-        let mut peers = Vec::new();
-        let mut seen = HashSet::new();
-        let mut seed_filters = Vec::new();
-        let mut peer_filters = Vec::new();
-        let mut aware = 0usize;
-        let mut unaware = 0usize;
-        let mut families_attempted = 0usize;
+        let mut report = ScrapeReport::default();
         for outcome in join_all(lookups).await {
-            families_attempted = families_attempted.saturating_add(1);
-            for peer in outcome.peers {
-                if seen.insert(peer) {
-                    peers.push(peer);
-                }
+            report.merge_outcome(outcome);
+        }
+        report
+    }
+
+    /// BEP 33 scrape trying IPv4 first (win 3, bep33.md §12): runs the v4
+    /// pass and skips the v6 pass only when v4 already proves live
+    /// ([`ScrapeReport::is_live`]). Death always requires both families
+    /// actually attempted in this round — a v4-only zero classifies as
+    /// unknown, never dead, so v6-live swarms are never killed by the
+    /// shortcut. Both passes share one overall `timeout` deadline; a pass
+    /// that cannot start before the deadline is skipped and not counted
+    /// (also unknown, never dead).
+    pub async fn scrape_v4_first(
+        &self,
+        key: DhtKey,
+        timeout: Duration,
+        threshold: u64,
+    ) -> ScrapeReport {
+        let deadline = after(Instant::now(), timeout);
+        let mut report = ScrapeReport::default();
+        for sock in self.inner.sockets.iter().filter(|s| s.family == Family::V4) {
+            if Instant::now() >= deadline || self.inner.cancel.is_cancelled() {
+                break;
             }
-            seed_filters.extend(outcome.seed_filters);
-            peer_filters.extend(outcome.peer_filters);
-            aware = aware.saturating_add(outcome.aware);
-            unaware = unaware.saturating_add(outcome.unaware);
+            report.merge_outcome(lookup::scrape(&self.inner, sock, key, deadline).await);
         }
-        ScrapeReport {
-            peers,
-            seed_filters,
-            peer_filters,
-            aware,
-            unaware,
-            families_attempted,
+        if report.is_live(threshold) {
+            return report;
         }
+        for sock in self.inner.sockets.iter().filter(|s| s.family == Family::V6) {
+            if Instant::now() >= deadline || self.inner.cancel.is_cancelled() {
+                break;
+            }
+            report.merge_outcome(lookup::scrape(&self.inner, sock, key, deadline).await);
+        }
+        report
     }
 
     /// Current counters and sizes.
@@ -311,5 +347,74 @@ impl Dht {
     /// clones of this handle stop working too.
     pub async fn shutdown(self) {
         self.inner.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod scrape_tests {
+    use super::*;
+    use crate::bloom::{BLOOM_LEN, ScrapeBloom};
+    use std::net::IpAddr;
+
+    fn filter_with(ips: &[&str]) -> [u8; BLOOM_LEN] {
+        let mut f = ScrapeBloom::empty();
+        for ip in ips {
+            f.insert_ip(&ip.parse::<IpAddr>().unwrap());
+        }
+        f.0
+    }
+
+    fn outcome(peers: Vec<SocketAddr>, seeds: &[&str], aware: usize) -> lookup::ScrapeOutcome {
+        lookup::ScrapeOutcome {
+            peers,
+            seed_filters: if aware > 0 {
+                vec![filter_with(seeds)]
+            } else {
+                Vec::new()
+            },
+            peer_filters: if aware > 0 {
+                vec![[0u8; BLOOM_LEN]]
+            } else {
+                Vec::new()
+            },
+            aware,
+            unaware: 1,
+        }
+    }
+
+    #[test]
+    fn merge_counts_families_and_dedups_peers() {
+        let mut report = ScrapeReport::default();
+        let shared: SocketAddr = "9.9.9.9:6881".parse().unwrap();
+        let v4only: SocketAddr = "8.8.8.8:6881".parse().unwrap();
+        report.merge_outcome(outcome(vec![shared, v4only], &["1.1.1.1"], 1));
+        report.merge_outcome(outcome(vec![shared], &["2.2.2.2"], 1));
+        assert_eq!(report.families_attempted, 2);
+        assert_eq!(report.peers, vec![shared, v4only]);
+        assert_eq!(report.aware, 2);
+        assert_eq!(report.unaware, 2);
+        assert_eq!(report.seed_filters.len(), 2);
+        // The union of two distinct one-seed filters estimates to 2.
+        assert_eq!(report.seeders_est(), Some(2));
+    }
+
+    #[test]
+    fn is_live_needs_an_aware_estimate_above_threshold() {
+        // Unaware-only: never live, so v4-first falls through to v6.
+        let mut report = ScrapeReport::default();
+        report.merge_outcome(outcome(Vec::new(), &[], 0));
+        assert!(!report.is_live(0));
+        // Aware zero at threshold 0: dead, not live — v6 still runs.
+        let mut report = ScrapeReport::default();
+        report.merge_outcome(outcome(Vec::new(), &[], 1));
+        assert_eq!(report.seeders_est(), Some(0));
+        assert!(!report.is_live(0));
+        // Aware nonzero above the threshold: live, v6 is skipped.
+        let mut report = ScrapeReport::default();
+        report.merge_outcome(outcome(Vec::new(), &["1.1.1.1"], 1));
+        assert_eq!(report.seeders_est(), Some(1));
+        assert!(report.is_live(0));
+        assert!(!report.is_live(1), "equal-to-threshold is dead, not live");
     }
 }

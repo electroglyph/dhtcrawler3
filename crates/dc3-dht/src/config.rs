@@ -192,6 +192,10 @@ pub struct DhtTuning {
     /// (live-only, bep33.md §4b win 2; 0 disables). A dead verdict always
     /// needs the full both-families traversal. Production: 3.
     pub scrape_early_exit_quorum: usize,
+    /// Most DHT keys whose closest-node lists are cached for reuse as the
+    /// start set of repeat scrapes (bep33.md §2/§12 win 2). 0 disables the
+    /// cache. Production: 4096.
+    pub scrape_node_cache_keys: usize,
     /// TEST ONLY. Key the per-IP rules on IP:port instead of IP: one routing
     /// entry per IP, the /24 and /64 bucket rule, the inbound and outbound
     /// per-IP rate limits, external-IP vote diversity and the "our own
@@ -237,6 +241,7 @@ impl Default for DhtTuning {
             sample_timeout_skip: HOUR,
             sampler_idle_wait: Duration::from_secs(1),
             scrape_early_exit_quorum: 3,
+            scrape_node_cache_keys: 4096,
             limits_by_endpoint: false,
         }
     }
@@ -346,6 +351,7 @@ mod tests {
         assert_eq!(t.sample_unsupported_skip, Duration::from_secs(6 * 3600));
         assert_eq!(t.sample_timeout_skip, Duration::from_secs(3600));
         assert_eq!(t.scrape_early_exit_quorum, 3);
+        assert_eq!(t.scrape_node_cache_keys, 4096);
         assert!(!t.limits_by_endpoint);
         assert!(c.validate().is_ok());
     }

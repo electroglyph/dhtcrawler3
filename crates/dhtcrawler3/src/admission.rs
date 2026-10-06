@@ -105,6 +105,9 @@ pub struct AdmissionTuning {
     pub retry_base: Duration,
     pub retry_max: Duration,
     pub shutdown_flush_timeout: Duration,
+    /// Base admission cooldown of a removed key, in days (bep33.md §4a/§6:
+    /// base, escalating ×4 per repeat to the 90d cap).
+    pub removal_cooldown_days: u64,
 }
 
 impl Default for AdmissionTuning {
@@ -120,6 +123,7 @@ impl Default for AdmissionTuning {
             retry_base: FLUSH_RETRY_BASE,
             retry_max: FLUSH_RETRY_MAX,
             shutdown_flush_timeout: SHUTDOWN_FLUSH_TIMEOUT,
+            removal_cooldown_days: 7,
         }
     }
 }
@@ -567,13 +571,21 @@ impl<S: CrawlStore> Admission<S> {
     /// Drops batch keys still in removal cooldown (§4a) and counts a
     /// post-removal sighting for every batch key the memory still knows.
     /// Verdicts come from the LRU [`REMOVAL_CACHE_KEYS`] cache; misses are
-    /// checked in one batched query.
-    async fn gate_removals(&mut self) {
+    /// checked in one batched query. Keys with strong evidence (seed
+    /// announces in `strong_evidence`, or enough post-removal sightings)
+    /// get the ÷4 shortening from the store — shortening, never bypassing.
+    async fn gate_removals(&mut self, strong_evidence: &[DhtKey]) {
         let now = Instant::now();
         let mut misses = Vec::new();
         let mut blocked_keys = Vec::new();
         let mut remembered = Vec::new();
         for key in self.batch.keys().copied().collect::<Vec<_>>() {
+            // Seed announces are fresh evidence: always re-check them, so a
+            // cached verdict never masks the ÷4 shortening.
+            if strong_evidence.contains(&key) {
+                misses.push(key);
+                continue;
+            }
             match self.removal_cache.get(&key) {
                 Some(RemovalVerdict::Blocked(until)) if *until > now => {
                     blocked_keys.push(key);
@@ -584,16 +596,21 @@ impl<S: CrawlStore> Admission<S> {
             }
         }
         if !misses.is_empty() {
-            match self.store.removal_cooldowns(&misses).await {
+            match self
+                .store
+                .removal_cooldowns(&misses, self.tuning.removal_cooldown_days, strong_evidence)
+                .await
+            {
                 Ok(rows) => {
-                    for (key, remaining) in rows {
-                        if remaining > Duration::ZERO {
+                    for rc in rows {
+                        if rc.remaining > Duration::ZERO {
                             self.removal_cache
-                                .insert(key, RemovalVerdict::Blocked(now + remaining));
-                            blocked_keys.push(key);
-                            remembered.push(key);
+                                .insert(rc.key, RemovalVerdict::Blocked(now + rc.remaining));
+                            blocked_keys.push(rc.key);
+                            remembered.push(rc.key);
                         } else {
-                            self.removal_cache.insert(key, RemovalVerdict::Clear(now));
+                            self.removal_cache
+                                .insert(rc.key, RemovalVerdict::Clear(now));
                         }
                     }
                     for key in misses {
@@ -646,21 +663,23 @@ impl<S: CrawlStore> Admission<S> {
         cancel: Option<&CancellationToken>,
         deadline: Option<Instant>,
     ) -> Result<ObserveOutcome, FlushStopped> {
-        if !self.seed_announced.is_empty() {
-            let keys: Vec<DhtKey> = self.seed_announced.iter().copied().collect();
-            self.seed_announced.clear();
-            if let Err(e) = self.store.refresh_scraped(&keys).await {
-                tracing::warn!(
-                    error = %e,
-                    keys = keys.len(),
-                    "refresh_scraped failed; continuing with the batch"
-                );
-            }
+        let seeds: Vec<DhtKey> = self.seed_announced.iter().copied().collect();
+        self.seed_announced.clear();
+        if !seeds.is_empty()
+            && let Err(e) = self.store.refresh_scraped(&seeds).await
+        {
+            tracing::warn!(
+                error = %e,
+                keys = seeds.len(),
+                "refresh_scraped failed; continuing with the batch"
+            );
         }
         if self.batch.is_empty() {
             return Ok(ObserveOutcome::default());
         }
-        self.gate_removals().await;
+        // Seed announces are strong evidence (§4a): they shorten (never
+        // bypass) the removal cooldown of the same keys in the gate below.
+        self.gate_removals(&seeds).await;
         if self.batch.is_empty() {
             return Ok(ObserveOutcome::default());
         }
@@ -1158,6 +1177,41 @@ mod tests {
         let out = a.flush(None, None).await.unwrap();
         assert_eq!(out.queued, 0);
         assert_eq!(store.pending_keys(), vec![live]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_shortens_cooldown_on_seed_evidence_but_never_bypasses() {
+        use crate::stores::CrawlStore;
+
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::new(vec![ip("8.8.4.4")], vec![]);
+        let dead = key(1);
+        let id = store.complete(&dead, &stored_torrent(dead)).await.unwrap();
+        let items = store
+            .claim_scrape_due(10, Duration::ZERO, Duration::ZERO)
+            .await
+            .unwrap();
+        let snap = items.iter().find(|c| c.id == id).unwrap().clone();
+        assert!(
+            store
+                .tombstone_dead(id, snap.last_seen_at, snap.change_seq)
+                .await
+                .unwrap()
+        );
+        // Two days into the 7d cooldown a plain announce is still blocked
+        // (5d left), while a seed announce is admitted (7/4 = 1.75d < 2d):
+        // shortening, never bypassing — a fresh removal still blocks.
+        tokio::time::advance(Duration::from_secs(2 * 24 * 60 * 60)).await;
+        let t0 = Instant::now();
+        a.handle(event(dead, Source::Announce, "1.2.3.4", None), &own, t0);
+        let out = a.flush(None, None).await.unwrap();
+        assert_eq!(out.queued, 0);
+        assert!(store.pending_keys().is_empty());
+        a.handle(seed_event(dead), &own, Instant::now());
+        let out = a.flush(None, None).await.unwrap();
+        assert_eq!(out.queued, 1);
+        assert_eq!(store.pending_keys(), vec![dead]);
     }
 
     #[tokio::test(start_paused = true)]

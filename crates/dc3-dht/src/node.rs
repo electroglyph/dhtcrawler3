@@ -7,9 +7,12 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use dc3_core::DhtKey;
 
 use futures::future::join_all;
 use tokio::net::UdpSocket;
@@ -38,6 +41,7 @@ use crate::stats::{Counters, DhtStatsSnapshot, DropReason, incr};
 use crate::token::TokenSecrets;
 use crate::util::{after, lock};
 use crate::{Discovered, Error};
+use lru::LruCache;
 
 /// Good routing-table nodes wanted per family: bootstrap continues below
 /// it, and the crawl role is ready at or above it (design §13).
@@ -63,6 +67,10 @@ const RECV_ERROR_PAUSE: Duration = Duration::from_millis(100);
 const MIN_BUDGET_WAIT: Duration = Duration::from_millis(1);
 /// Longest time `shutdown` waits for tasks before aborting them.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// Closest responded nodes remembered per scraped key (win 2 start sets).
+const SCRAPE_CACHE_WRITE_BACK: usize = 16;
+/// Most nodes kept per cached key (fresh closest first, then survivors).
+const SCRAPE_CACHE_NODES_PER_KEY: usize = 32;
 
 /// Why a query produced no response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +143,10 @@ pub(crate) struct Inner {
     /// bucket and crawl bursts never starve scrapes. Per-address spacing
     /// stays shared (one query per second per host across both kinds).
     scrape_budget: Mutex<TokenBucket>,
+    /// Closest-node lists of recent scrapes, reused as the start set of
+    /// repeat scrapes (bep33.md §2/§12 win 2). `None` disables the cache
+    /// (`scrape_node_cache_keys == 0`).
+    scrape_nodes: Option<Mutex<LruCache<DhtKey, Vec<CompactNode>>>>,
     /// The reply budget, separate from the query budget.
     responder_budget: Mutex<ResponderBudget>,
     pub(crate) counters: Counters,
@@ -326,6 +338,8 @@ impl Inner {
             now,
         );
         let sampler = cfg.sampler.then(|| Sampler::new(now));
+        let scrape_nodes = NonZeroUsize::new(cfg.tuning.scrape_node_cache_keys)
+            .map(|cap| Mutex::new(LruCache::new(cap)));
         Ok(Inner {
             policy,
             sockets,
@@ -333,6 +347,7 @@ impl Inner {
             own: Mutex::new(own),
             budget: Mutex::new(budget),
             scrape_budget: Mutex::new(scrape_budget),
+            scrape_nodes,
             responder_budget: Mutex::new(responder_budget),
             counters: Counters::default(),
             sink,
@@ -364,6 +379,47 @@ impl Inner {
 
     pub(crate) fn socket(&self, family: Family) -> Option<&Arc<SocketNode>> {
         self.sockets.iter().find(|s| s.family == family)
+    }
+
+    /// Cached closest nodes for `key`, as the start set of a repeat scrape
+    /// (bep33.md §2/§12 win 2). Empty when the cache is disabled or cold; a
+    /// cache hit is a start set only, never proof of no-route (§4 death
+    /// rule: death still needs both families attempted in this round).
+    pub(crate) fn scrape_cache_seeds(&self, key: &DhtKey) -> Vec<CompactNode> {
+        let Some(cache) = self.scrape_nodes.as_ref() else {
+            return Vec::new();
+        };
+        lock(cache).get(key).cloned().unwrap_or_default()
+    }
+
+    /// Remembers the closest responded nodes of a finished scrape as the
+    /// start set of the next one. Fresh closest first, then surviving
+    /// older entries (deduped by address), capped per key.
+    pub(crate) fn scrape_cache_store(
+        &self,
+        key: DhtKey,
+        closest: &[(CompactNode, Option<Vec<u8>>)],
+    ) {
+        let Some(cache) = self.scrape_nodes.as_ref() else {
+            return;
+        };
+        let mut fresh: Vec<CompactNode> = closest
+            .iter()
+            .take(SCRAPE_CACHE_WRITE_BACK)
+            .map(|(n, _)| *n)
+            .collect();
+        let mut cache = lock(cache);
+        if let Some(old) = cache.get(&key).cloned() {
+            for n in old {
+                if fresh.len() >= SCRAPE_CACHE_NODES_PER_KEY {
+                    break;
+                }
+                if !fresh.iter().any(|f| f.addr == n.addr) {
+                    fresh.push(n);
+                }
+            }
+        }
+        cache.put(key, fresh);
     }
 
     /// Sleeps for `d`; false if the node was shut down meanwhile.

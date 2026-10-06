@@ -72,6 +72,9 @@ use std::time::Duration;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgConnection, PgPool, Row};
 
+/// Post-removal sightings that count as strong evidence for the §4a
+/// ÷4 cooldown shortening (shortening, never bypassing).
+pub use crawler::REMOVAL_STRONG_EVIDENCE_SIGHTINGS;
 /// The `sqlx` version this crate uses, for callers that need its types (for
 /// example the error inside [`StoreError::Database`]).
 pub use sqlx;
@@ -79,8 +82,9 @@ pub use sqlx;
 pub use sqlx::postgres::PgConnectOptions;
 pub use types::{
     DailyStats, DenyEntry, DenyOutcome, DenyReason, FileRow, IndexRow, LiveRow, NewReport,
-    NewTorrent, Observation, ObserveOutcome, ParseEnumError, PendingItem, PublicStats, Report,
-    ReportAction, ReportReason, ReportStatus, ScrapeItem, StoreStats, SubmitOutcome, TorrentRecord,
+    NewTorrent, Observation, ObserveOutcome, ParseEnumError, PendingItem, PublicStats,
+    RemovalCooldown, Report, ReportAction, ReportReason, ReportStatus, ScrapeItem, StoreStats,
+    SubmitOutcome, TorrentRecord,
 };
 
 /// Advisory lock key of the change feed (ASCII `"dc3chg"` followed by 0x0001).

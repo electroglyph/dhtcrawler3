@@ -2482,13 +2482,18 @@ async fn scrape_row(pool: &PgPool, id: i64) -> (Option<i32>, i32) {
 
 #[test]
 fn removal_cooldown_escalates_and_caps() {
-    use crate::crawler::removal_cooldown;
-    assert_eq!(removal_cooldown(0), days(7));
-    assert_eq!(removal_cooldown(1), days(7));
-    assert_eq!(removal_cooldown(2), days(30));
-    assert_eq!(removal_cooldown(3), days(90));
-    assert_eq!(removal_cooldown(100), days(90));
-    assert_eq!(removal_cooldown(-5), days(7));
+    use crate::crawler::removal_cooldown_with_base;
+    assert_eq!(removal_cooldown_with_base(7, 0), days(7));
+    assert_eq!(removal_cooldown_with_base(7, 1), days(7));
+    assert_eq!(removal_cooldown_with_base(7, 2), days(28));
+    assert_eq!(removal_cooldown_with_base(7, 3), days(90));
+    assert_eq!(removal_cooldown_with_base(7, 100), days(90));
+    assert_eq!(removal_cooldown_with_base(7, -5), days(7));
+    // The base is the knob: repeats escalate ×4 to the 90d cap.
+    assert_eq!(removal_cooldown_with_base(1, 1), days(1));
+    assert_eq!(removal_cooldown_with_base(1, 2), days(4));
+    assert_eq!(removal_cooldown_with_base(30, 2), days(90));
+    assert_eq!(removal_cooldown_with_base(365, 1), days(90));
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -2609,14 +2614,14 @@ async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
     assert!(!row.is_live());
     assert_eq!(row.name, "");
     assert_eq!(s.removed_keys_count().await.unwrap(), 1);
-    let remaining = s.removal_cooldown_remaining(&k.0).await.unwrap();
+    let remaining = s.removal_cooldown_remaining(&k.0, 7).await.unwrap();
     assert!(remaining > days(6) && remaining <= days(7), "{remaining:?}");
 
-    // A second consecutive removal escalates the cooldown to 30d.
+    // A second consecutive removal escalates the cooldown to 28d (×4).
     s.note_removal(&k.0).await.unwrap();
-    let remaining = s.removal_cooldown_remaining(&k.0).await.unwrap();
+    let remaining = s.removal_cooldown_remaining(&k.0, 7).await.unwrap();
     assert!(
-        remaining > days(29) && remaining <= days(30),
+        remaining > days(27) && remaining <= days(28),
         "{remaining:?}"
     );
 
@@ -2695,20 +2700,20 @@ async fn removal_memory_blocks_then_clears_on_refetch(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let k = key(51);
     assert_eq!(
-        s.removal_cooldown_remaining(&k.0).await.unwrap(),
+        s.removal_cooldown_remaining(&k.0, 7).await.unwrap(),
         Duration::ZERO
     );
 
     // A bare sighting creates no memory.
     s.note_removed_sighting(&k.0).await.unwrap();
     assert_eq!(
-        s.removal_cooldown_remaining(&k.0).await.unwrap(),
+        s.removal_cooldown_remaining(&k.0, 7).await.unwrap(),
         Duration::ZERO
     );
 
     // First removal: 7d; expiry is exactly bounded by the schedule.
     s.note_removal(&k.0).await.unwrap();
-    let remaining = s.removal_cooldown_remaining(&k.0).await.unwrap();
+    let remaining = s.removal_cooldown_remaining(&k.0, 7).await.unwrap();
     assert!(
         remaining > Duration::ZERO && remaining <= days(7),
         "{remaining:?}"
@@ -2718,7 +2723,7 @@ async fn removal_memory_blocks_then_clears_on_refetch(pool: PgPool) {
     // start over instead of escalating forever.
     s.complete(&k, &torrent(k, "back")).await.unwrap();
     assert_eq!(
-        s.removal_cooldown_remaining(&k.0).await.unwrap(),
+        s.removal_cooldown_remaining(&k.0, 7).await.unwrap(),
         Duration::ZERO
     );
     assert_eq!(s.removed_keys_count().await.unwrap(), 0);
@@ -2727,7 +2732,7 @@ async fn removal_memory_blocks_then_clears_on_refetch(pool: PgPool) {
     let mut long = [0u8; 32];
     long[..20].copy_from_slice(&k.0);
     s.note_removal(&long).await.unwrap();
-    assert!(s.removal_cooldown_remaining(&k.0).await.unwrap() > Duration::ZERO);
+    assert!(s.removal_cooldown_remaining(&k.0, 7).await.unwrap() > Duration::ZERO);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -2742,10 +2747,10 @@ async fn trim_removed_keys_keeps_the_newest(pool: PgPool) {
     assert_eq!(s.removed_keys_count().await.unwrap(), 2);
     // The oldest removal (key 1) was trimmed first.
     assert_eq!(
-        s.removal_cooldown_remaining(&key(1).0).await.unwrap(),
+        s.removal_cooldown_remaining(&key(1).0, 7).await.unwrap(),
         Duration::ZERO
     );
-    assert!(s.removal_cooldown_remaining(&key(3).0).await.unwrap() > Duration::ZERO);
+    assert!(s.removal_cooldown_remaining(&key(3).0, 7).await.unwrap() > Duration::ZERO);
     assert_eq!(s.trim_removed_keys(0).await.unwrap(), 2);
     assert_eq!(s.removed_keys_count().await.unwrap(), 0);
 }
@@ -2822,10 +2827,10 @@ async fn removal_cooldowns_and_sightings_batch(pool: PgPool) {
     s.note_removal(&a.0).await.unwrap();
     s.note_removal(&b.0).await.unwrap();
     // c was never removed: absent from the result.
-    let mut rows = s.removal_cooldowns(&[a, b, c]).await.unwrap();
-    rows.sort_by(|x, y| x.0.cmp(&y.0));
+    let mut rows = s.removal_cooldowns(&[a, b, c], 7, &[]).await.unwrap();
+    rows.sort_by_key(|r| r.key);
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|(_, r)| *r > Duration::ZERO));
+    assert!(rows.iter().all(|r| r.remaining > Duration::ZERO));
     // Sightings touch only existing rows; the count is returned.
     assert_eq!(s.note_removed_sightings(&[a, c]).await.unwrap(), 1);
     let n: i32 = sqlx::query_scalar("SELECT sightings FROM removed_keys WHERE key = $1")
@@ -2835,7 +2840,99 @@ async fn removal_cooldowns_and_sightings_batch(pool: PgPool) {
         .unwrap();
     assert_eq!(n, 1);
     assert!(s.note_removed_sightings(&[]).await.unwrap() == 0);
-    assert!(s.removal_cooldowns(&[]).await.unwrap().is_empty());
+    assert!(s.removal_cooldowns(&[], 7, &[]).await.unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn removal_cooldown_shortens_on_strong_evidence_but_never_bypasses(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let a = key(95);
+    let b = key(96);
+    s.note_removal(&a.0).await.unwrap();
+    s.note_removal(&b.0).await.unwrap();
+
+    // Baseline: both blocked for ~7d.
+    let rows = s.removal_cooldowns(&[a, b], 7, &[]).await.unwrap();
+    assert!(rows.iter().all(|r| r.remaining > days(6)));
+
+    // Three post-removal sightings of `a`: strong evidence shortens ÷4
+    // (7d → 1.75d), but the fresh removal still blocks.
+    for _ in 0..3 {
+        assert_eq!(s.note_removed_sightings(&[a]).await.unwrap(), 1);
+    }
+    let rows = s.removal_cooldowns(&[a, b], 7, &[]).await.unwrap();
+    let ra = rows.iter().find(|r| r.key == a).unwrap();
+    let rb = rows.iter().find(|r| r.key == b).unwrap();
+    assert_eq!(ra.sightings, 3);
+    assert!(ra.remaining > Duration::ZERO, "shortened, never bypassed");
+    assert!(ra.remaining <= days(2), "{:?}", ra.remaining);
+    assert!(rb.remaining > days(6));
+    // The single-key path sees the same sighting shortening.
+    let single = s.removal_cooldown_remaining(&a.0, 7).await.unwrap();
+    assert!(single > Duration::ZERO && single <= days(2), "{single:?}");
+
+    // A seed announce (`strong_evidence`) shortens `b` the same way.
+    let rows = s.removal_cooldowns(&[a, b], 7, &[b]).await.unwrap();
+    let rb = rows.iter().find(|r| r.key == b).unwrap();
+    assert!(rb.remaining > Duration::ZERO);
+    assert!(rb.remaining <= days(2), "{:?}", rb.remaining);
+
+    // The base is the knob: base 1d without evidence blocks ~1d, not 7d.
+    let rows = s.removal_cooldowns(&[b], 1, &[]).await.unwrap();
+    assert!(
+        rows[0].remaining > Duration::ZERO && rows[0].remaining <= days(1),
+        "{:?}",
+        rows[0].remaining
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn record_scrapes_writes_a_batch_without_index_churn(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let mut ids = Vec::new();
+    for n in [81u8, 82, 83] {
+        let k = key(n);
+        ids.push(s.complete(&k, &torrent(k, "batched")).await.unwrap());
+    }
+    let before: Vec<i64> = sqlx::query_scalar(
+        "SELECT change_seq FROM torrents WHERE id = ANY($1::bigint[]) ORDER BY id",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    let n = s
+        .record_scrapes(&[
+            (ids[0], Some(3), 0),
+            (ids[1], None, 1),
+            (ids[2], Some(0), 2),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(n, 3);
+    assert_eq!(scrape_row(&pool, ids[0]).await, (Some(3), 0));
+    assert_eq!(scrape_row(&pool, ids[1]).await, (None, 1));
+    assert_eq!(scrape_row(&pool, ids[2]).await, (Some(0), 2));
+
+    // Unknown ids match nothing; an empty batch writes nothing.
+    assert_eq!(
+        s.record_scrapes(&[(999_999_999, Some(1), 0)])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(s.record_scrapes(&[]).await.unwrap(), 0);
+
+    // No change_seq moved: the batch is stats-only (win 7).
+    let after: Vec<i64> = sqlx::query_scalar(
+        "SELECT change_seq FROM torrents WHERE id = ANY($1::bigint[]) ORDER BY id",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(before, after);
 }
 
 #[sqlx::test(migrations = "./migrations")]

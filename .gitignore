@@ -7,3 +7,4 @@
 /data
 /deploy/secrets/*
 !/deploy/secrets/README.md
+/bep33.md

@@ -10,7 +10,7 @@ use sqlx::PgConnection;
 
 use crate::types::{
     DenyOutcome, DenyReason, LiveRow, NewTorrent, Observation, ObserveOutcome, PendingItem,
-    ScrapeItem, files_to_json,
+    RemovalCooldown, ScrapeItem, files_to_json,
 };
 use crate::{
     CountedTable, DailyCounter, EXACT_COUNT_THRESHOLD, FAIL_BASE_BACKOFF, FAIL_MAX_BACKOFF,
@@ -172,6 +172,15 @@ const RECORD_SCRAPE_SQL: &str = "\
 UPDATE torrents
    SET seeders_est = $2, scrape_failures = $3, last_scraped_at = now()
  WHERE id = $1";
+
+/// Batched stats-only scrape write (win 7): one statement for a whole
+/// scrape batch, same column set as [`RECORD_SCRAPE_SQL`] — no `change_seq`
+/// bump, no `files` touch.
+const RECORD_SCRAPES_SQL: &str = "\
+UPDATE torrents AS t
+   SET seeders_est = i.est, scrape_failures = i.failures, last_scraped_at = now()
+  FROM unnest($1::bigint[], $2::integer[], $3::integer[]) AS i(id, est, failures)
+ WHERE t.id = i.id";
 
 /// Conditional scrape tombstone: wipes name/files like [`TOMBSTONE_SQL`]
 /// (without a denylist insert) but only when the row is still exactly as
@@ -709,6 +718,42 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Records a whole scrape batch in one statement (win 7, bep33.md §12):
+    /// same stats-only column set as [`Store::record_scrape`], so a batch
+    /// of any size moves no feed position. Returns the rows written (one
+    /// per input row whose `id` exists).
+    pub async fn record_scrapes(&self, rows: &[(i64, Option<u32>, u32)]) -> Result<u64> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut ids = Vec::with_capacity(rows.len());
+        let mut ests = Vec::with_capacity(rows.len());
+        let mut failures = Vec::with_capacity(rows.len());
+        for (id, est, fail) in rows.iter().copied() {
+            ids.push(id);
+            ests.push(
+                est.map(|e| {
+                    i32::try_from(e)
+                        .map_err(|_| StoreError::Invalid(format!("seeders_est {e} exceeds i32")))
+                })
+                .transpose()?,
+            );
+            failures.push(
+                i32::try_from(fail).map_err(|_| {
+                    StoreError::Invalid(format!("scrape_failures {fail} exceeds i32"))
+                })?,
+            );
+        }
+        let n = sqlx::query(RECORD_SCRAPES_SQL)
+            .bind(&ids)
+            .bind(&ests)
+            .bind(&failures)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(n)
+    }
+
     /// Tombstones a dead torrent and notes the removal in one transaction
     /// (a crash between the two would leave a tombstone without memory, and
     /// the key would be re-fetched on every flap).
@@ -810,32 +855,48 @@ impl Store {
     /// How long `key` stays out of admission: the cooldown for its
     /// consecutive-removal count minus the time since `removed_at`, or zero
     /// when the key was never removed or the cooldown has expired. Keys are
-    /// matched by 20-byte prefix.
-    pub async fn removal_cooldown_remaining(&self, key: &[u8]) -> Result<Duration> {
+    /// matched by 20-byte prefix. `base_days` is the configured
+    /// `removal_cooldown_days` (base, escalating ×~4 per repeat to the
+    /// 90d cap). Strong evidence (≥ [`REMOVAL_STRONG_EVIDENCE_SIGHTINGS`]
+    /// post-removal sightings) shortens the cooldown ÷4, never bypasses it.
+    pub async fn removal_cooldown_remaining(&self, key: &[u8], base_days: u64) -> Result<Duration> {
         check_key_len(key)?;
-        let row = sqlx::query("SELECT removed_at, removals FROM removed_keys WHERE key = $1")
-            .bind(prefix(key))
-            .fetch_optional(&self.pool)
-            .await?;
+        let row =
+            sqlx::query("SELECT removed_at, removals, sightings FROM removed_keys WHERE key = $1")
+                .bind(prefix(key))
+                .fetch_optional(&self.pool)
+                .await?;
         let Some(row) = row else {
             return Ok(Duration::ZERO);
         };
         let removed_at: chrono::DateTime<chrono::Utc> = get(&row, "removed_at")?;
         let removals: i32 = get(&row, "removals")?;
-        Ok(remaining_since(removed_at, removals))
+        let sightings: i32 = get(&row, "sightings")?;
+        Ok(remaining_since(
+            removed_at, removals, sightings, base_days, false,
+        ))
     }
 
     /// The remaining cooldown of several keys in one round trip: one
-    /// `(key, remaining)` pair per `removed_keys` row found (remaining may
+    /// [`RemovalCooldown`] per `removed_keys` row found (remaining may
     /// be zero for expired rows). Keys are matched by 20-byte prefix.
     /// Admission uses this to skip keys still in cooldown, in batch.
-    pub async fn removal_cooldowns(&self, keys: &[DhtKey]) -> Result<Vec<(DhtKey, Duration)>> {
+    /// `base_days` is the configured `removal_cooldown_days`; keys in
+    /// `strong_evidence` (e.g. announced with `seed=1` since the last
+    /// flush) get the ÷4 strong-evidence shortening, like keys with
+    /// enough post-removal sightings — shortening, never bypassing.
+    pub async fn removal_cooldowns(
+        &self,
+        keys: &[DhtKey],
+        base_days: u64,
+        strong_evidence: &[DhtKey],
+    ) -> Result<Vec<RemovalCooldown>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
         let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
         let rows = sqlx::query(
-            "SELECT key, removed_at, removals FROM removed_keys WHERE key = ANY($1::bytea[])",
+            "SELECT key, removed_at, removals, sightings FROM removed_keys WHERE key = ANY($1::bytea[])",
         )
         .bind(&raw)
         .fetch_all(&self.pool)
@@ -845,9 +906,15 @@ impl Store {
             let key: Vec<u8> = get(row, "key")?;
             let removed_at: chrono::DateTime<chrono::Utc> = get(row, "removed_at")?;
             let removals: i32 = get(row, "removals")?;
+            let sightings: i32 = get(row, "sightings")?;
             let key = DhtKey::from_slice(&key)
                 .map_err(|e| StoreError::Corrupt(format!("removed_keys.key: {e}")))?;
-            out.push((key, remaining_since(removed_at, removals)));
+            let strong = strong_evidence.contains(&key);
+            out.push(RemovalCooldown {
+                remaining: remaining_since(removed_at, removals, sightings, base_days, strong),
+                sightings: u32::try_from(sightings.max(0)).unwrap_or(u32::MAX),
+                key,
+            });
         }
         Ok(out)
     }
@@ -918,24 +985,44 @@ impl Store {
     }
 }
 
-/// Cooldown for a key removed `removals` times in a row (§4a): 7d, then 30d,
-/// then 90d capped. A successful fetch deletes the row
-/// ([`Store::complete`]), so resurgent torrents are not penalised forever.
-pub(crate) fn removal_cooldown(removals: i32) -> Duration {
+/// Post-removal sightings that count as strong evidence (§4a): the
+/// cooldown is shortened ÷4, never bypassed.
+pub const REMOVAL_STRONG_EVIDENCE_SIGHTINGS: i32 = 3;
+/// Cooldown cap, in days: repeats escalate toward but never past this.
+/// A constant, not a knob (bep33.md §6).
+const REMOVAL_COOLDOWN_CAP_DAYS: u32 = 90;
+
+/// Cooldown for a key removed `removals` times in a row (§4a) with a
+/// configured `base_days`: the base, then ×4, then the 90d cap.
+pub(crate) fn removal_cooldown_with_base(base_days: u64, removals: i32) -> Duration {
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    let base = DAY.saturating_mul(u32::try_from(base_days.max(1)).unwrap_or(u32::MAX));
+    let cap = DAY.saturating_mul(REMOVAL_COOLDOWN_CAP_DAYS);
     if removals <= 1 {
-        DAY.saturating_mul(7)
+        base.min(cap)
     } else if removals == 2 {
-        DAY.saturating_mul(30)
+        base.saturating_mul(4).min(cap)
     } else {
-        DAY.saturating_mul(90)
+        cap
     }
 }
 
 /// Remaining cooldown of a row removed at `removed_at` with `removals`
-/// consecutive removals.
-fn remaining_since(removed_at: chrono::DateTime<chrono::Utc>, removals: i32) -> Duration {
-    let cooldown = removal_cooldown(removals);
+/// consecutive removals. Strong evidence (`strong`, or at least
+/// [`REMOVAL_STRONG_EVIDENCE_SIGHTINGS`] post-removal `sightings`)
+/// shortens the cooldown ÷4 first — shortening, never bypassing, so a
+/// lying announcer cannot force a fetch loop.
+fn remaining_since(
+    removed_at: chrono::DateTime<chrono::Utc>,
+    removals: i32,
+    sightings: i32,
+    base_days: u64,
+    strong: bool,
+) -> Duration {
+    let mut cooldown = removal_cooldown_with_base(base_days, removals);
+    if strong || sightings >= REMOVAL_STRONG_EVIDENCE_SIGHTINGS {
+        cooldown = cooldown.checked_div(4).unwrap_or(Duration::ZERO);
+    }
     let elapsed = chrono::Utc::now().signed_duration_since(removed_at);
     if elapsed.num_seconds() < 0 {
         return cooldown;

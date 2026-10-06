@@ -118,6 +118,8 @@ impl CrawlOptions {
         };
         dht.tuning.scrape_early_exit_quorum =
             usize::try_from(c.scrape_early_exit_quorum).unwrap_or(usize::MAX);
+        dht.tuning.scrape_query_timeout = Duration::from_secs(c.scrape_query_timeout_secs);
+        dht.tuning.scrape_node_cache_keys = c.scrape_node_cache_keys;
         let mut opts = Self::new(
             dht,
             c.max_pending,
@@ -130,6 +132,7 @@ impl CrawlOptions {
         );
         opts.scrape = ScrapeTuning::from_config(c);
         opts.scrape_workers = c.scrape_workers;
+        opts.admission.removal_cooldown_days = c.removal_cooldown_days;
         Ok(opts)
     }
 }
@@ -426,6 +429,9 @@ mod tests {
         assert_eq!(o.fetch_workers, 64);
         assert_eq!(o.dht.scrape_packets_per_sec, 25);
         assert_eq!(o.dht.tuning.scrape_early_exit_quorum, 3);
+        assert_eq!(o.dht.tuning.scrape_query_timeout, Duration::from_secs(10));
+        assert_eq!(o.dht.tuning.scrape_node_cache_keys, 4096);
+        assert_eq!(o.admission.removal_cooldown_days, 7);
         assert_eq!(o.scrape_workers, 1);
         assert_eq!(o.scrape.threshold, 0);
         assert_eq!(o.max_pending, 5_000_000);
@@ -452,6 +458,24 @@ mod tests {
         };
         let o = CrawlOptions::new(test_dht, 10, 1, o.limits);
         assert!(o.filter.allow_private && o.filter.by_endpoint);
+    }
+
+    #[test]
+    fn options_propagate_scrape_knobs() {
+        // Every previously-dead knob reaches its consumer: the per-RPC
+        // scrape timeout and the node-cache size land in the DHT tuning,
+        // the removal base in the admission tuning.
+        let mut cfg = Config::default();
+        cfg.crawl.scrape_query_timeout_secs = 15;
+        cfg.crawl.scrape_lookup_timeout_secs = 30;
+        cfg.crawl.scrape_node_cache_keys = 128;
+        cfg.crawl.removal_cooldown_days = 14;
+        let o = CrawlOptions::from_config(&cfg).unwrap();
+        assert_eq!(o.dht.tuning.scrape_query_timeout, Duration::from_secs(15));
+        assert_eq!(o.dht.tuning.scrape_node_cache_keys, 128);
+        assert_eq!(o.admission.removal_cooldown_days, 14);
+        assert_eq!(o.scrape.lookup_timeout, Duration::from_secs(30));
+        assert!(o.dht.validate().is_ok());
     }
 
     #[test]

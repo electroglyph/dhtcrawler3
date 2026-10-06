@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use dc3_core::{AnyKey, DhtKey, InfoHashV2};
@@ -345,6 +346,20 @@ impl ScrapeItem {
             change_seq: get(row, "change_seq")?,
         })
     }
+}
+
+/// The admission cooldown of one removed key, as returned by
+/// [`crate::Store::removal_cooldowns`]. `remaining` already reflects the
+/// ÷4 strong-evidence shortening (enough post-removal sightings, or a
+/// seed announce): positive while the key stays out of admission, zero
+/// once it may be re-admitted. Shortening never bypasses: a fresh
+/// removal still blocks, just for a quarter of the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovalCooldown {
+    pub key: DhtKey,
+    pub remaining: Duration,
+    /// Post-removal sightings counted so far.
+    pub sightings: u32,
 }
 
 /// One key seen by the crawler, for [`crate::Store::observe`].
