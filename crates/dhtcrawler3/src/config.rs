@@ -208,7 +208,7 @@ pub struct CrawlConfig {
     /// Dedicated outbound packet budget for scrapes.
     pub scrape_packets_per_sec: u32,
     /// Base admission cooldown of a removed key, in days; repeats escalate
-    /// 7 -> 30 -> 90 days (capped, not a knob).
+    /// 7 -> 28 -> 90 days (capped, not a knob).
     pub removal_cooldown_days: u64,
     /// Grace before a tombstoned row is hard-purged, in hours.
     pub tombstone_purge_hours: u64,
