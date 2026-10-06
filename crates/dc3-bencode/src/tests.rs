@@ -225,6 +225,19 @@ fn regression_f01_to_owned_value_is_iterative() {
 }
 
 #[test]
+fn regression_f02_keys_count_toward_max_items() {
+    // F-02: dict keys count toward max_items (fail-closed over-count).
+    // d1:ai1e1:bi2ee = dict + 2 keys + 2 vals = 5 items.
+    let lim5 = Limits { max_items: 5, ..L };
+    assert!(decode(b"d1:ai1e1:bi2ee", &lim5).is_ok());
+    let lim4 = Limits { max_items: 4, ..L };
+    assert_eq!(
+        decode(b"d1:ai1e1:bi2ee", &lim4).unwrap_err().kind,
+        ErrorKind::TooManyItems
+    );
+}
+
+#[test]
 fn regression_f01_drop_deep_handles_dicts() {
     // F-01: drop_deep must tear down nested dicts iteratively too
     // (the old test helper only handled lists).

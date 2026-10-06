@@ -36,7 +36,8 @@ use std::collections::HashSet;
 pub struct Limits {
     /// Maximum nesting depth of values (the top-level value is depth 1).
     pub max_depth: usize,
-    /// Maximum total number of values (scalars and containers) in the input.
+    /// Maximum total number of decoded items (containers, scalars, and
+    /// dictionary keys).
     pub max_items: usize,
     /// Maximum length of any single byte string.
     pub max_string_len: usize,
