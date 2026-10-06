@@ -529,6 +529,7 @@ impl RoutingTable {
         let chosen = order.into_iter().find(|i| {
             bucket.replacements.get(*i).is_some_and(|r| {
                 self.admissible(&r.addr)
+                    && (r.bep42 || is_bep42_exempt(r.addr.ip()))
                     && !self.by_addr.contains_key(&self.key(&r.addr))
                     && !bucket
                         .nodes
@@ -1124,6 +1125,30 @@ mod tests {
         // Once it answers, it is proven and may displace the bad member.
         assert!(t.on_response(newcomer, addr(60), true, now));
         assert!(t.member(&bad2).is_none());
+        check(&t);
+    }
+
+    #[test]
+    fn bep42_invalid_nodes_are_not_promoted_from_replacements() {
+        let now = Instant::now();
+        let mut t = table(now);
+        let own = t.own_id();
+        let mut members = Vec::new();
+        for i in 0..K as u32 {
+            let id = own.random_with_prefix(0, true);
+            assert!(t.on_response(id, addr(i), true, now));
+            members.push((id, addr(i)));
+        }
+        assert_eq!(t.len(), K);
+        let spoof = own.random_with_prefix(0, true);
+        assert!(!t.on_response(spoof, addr(50), false, now));
+        assert!(t.member(&spoof).is_none());
+        let (bad_id, bad_addr) = members[0];
+        for _ in 0..MAX_FAILURES {
+            t.on_failure(&bad_addr, now);
+        }
+        assert!(t.member(&bad_id).is_none());
+        assert!(t.member(&spoof).is_none());
         check(&t);
     }
 
