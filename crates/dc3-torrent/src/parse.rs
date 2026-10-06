@@ -261,6 +261,12 @@ fn file_length(d: &Dict<'_>) -> Result<i64, ParseError> {
 /// Callers pass raw components, sanitised components, or both (OR-ed);
 /// the stored path is built from sanitised components, so at least the
 /// sanitised form must be checked.
+///
+/// `first` is the top-level directory, if the path has one: BEP 47 padding
+/// lives in a `.pad` *directory* (`.pad/<N>`), so a bare file named `.pad`
+/// with no directory part is not padding. Callers pass `None` for `first`
+/// when the path is a single component; only the `attr` flag and the legacy
+/// name prefix can then mark it as padding.
 fn is_padding(first: Option<&str>, last: Option<&str>, attr: Option<&[u8]>) -> bool {
     attr.is_some_and(|a| a.contains(&ATTR_PADDING))
         || first == Some(PAD_DIR)
@@ -419,12 +425,16 @@ fn v1_files(
             let length = file_length(fd)?;
             let (components, sanitised) = sanitised_path_components(fd, enc)?;
             let attr = fd.get_bytes(b"attr");
+            // The `.pad`-directory rule needs a directory part: a lone file
+            // named `.pad` is real content, not BEP 47 padding.
+            let raw_dir = components.len() >= 2;
+            let san_dir = sanitised.len() >= 2;
             let padding = is_padding(
-                components.first().map(AsRef::as_ref),
+                components.first().filter(|_| raw_dir).map(AsRef::as_ref),
                 components.last().map(AsRef::as_ref),
                 attr,
             ) || is_padding(
-                sanitised.first().map(String::as_str),
+                sanitised.first().filter(|_| san_dir).map(String::as_str),
                 sanitised.last().map(String::as_str),
                 attr,
             );
@@ -454,8 +464,10 @@ fn v1_files(
         let length = file_length(dict)?;
         let comp = sanitize_path_component(name);
         let attr = dict.get_bytes(b"attr");
-        let padding = is_padding(comp.as_deref(), comp.as_deref(), attr)
-            || is_padding(Some(name), Some(name), attr);
+        // A single file has no directory part, so the `.pad`-directory rule
+        // cannot apply; only `attr` or the legacy padding name mark it.
+        let padding = is_padding(None, comp.as_deref(), attr)
+            || is_padding(None, Some(name), attr);
         if let Some(p) = &comp {
             if p != name && !files.show_joined(p) {
                 files.show(p);
@@ -522,10 +534,12 @@ impl OpenDirs {
 
     /// Whether a file named `raw` in the current directory is padding.
     /// Checks both the raw and sanitised file name, so whitespace or
-    /// invisible characters cannot hide a padding marker.
+    /// invisible characters cannot hide a padding marker. A file at the
+    /// root has no directory part, so the `.pad`-directory rule cannot
+    /// apply to it; only `attr` or the legacy padding name can.
     fn is_padding(&self, raw: &str, sanitised: Option<&str>, attr: Option<&[u8]>) -> bool {
         let first_raw = if self.marks.is_empty() {
-            raw
+            ""
         } else if self.top_is_pad {
             PAD_DIR
         } else {
@@ -535,7 +549,7 @@ impl OpenDirs {
             return true;
         }
         let first_san = if self.marks.is_empty() {
-            sanitised.unwrap_or("")
+            ""
         } else if self.top_is_pad {
             PAD_DIR
         } else {
