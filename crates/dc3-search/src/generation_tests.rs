@@ -463,6 +463,22 @@ fn promote_restarts_the_age_of_the_retired_generation() {
 }
 
 #[test]
+fn promote_of_a_vanished_target_fails_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = IndexRoot::open(dir.path()).unwrap();
+    let (two, index) = root.create_next().unwrap();
+    drop(index);
+    // The target vanishes between creation and promotion: the under-lock
+    // check must fail without touching CURRENT.
+    fs::remove_dir_all(root.generation_dir(two)).unwrap();
+    assert!(matches!(
+        root.promote(two),
+        Err(SearchError::MissingGeneration(2))
+    ));
+    assert_eq!(root.current().unwrap().0, 1);
+}
+
+#[test]
 fn writer_locked_tracks_the_writer() {
     let dir = tempfile::tempdir().unwrap();
     let root = IndexRoot::open(dir.path()).unwrap();

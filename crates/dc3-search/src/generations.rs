@@ -237,8 +237,10 @@ impl IndexRoot {
     /// previously live generation's directory gets a fresh mtime, so
     /// [`cleanup`](Self::cleanup)'s age check counts from its retirement.
     pub fn promote(&self, generation: u64) -> Result<()> {
-        let dir = self.existing_index_dir(generation)?;
+        // Validated under the lock: a pre-lock check could go stale before
+        // the lock is held, so the check-then-act must happen atomically.
         let _lock = self.lock()?;
+        let dir = self.existing_index_dir(generation)?;
         drop(open_existing_index(&dir)?);
         // An unreadable CURRENT is replaced; there is nothing to retire.
         let previous = self.current_if_present().ok().flatten();
