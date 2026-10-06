@@ -257,10 +257,10 @@ fn error_kind(e: &SearchError) -> &'static str {
     }
 }
 
-/// The results-page URL for `q` at `page` in `sort` order.
-pub(crate) fn search_href(q: &str, page: u32, sort: Sort) -> String {
+/// The results-page URL for `q` at `page` in `sort` order with `per_page` results.
+pub(crate) fn search_href(q: &str, page: u32, sort: Sort, per_page: u32) -> String {
     format!(
-        "{}?q={}&p={page}&sort={}",
+        "{}?q={}&p={page}&sort={}&per_page={per_page}",
         routes::SEARCH,
         encode_query_value(q),
         encode_query_value(sort.as_str())
@@ -359,7 +359,7 @@ pub(crate) async fn search_page<B: Backend>(
         .iter()
         .map(|(choice, label)| SortLink {
             label,
-            href: search_href(q, 1, *choice),
+            href: search_href(q, 1, *choice, per_page),
             current: *choice == sort,
         })
         .collect();
@@ -375,8 +375,10 @@ pub(crate) async fn search_page<B: Backend>(
         rows,
         first_number: skipped.saturating_add(1),
         page_number,
-        prev_href: (page_number > 1).then(|| search_href(q, page_number.saturating_sub(1), sort)),
-        next_href: has_next.then(|| search_href(q, page_number.saturating_add(1), sort)),
+        prev_href: (page_number > 1)
+            .then(|| search_href(q, page_number.saturating_sub(1), sort, per_page)),
+        next_href: has_next
+            .then(|| search_href(q, page_number.saturating_add(1), sort, per_page)),
     };
     html(StatusCode::OK, &page)
 }
@@ -427,8 +429,16 @@ mod tests {
     #[test]
     fn hrefs_are_encoded() {
         assert_eq!(
-            search_href("a&b \"c\"", 2, Sort::Newest),
-            "/search?q=a%26b%20%22c%22&p=2&sort=newest"
+            search_href("a&b \"c\"", 2, Sort::Newest, DEFAULT_PER_PAGE),
+            "/search?q=a%26b%20%22c%22&p=2&sort=newest&per_page=20"
+        );
+    }
+
+    #[test]
+    fn hrefs_preserve_per_page() {
+        assert_eq!(
+            search_href("hello", 2, Sort::Relevance, 5),
+            "/search?q=hello&p=2&sort=relevance&per_page=5"
         );
     }
 
