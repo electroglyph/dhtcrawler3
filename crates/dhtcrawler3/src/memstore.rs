@@ -243,7 +243,11 @@ impl CrawlStore for MemoryStore {
             entry.0 = entry.0.saturating_add(u64::from(o.sightings));
             entry.1 |= o.priority;
         }
-        let full = i64::try_from(state.pending.len()).unwrap_or(i64::MAX) >= max_pending;
+        let full = i64::try_from(
+            state.pending.values().filter(|p| !p.gave_up).count(),
+        )
+        .unwrap_or(i64::MAX)
+            >= max_pending;
         let mut out = ObserveOutcome::default();
         let now = Instant::now();
         for (key, (n, priority)) in merged {
@@ -459,7 +463,10 @@ impl CrawlStore for MemoryStore {
     }
 
     async fn pending_depth(&self) -> Result<i64> {
-        Ok(i64::try_from(self.lock().pending.len()).unwrap_or(i64::MAX))
+        Ok(
+            i64::try_from(self.lock().pending.values().filter(|p| !p.gave_up).count())
+                .unwrap_or(i64::MAX),
+        )
     }
 
     async fn claim_scrape_due(
@@ -829,6 +836,23 @@ mod tests {
             quick.claim(1, Duration::from_secs(1)).await.unwrap().len(),
             1
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gave_up_keys_do_not_fill_the_queue() {
+        let s = MemoryStore::new();
+        s.observe(&[obs(key(1), false), obs(key(2), false)], 10)
+            .await
+            .unwrap();
+        assert!(s.give_up(&key(1)).await.unwrap());
+        assert!(s.give_up(&key(2)).await.unwrap());
+        // Nothing claimable remains, so depth counts only live entries.
+        assert_eq!(s.pending_depth().await.unwrap(), 0);
+        // The queue must not look full: a new key is still accepted.
+        let out = s.observe(&[obs(key(3), false)], 1).await.unwrap();
+        assert_eq!(out.queued, 1);
+        assert_eq!(out.dropped, 0);
+        assert_eq!(s.pending_depth().await.unwrap(), 1);
     }
 }
 
