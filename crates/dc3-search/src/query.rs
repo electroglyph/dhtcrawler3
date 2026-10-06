@@ -188,7 +188,6 @@ pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
 
     let mut tokenizer = Dc3Tokenizer::new();
     let mut words = Vec::with_capacity(raw.len());
-    let mut last_chars = 0usize;
     let mut trailing_ignored = false;
     for w in raw {
         let mut tokens = tokenizer.token_texts(&w.text);
@@ -203,7 +202,6 @@ pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
                 max: MAX_TERMS,
             });
         }
-        last_chars = w.text.chars().count();
         words.push(QueryWord {
             tokens,
             exclude: w.exclude,
@@ -220,12 +218,15 @@ pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
     // The quote that closes a phrase also closes the query for prefix
     // purposes, so only an unquoted trailing word qualifies. Trailing words
     // without tokens (for example `!!!`) are ignorable and must not flip the
-    // preceding word to a prefix.
+    // preceding word to a prefix. The length gate counts the folded token,
+    // not raw characters, so canonically identical tokens behave alike.
     if ends_open && !trailing_ignored && let Some(last) = words.last_mut() {
         let eligible = !last.exclude
             && !last.quoted
-            && last_chars >= PREFIX_MIN_CHARS
-            && last.tokens.last().is_some_and(|t| !contains_cjk(t));
+            && last
+                .tokens
+                .last()
+                .is_some_and(|t| t.chars().count() >= PREFIX_MIN_CHARS && !contains_cjk(t));
         last.prefix = eligible;
     }
 

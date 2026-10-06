@@ -198,6 +198,24 @@ fn trailing_ignored_word_does_not_open_prefix() {
 }
 
 #[test]
+fn prefix_gate_uses_folded_token_length() {
+    let folded = parse_query("ß").unwrap();
+    assert_eq!(folded.words[0].tokens, ["ss"]);
+    assert!(folded.words[0].prefix);
+    assert_eq!(
+        folded.words[0].prefix,
+        parse_query("ss").unwrap().words[0].prefix
+    );
+    let ligature = parse_query("ﬁ").unwrap();
+    assert_eq!(ligature.words[0].tokens, ["fi"]);
+    assert!(ligature.words[0].prefix);
+    assert_eq!(
+        ligature.words[0].prefix,
+        parse_query("fi").unwrap().words[0].prefix
+    );
+}
+
+#[test]
 fn parse_limits() {
     assert_eq!(parse_query(""), Err(QueryError::NoTerms));
     assert_eq!(parse_query("   "), Err(QueryError::NoTerms));
