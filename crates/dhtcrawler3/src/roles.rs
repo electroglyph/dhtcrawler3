@@ -2,6 +2,7 @@
 //! metrics listener, and `index --rebuild`.
 
 use std::io::Write;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use dc3_store::Store;
@@ -139,7 +140,8 @@ pub async fn web(cfg: &Config, cancel: CancellationToken) -> anyhow::Result<()> 
 }
 
 /// `all`: crawl, index and web in one process, each with its own pool and
-/// credentials. If one role fails, the others are stopped and the error is
+/// credentials (three pools of up to `database.max_connections` connections
+/// each). If one role fails, the others are stopped and the error is
 /// returned.
 pub async fn all(cfg: &Config, migrate: bool, cancel: CancellationToken) -> anyhow::Result<()> {
     let readiness = Readiness::new();
@@ -197,8 +199,51 @@ async fn run_all(
         });
     }
 
+    let first_error =
+        supervise_roles(&mut tasks, &roles, &cancel, ROLE_SHUTDOWN_TIMEOUT).await;
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Grace period for the remaining roles to stop after the first failure (or
+/// outer cancellation) before the rest are aborted. Without it a hung role
+/// hangs `all` forever: `JoinSet::join_next` waits indefinitely.
+const ROLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Supervises the role tasks: the first failure (or outer `cancel`) stops
+/// the others, and whatever is still running after `shutdown_timeout` is
+/// aborted instead of waited on forever. Returns the first role error, if any.
+async fn supervise_roles(
+    tasks: &mut JoinSet<(&'static str, anyhow::Result<()>)>,
+    roles: &CancellationToken,
+    cancel: &CancellationToken,
+    shutdown_timeout: Duration,
+) -> Option<anyhow::Error> {
     let mut first_error: Option<anyhow::Error> = None;
-    while let Some(joined) = tasks.join_next().await {
+    let mut stop_at: Option<tokio::time::Instant> = None;
+    while !tasks.is_empty() {
+        let next = match stop_at {
+            Some(deadline) => match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    tracing::error!("roles did not stop in time; aborting the rest");
+                    tasks.abort_all();
+                    // Aborted tasks finish promptly; reap them without waiting.
+                    while tasks.join_next().await.is_some() {}
+                    break;
+                }
+            },
+            None => {
+                tokio::select! {
+                    next = tasks.join_next() => next,
+                    () = cancel.cancelled() => {
+                        roles.cancel();
+                        stop_at = Some(tokio::time::Instant::now() + shutdown_timeout);
+                        continue;
+                    }
+                }
+            }
+        };
+        let Some(joined) = next else { break };
         let (role, result) = match joined {
             Ok(done) => done,
             Err(e) => ("unknown", Err(anyhow!("role task failed: {e}"))),
@@ -217,7 +262,53 @@ async fn run_all(
                 first_error = Some(e.context(format!("the {role} role failed")));
             }
             roles.cancel();
+            if stop_at.is_none() {
+                stop_at = Some(tokio::time::Instant::now() + shutdown_timeout);
+            }
         }
     }
-    first_error.map_or(Ok(()), Err)
+    first_error
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn hung_role_is_aborted_after_shutdown_timeout() {
+        let cancel = CancellationToken::new();
+        let roles = cancel.child_token();
+        let mut tasks: JoinSet<(&'static str, anyhow::Result<()>)> = JoinSet::new();
+        tasks.spawn(async { ("failing", Err(anyhow!("boom"))) });
+        tasks.spawn(async {
+            std::future::pending::<()>().await;
+            ("hung", Ok(()))
+        });
+        let err =
+            supervise_roles(&mut tasks, &roles, &cancel, Duration::from_millis(100)).await;
+        let err = err.expect("the failing role error is returned");
+        assert!(
+            err.to_string().contains("the failing role failed"),
+            "unexpected error: {err:?}"
+        );
+        assert!(tasks.is_empty(), "aborted tasks are reaped");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clean_shutdown_returns_no_error() {
+        let cancel = CancellationToken::new();
+        let roles = cancel.child_token();
+        let mut tasks: JoinSet<(&'static str, anyhow::Result<()>)> = JoinSet::new();
+        for name in ["a", "b"] {
+            let token = roles.clone();
+            tasks.spawn(async move {
+                token.cancelled().await;
+                (name, Ok(()))
+            });
+        }
+        cancel.cancel();
+        let err = supervise_roles(&mut tasks, &roles, &cancel, Duration::from_secs(30)).await;
+        assert!(err.is_none(), "unexpected error: {err:?}");
+    }
 }
