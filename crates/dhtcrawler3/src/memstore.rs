@@ -594,6 +594,59 @@ impl CrawlStore for MemoryStore {
         Ok(Self::is_denied(&self.lock(), keys))
     }
 
+    async fn removal_cooldowns(&self, keys: &[DhtKey]) -> Result<Vec<(DhtKey, Duration)>> {
+        let state = self.lock();
+        let now = Instant::now();
+        Ok(keys
+            .iter()
+            .filter_map(|key| {
+                state.removed.get(&prefix(key.as_bytes())).map(|e| {
+                    // Same 7d -> 30d -> 90d schedule as the database store.
+                    let days = match e.removals {
+                        0 | 1 => 7,
+                        2 => 30,
+                        _ => 90,
+                    };
+                    let cooldown = Duration::from_secs(days * 24 * 60 * 60);
+                    (
+                        *key,
+                        cooldown.saturating_sub(now.saturating_duration_since(e.removed_at)),
+                    )
+                })
+            })
+            .collect())
+    }
+
+    async fn note_removed_sightings(&self, keys: &[DhtKey]) -> Result<u64> {
+        let mut state = self.lock();
+        let mut n = 0u64;
+        for key in keys {
+            if let Some(e) = state.removed.get_mut(&prefix(key.as_bytes())) {
+                e.sightings = e.sightings.saturating_add(1);
+                n = n.saturating_add(1);
+            }
+        }
+        Ok(n)
+    }
+
+    async fn refresh_scraped(&self, keys: &[DhtKey]) -> Result<u64> {
+        let mut state = self.lock();
+        let now = Instant::now();
+        let mut n = 0u64;
+        for key in keys {
+            // Tombstoned and denied rows are gone from `torrents` (only a
+            // fetch revives those), so only live rows refresh.
+            if state.torrents.contains_key(key)
+                && let Some(sc) = state.scrapes.get_mut(key)
+            {
+                sc.last_scraped = Some(now);
+                sc.failures = 0;
+                n = n.saturating_add(1);
+            }
+        }
+        Ok(n)
+    }
+
     async fn ping(&self) -> Result<()> {
         Ok(())
     }

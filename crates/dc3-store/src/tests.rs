@@ -2750,3 +2750,46 @@ async fn fetch_queue_prefers_lively_keys(pool: PgPool) {
     assert!(rest.iter().all(|i| i.dht_key != ka));
 }
 
+
+#[sqlx::test(migrations = "./migrations")]
+async fn removal_cooldowns_and_sightings_batch(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let a = key(91);
+    let b = key(92);
+    let c = key(93);
+    s.note_removal(&a.0).await.unwrap();
+    s.note_removal(&b.0).await.unwrap();
+    // c was never removed: absent from the result.
+    let mut rows = s.removal_cooldowns(&[a, b, c]).await.unwrap();
+    rows.sort_by(|x, y| x.0.cmp(&y.0));
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|(_, r)| *r > Duration::ZERO));
+    // Sightings touch only existing rows; the count is returned.
+    assert_eq!(s.note_removed_sightings(&[a, c]).await.unwrap(), 1);
+    let n: i32 = sqlx::query_scalar("SELECT sightings FROM removed_keys WHERE key = $1")
+        .bind(a.0.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    assert!(s.note_removed_sightings(&[]).await.unwrap() == 0);
+    assert!(s.removal_cooldowns(&[]).await.unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn refresh_scraped_defers_without_a_lookup(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(94);
+    let id = s.complete(&k, &torrent(k, "live")).await.unwrap();
+    s.record_scrape(id, Some(12), 1).await.unwrap();
+    // A seed announce refreshes the stamp and resets failures, without
+    // moving change_seq (no indexer churn).
+    let before = change_seq_of(&pool, id).await;
+    assert_eq!(s.refresh_scraped(&[k]).await.unwrap(), 1);
+    assert_eq!(scrape_row(&pool, id).await, (Some(12), 0));
+    assert_eq!(change_seq_of(&pool, id).await, before);
+    // Unknown keys match nothing; tombstones stay tombstoned.
+    assert_eq!(s.refresh_scraped(&[key(95)]).await.unwrap(), 0);
+    s.deny(&k.0, DenyReason::Other, None, "tester").await.unwrap();
+    assert_eq!(s.refresh_scraped(&[k]).await.unwrap(), 0);
+}

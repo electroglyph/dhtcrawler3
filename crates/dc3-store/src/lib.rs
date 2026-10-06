@@ -11,7 +11,9 @@
 //!   [`Store::claim_scrape_due`], [`Store::record_scrape`],
 //!   [`Store::tombstone_dead`], [`Store::purge_tombstoned`],
 //!   [`Store::note_removal`], [`Store::note_removed_sighting`],
-//!   [`Store::removal_cooldown_remaining`], [`Store::removed_keys_count`],
+//!   [`Store::note_removed_sightings`], [`Store::removal_cooldown_remaining`],
+//!   [`Store::removal_cooldowns`], [`Store::refresh_scraped`],
+//!   [`Store::removed_keys_count`],
 //!   [`Store::is_denied`], [`Store::deny`], [`Store::scan_live`];
 //! * **index** (`dc3_indexer`): [`Store::high_water_mark`],
 //!   [`Store::changes_since`];

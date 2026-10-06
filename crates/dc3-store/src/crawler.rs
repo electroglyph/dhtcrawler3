@@ -823,15 +823,71 @@ impl Store {
         };
         let removed_at: chrono::DateTime<chrono::Utc> = get(&row, "removed_at")?;
         let removals: i32 = get(&row, "removals")?;
-        let cooldown = removal_cooldown(removals);
-        let elapsed = chrono::Utc::now().signed_duration_since(removed_at);
-        if elapsed.num_seconds() < 0 {
-            return Ok(cooldown);
+        Ok(remaining_since(removed_at, removals))
+    }
+
+    /// The remaining cooldown of several keys in one round trip: one
+    /// `(key, remaining)` pair per `removed_keys` row found (remaining may
+    /// be zero for expired rows). Keys are matched by 20-byte prefix.
+    /// Admission uses this to skip keys still in cooldown, in batch.
+    pub async fn removal_cooldowns(&self, keys: &[DhtKey]) -> Result<Vec<(DhtKey, Duration)>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
         }
-        match elapsed.to_std() {
-            Ok(elapsed) if elapsed < cooldown => Ok(cooldown.saturating_sub(elapsed)),
-            _ => Ok(Duration::ZERO),
+        let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
+        let rows = sqlx::query(
+            "SELECT key, removed_at, removals FROM removed_keys WHERE key = ANY($1::bytea[])",
+        )
+        .bind(&raw)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let key: Vec<u8> = get(row, "key")?;
+            let removed_at: chrono::DateTime<chrono::Utc> = get(row, "removed_at")?;
+            let removals: i32 = get(row, "removals")?;
+            let key = DhtKey::from_slice(&key)
+                .map_err(|e| StoreError::Corrupt(format!("removed_keys.key: {e}")))?;
+            out.push((key, remaining_since(removed_at, removals)));
         }
+        Ok(out)
+    }
+
+    /// Counts post-removal sightings of removed keys, in one statement.
+    /// Only increments existing rows; returns the rows touched. Admission
+    /// calls this for every batch key it finds still remembered, feeding
+    /// the §4a strong-evidence counter.
+    pub async fn note_removed_sightings(&self, keys: &[DhtKey]) -> Result<u64> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
+        let res = sqlx::query("UPDATE removed_keys SET sightings = sightings + 1 WHERE key = ANY($1::bytea[])")
+            .bind(&raw)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// A live seeder just proved itself (§4b win 6, announce short-circuit):
+    /// refreshes `last_scraped_at` and resets `scrape_failures` without a
+    /// lookup, deferring (never skipping) the next due scrape. Stats-only:
+    /// no `change_seq` bump. Tombstoned rows are untouched (only a fetch
+    /// revives those); keys without a row simply match nothing. Returns
+    /// the rows refreshed.
+    pub async fn refresh_scraped(&self, keys: &[DhtKey]) -> Result<u64> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
+        let res = sqlx::query(
+            "UPDATE torrents SET last_scraped_at = now(), scrape_failures = 0 \
+             WHERE dht_key = ANY($1::bytea[]) AND deleted_at IS NULL",
+        )
+        .bind(&raw)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Rows in `removed_keys`.
@@ -872,6 +928,20 @@ pub(crate) fn removal_cooldown(removals: i32) -> Duration {
         DAY.saturating_mul(30)
     } else {
         DAY.saturating_mul(90)
+    }
+}
+
+/// Remaining cooldown of a row removed at `removed_at` with `removals`
+/// consecutive removals.
+fn remaining_since(removed_at: chrono::DateTime<chrono::Utc>, removals: i32) -> Duration {
+    let cooldown = removal_cooldown(removals);
+    let elapsed = chrono::Utc::now().signed_duration_since(removed_at);
+    if elapsed.num_seconds() < 0 {
+        return cooldown;
+    }
+    match elapsed.to_std() {
+        Ok(elapsed) if elapsed < cooldown => cooldown.saturating_sub(elapsed),
+        _ => Duration::ZERO,
     }
 }
 

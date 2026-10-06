@@ -55,6 +55,12 @@ pub const HINT_KEYS: usize = 100_000;
 pub const HINT_PEERS_PER_KEY: usize = 8;
 /// Lifetime of a hint.
 pub const HINT_TTL: Duration = Duration::from_secs(5 * 60);
+/// Keys the removal-memory cache holds; beyond this it is cleared and
+/// rebuilt from the database (a documented heuristic: cooldowns only
+/// grow the cache under flap).
+pub const REMOVAL_CACHE_KEYS: usize = 100_000;
+/// How long a "not removed" answer is trusted without re-checking.
+pub const REMOVAL_CACHE_CLEAR_TTL: Duration = Duration::from_secs(60 * 60);
 /// Keys that trigger an immediate batch write.
 pub const BATCH_MAX_KEYS: usize = 1_000;
 /// Longest time a batch waits before it is written.
@@ -425,6 +431,22 @@ pub struct Admission<S> {
     sources: SourceTracker,
     hints: SharedHints,
     batch: HashMap<DhtKey, Pending>,
+    /// Keys announced with `seed=1` since the last flush: live seeders that
+    /// short-circuit their next scrape (bep33.md §4b win 6).
+    seed_announced: HashSet<DhtKey>,
+    /// Removal-memory verdicts by key (bep33.md §4a): a synchronous PK
+    /// lookup per discovery would kill throughput, so verdicts are cached
+    /// here and refreshed in batch by [`Admission::flush`].
+    removal_cache: HashMap<DhtKey, RemovalVerdict>,
+}
+
+/// A cached removal-memory verdict.
+#[derive(Debug, Clone, Copy)]
+enum RemovalVerdict {
+    /// In cooldown until the instant.
+    Blocked(Instant),
+    /// Known-clear when checked at the instant.
+    Clear(Instant),
 }
 
 impl<S> std::fmt::Debug for Admission<S> {
@@ -455,6 +477,8 @@ impl<S: CrawlStore> Admission<S> {
             sources: SourceTracker::new(tuning.source_keys),
             hints,
             batch: HashMap::new(),
+            seed_announced: HashSet::new(),
+            removal_cache: HashMap::new(),
         }
     }
 
@@ -495,6 +519,13 @@ impl<S: CrawlStore> Admission<S> {
         if self.dedup.maybe_rotate(now) {
             self.sources.clear();
         }
+        if event.seed {
+            // A live seeder just proved itself: refresh its scrape clock
+            // at flush time (announce short-circuit, §4b win 6). The key
+            // still flows through the normal batch path below (its peer
+            // is a hint like any other).
+            self.seed_announced.insert(event.key);
+        }
         if self.dedup.contains(&event.key) {
             return;
         }
@@ -533,14 +564,101 @@ impl<S: CrawlStore> Admission<S> {
             .collect()
     }
 
+    /// Drops batch keys still in removal cooldown (§4a) and counts a
+    /// post-removal sighting for every batch key the memory still knows.
+    /// Verdicts come from the LRU [`REMOVAL_CACHE_KEYS`] cache; misses are
+    /// checked in one batched query.
+    async fn gate_removals(&mut self) {
+        let now = Instant::now();
+        let mut misses = Vec::new();
+        let mut blocked_keys = Vec::new();
+        let mut remembered = Vec::new();
+        for key in self.batch.keys().copied().collect::<Vec<_>>() {
+            match self.removal_cache.get(&key) {
+                Some(RemovalVerdict::Blocked(until)) if *until > now => {
+                    blocked_keys.push(key);
+                    remembered.push(key);
+                }
+                Some(RemovalVerdict::Clear(at)) if now < *at + REMOVAL_CACHE_CLEAR_TTL => {}
+                _ => misses.push(key),
+            }
+        }
+        if !misses.is_empty() {
+            match self.store.removal_cooldowns(&misses).await {
+                Ok(rows) => {
+                    for (key, remaining) in rows {
+                        if remaining > Duration::ZERO {
+                            self.removal_cache
+                                .insert(key, RemovalVerdict::Blocked(now + remaining));
+                            blocked_keys.push(key);
+                            remembered.push(key);
+                        } else {
+                            self.removal_cache.insert(key, RemovalVerdict::Clear(now));
+                        }
+                    }
+                    for key in misses {
+                        self.removal_cache.entry(key).or_insert(RemovalVerdict::Clear(now));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "removal_cooldowns failed; admitting the batch unchecked"
+                    );
+                }
+            }
+            if self.removal_cache.len() > REMOVAL_CACHE_KEYS {
+                self.removal_cache.clear();
+            }
+        }
+        if !remembered.is_empty()
+            && let Err(e) = self.store.note_removed_sightings(&remembered).await
+        {
+            tracing::warn!(
+                error = %e,
+                "note_removed_sightings failed; continuing with the batch"
+            );
+        }
+        if !blocked_keys.is_empty() {
+            metrics::counter!(METRIC_BLOCKED, "reason" => "removal_cooldown")
+                .increment(u64::try_from(blocked_keys.len()).unwrap_or(u64::MAX));
+            for key in blocked_keys {
+                self.batch.remove(&key);
+            }
+        }
+    }
+
     /// Writes the batch, retrying with exponential backoff until it
     /// succeeds, `cancel` fires or `deadline` passes. Keys enter the dedup
     /// set only after a successful write.
+    ///
+    /// Before writing, the batch passes the removal-memory gate (§4a):
+    /// keys still in cooldown are dropped (counted as
+    /// `dc3_blocked_total{reason="removal_cooldown"}`) and counted as
+    /// post-removal sightings; keys announced with `seed=1` refresh their
+    /// scrape clock first (§4b win 6). Both helpers are best-effort: a
+    /// failed check admits the key (intake liveness beats duplicate
+    /// fetches; the scrape worker re-tombstones what revives wrongly).
     pub async fn flush(
         &mut self,
         cancel: Option<&CancellationToken>,
         deadline: Option<Instant>,
     ) -> Result<ObserveOutcome, FlushStopped> {
+        if !self.seed_announced.is_empty() {
+            let keys: Vec<DhtKey> = self.seed_announced.iter().copied().collect();
+            self.seed_announced.clear();
+            if let Err(e) = self.store.refresh_scraped(&keys).await {
+                tracing::warn!(
+                    error = %e,
+                    keys = keys.len(),
+                    "refresh_scraped failed; continuing with the batch"
+                );
+            }
+        }
+        if self.batch.is_empty() {
+            return Ok(ObserveOutcome::default());
+        }
+        self.gate_removals().await;
         if self.batch.is_empty() {
             return Ok(ObserveOutcome::default());
         }
@@ -674,7 +792,32 @@ mod tests {
             key: k,
             source,
             peer: peer.map(sa),
+            seed: false,
             from: ip(from),
+        }
+    }
+
+    fn seed_event(k: DhtKey) -> Discovered {
+        Discovered {
+            key: k,
+            source: Source::Announce,
+            peer: None,
+            seed: true,
+            from: ip("8.8.8.8"),
+        }
+    }
+
+    fn stored_torrent(k: DhtKey) -> dc3_store::NewTorrent {
+        dc3_store::NewTorrent {
+            dht_key: k,
+            info_hash_v1: Some(k),
+            info_hash_v2: None,
+            name: "x".into(),
+            total_size: 1,
+            file_count: 0,
+            files: Vec::new(),
+            files_truncated: false,
+            piece_length: None,
         }
     }
 
@@ -976,5 +1119,65 @@ mod tests {
         stop.cancel();
         task.await.unwrap();
         assert_eq!(store.pending_keys(), vec![key(1), key(2)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_skips_keys_in_removal_cooldown() {
+        use crate::stores::CrawlStore;
+
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::new(vec![ip("8.8.4.4")], vec![]);
+        let t0 = Instant::now();
+        // Key 1 was scrape-tombstoned, so its removal is remembered.
+        let dead = key(1);
+        let id = store.complete(&dead, &stored_torrent(dead)).await.unwrap();
+        let items = store
+            .claim_scrape_due(10, Duration::ZERO, Duration::ZERO)
+            .await
+            .unwrap();
+        let snap = items.iter().find(|c| c.id == id).unwrap().clone();
+        assert!(
+            store
+                .tombstone_dead(id, snap.last_seen_at, snap.change_seq)
+                .await
+                .unwrap()
+        );
+        // Key 2 is fresh.
+        let live = key(2);
+        a.handle(event(dead, Source::Announce, "1.2.3.4", None), &own, t0);
+        a.handle(event(live, Source::Announce, "1.2.3.4", None), &own, t0);
+        let out = a.flush(None, None).await.unwrap();
+        assert_eq!(out.queued, 1);
+        assert_eq!(store.pending_keys(), vec![live]);
+        // Still blocked on the next flush (cached verdict): no re-fetch
+        // storm while the cooldown runs.
+        a.handle(event(dead, Source::Announce, "5.6.7.8", None), &own, t0);
+        let out = a.flush(None, None).await.unwrap();
+        assert_eq!(out.queued, 0);
+        assert_eq!(store.pending_keys(), vec![live]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_refreshes_seed_announced_scrapes() {
+        use crate::stores::CrawlStore;
+
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::new(vec![ip("8.8.4.4")], vec![]);
+        let k = key(5);
+        let id = store.complete(&k, &stored_torrent(k)).await.unwrap();
+        store.record_scrape(id, Some(3), 1).await.unwrap();
+        // A seed announce is also a discovery (its peer is a hint), and it
+        // refreshes the scrape clock without a lookup.
+        a.handle(seed_event(k), &own, Instant::now());
+        a.flush(None, None).await.unwrap();
+        let items = store
+            .claim_scrape_due(10, Duration::ZERO, Duration::ZERO)
+            .await
+            .unwrap();
+        let item = items.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(item.scrape_failures, 0);
+        assert_eq!(item.seeders_est, Some(3));
     }
 }

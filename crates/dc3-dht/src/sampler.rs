@@ -495,6 +495,7 @@ async fn sample_one(inner: &Inner, sampler: &Sampler, sock: &SocketNode, ticket:
                             key,
                             source: Source::Sample,
                             peer: None,
+                            seed: false,
                             from,
                         });
                     }

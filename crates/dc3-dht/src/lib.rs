@@ -115,6 +115,9 @@ pub struct Discovered {
     pub source: Source,
     /// The announcing peer, for `Source::Announce`. It passed [`is_dialable`].
     pub peer: Option<SocketAddr>,
+    /// True when an `announce_peer` arrived with `seed=1` (BEP 33): a live
+    /// seeder just proved itself. Always false for other sources.
+    pub seed: bool,
     /// The source IP of the packet behind the discovery: the querying node
     /// for `Announce` and `GetPeers`, the answering node for `Sample`.
     /// IPv4-mapped addresses are given as IPv4.

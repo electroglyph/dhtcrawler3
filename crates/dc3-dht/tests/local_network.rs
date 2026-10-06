@@ -442,12 +442,14 @@ async fn private_network_inner() {
         key,
         source: Source::GetPeers,
         peer: None,
+        seed: false,
         from: LOCALHOST_V4,
     };
     let announce = Discovered {
         key,
         source: Source::Announce,
         peer: Some(client.addr()),
+        seed: false,
         from: LOCALHOST_V4,
     };
     assert_eq!(events, vec![get_peers, announce, get_peers]);

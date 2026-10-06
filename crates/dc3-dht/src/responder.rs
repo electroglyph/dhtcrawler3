@@ -128,6 +128,7 @@ pub(crate) fn answer(
                 key: *info_hash,
                 source: Source::GetPeers,
                 peer: None,
+                seed: false,
                 from,
             });
         }
@@ -170,6 +171,7 @@ pub(crate) fn answer(
                     key: *info_hash,
                     source: Source::Announce,
                     peer: Some(peer),
+                    seed: *seed,
                     from,
                 });
             }
@@ -389,6 +391,7 @@ mod tests {
                 key,
                 source: Source::GetPeers,
                 peer: None,
+                seed: false,
                 from
             })
         );
@@ -431,6 +434,7 @@ mod tests {
                 key,
                 source: Source::Announce,
                 peer: Some(peer),
+                seed: false,
                 from
             })
         );
@@ -443,6 +447,17 @@ mod tests {
             token, seed: false };
         let (_, event) = f.ask(src(), &query(implied)).unwrap();
         assert_eq!(event.unwrap().peer, Some(src()));
+
+        // seed=1 announces propagate the seed flag to the discovery event.
+        let seeding = Method::AnnouncePeer {
+            info_hash: DhtKey([6; 20]),
+            port: 7001,
+            implied_port: false,
+            token: f.tokens.issue(src().ip()).to_vec(),
+            seed: true,
+        };
+        let (_, event) = f.ask(src(), &query(seeding)).unwrap();
+        assert_eq!(event.unwrap().seed, true);
 
         let (reply, _) = f
             .ask(src(), &query(Method::GetPeers { info_hash: key, scrape: false }))

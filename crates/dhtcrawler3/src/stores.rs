@@ -83,6 +83,18 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
     fn removed_keys_count(&self) -> impl Future<Output = Result<i64>> + Send;
     /// See [`Store::is_denied`].
     fn is_denied(&self, keys: &[&[u8]]) -> impl Future<Output = Result<bool>> + Send;
+    /// See [`Store::removal_cooldowns`].
+    fn removal_cooldowns(
+        &self,
+        keys: &[DhtKey],
+    ) -> impl Future<Output = Result<Vec<(DhtKey, Duration)>>> + Send;
+    /// See [`Store::note_removed_sightings`].
+    fn note_removed_sightings(
+        &self,
+        keys: &[DhtKey],
+    ) -> impl Future<Output = Result<u64>> + Send;
+    /// See [`Store::refresh_scraped`].
+    fn refresh_scraped(&self, keys: &[DhtKey]) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::ping`].
     fn ping(&self) -> impl Future<Output = Result<()>> + Send;
 }
@@ -187,6 +199,24 @@ impl CrawlStore for Store {
 
     fn is_denied(&self, keys: &[&[u8]]) -> impl Future<Output = Result<bool>> + Send {
         Store::is_denied(self, keys)
+    }
+
+    fn removal_cooldowns(
+        &self,
+        keys: &[DhtKey],
+    ) -> impl Future<Output = Result<Vec<(DhtKey, Duration)>>> + Send {
+        Store::removal_cooldowns(self, keys)
+    }
+
+    fn note_removed_sightings(
+        &self,
+        keys: &[DhtKey],
+    ) -> impl Future<Output = Result<u64>> + Send {
+        Store::note_removed_sightings(self, keys)
+    }
+
+    fn refresh_scraped(&self, keys: &[DhtKey]) -> impl Future<Output = Result<u64>> + Send {
+        Store::refresh_scraped(self, keys)
     }
 
     fn ping(&self) -> impl Future<Output = Result<()>> + Send {
