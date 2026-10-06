@@ -116,6 +116,20 @@ fn v1_single_file() {
 }
 
 #[test]
+fn v1_empty_pieces_is_zero_length_torrent() {
+    let v = d([
+        ("name", b("x")),
+        ("length", i(0)),
+        ("piece length", i(16384)),
+        ("pieces", O::bytes(vec![])),
+    ]);
+    let m = parse(&v).unwrap();
+    assert_eq!(m.total_size, 0);
+    assert_eq!(m.file_count, 1);
+    assert!(m.info_hash_v1.is_some());
+}
+
+#[test]
 fn v1_multi_file_prefers_utf8_variants() {
     let files = vec![
         v1_file(10, &["b", "file.txt"]),
