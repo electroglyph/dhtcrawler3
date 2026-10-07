@@ -327,6 +327,40 @@ fn encoder_is_canonical() {
 }
 
 #[test]
+fn encoder_int_edge_cases_without_alloc() {
+    // The stack digit writer must match `to_string` exactly.
+    for v in [
+        0i64,
+        1,
+        -1,
+        9,
+        10,
+        -10,
+        42,
+        -42,
+        100,
+        1234567890,
+        -1234567890,
+        i64::MAX,
+        i64::MIN,
+        i64::MIN + 1,
+    ] {
+        assert_eq!(
+            encode(&OwnedValue::Int(v)),
+            format!("i{v}e").into_bytes(),
+            "int {v}"
+        );
+    }
+    // Length prefixes go through the same no-alloc path.
+    for len in [0usize, 1, 9, 10, 99, 100, 1024, 65535] {
+        let bytes = vec![b'x'; len];
+        let mut expected = format!("{len}:").into_bytes();
+        expected.extend_from_slice(&bytes);
+        assert_eq!(encode(&OwnedValue::Bytes(bytes)), expected);
+    }
+}
+
+#[test]
 fn bep5_example_ping() {
     let q = b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t2:aa1:y1:qe";
     let v = decode(q, &Limits::KRPC).unwrap();

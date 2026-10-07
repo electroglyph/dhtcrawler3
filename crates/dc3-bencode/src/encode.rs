@@ -86,7 +86,7 @@ pub fn encode_into(v: &OwnedValue, out: &mut Vec<u8>) {
             Work::Value(OwnedValue::Bytes(b)) => write_bytes(b, out),
             Work::Value(OwnedValue::Int(i)) => {
                 out.push(b'i');
-                out.extend_from_slice(i.to_string().as_bytes());
+                write_i64(*i, out);
                 out.push(b'e');
             }
             Work::Value(OwnedValue::List(items)) => {
@@ -109,7 +109,49 @@ pub fn encode_into(v: &OwnedValue, out: &mut Vec<u8>) {
 }
 
 fn write_bytes(b: &[u8], out: &mut Vec<u8>) {
-    out.extend_from_slice(b.len().to_string().as_bytes());
+    write_usize(b.len(), out);
     out.push(b':');
     out.extend_from_slice(b);
+}
+
+/// Appends `v` as decimal without allocating.
+fn write_i64(v: i64, out: &mut Vec<u8>) {
+    if v == 0 {
+        out.push(b'0');
+        return;
+    }
+    let neg = v < 0;
+    // Use unsigned magnitude so `i64::MIN` does not overflow on negation.
+    let mut mag = v.unsigned_abs() as u64;
+    let mut buf = [0u8; 20];
+    let mut len = 0;
+    while mag > 0 {
+        buf[len] = b'0' + (mag % 10) as u8;
+        mag /= 10;
+        len += 1;
+    }
+    if neg {
+        out.push(b'-');
+    }
+    for i in (0..len).rev() {
+        out.push(buf[i]);
+    }
+}
+
+/// Appends `v` as decimal without allocating.
+fn write_usize(mut v: usize, out: &mut Vec<u8>) {
+    if v == 0 {
+        out.push(b'0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut len = 0;
+    while v > 0 {
+        buf[len] = b'0' + (v % 10) as u8;
+        v /= 10;
+        len += 1;
+    }
+    for i in (0..len).rev() {
+        out.push(buf[i]);
+    }
 }
