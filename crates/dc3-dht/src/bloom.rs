@@ -121,6 +121,9 @@ impl Default for ScrapeBloom {
 pub fn estimate_from_zeros(zeros: usize) -> Option<f64> {
     const M: f64 = BLOOM_BITS as f64;
     const K: f64 = BLOOM_K as f64;
+    // `ln(1 - 1/m)`: constant for this filter shape, so it is folded
+    // instead of recomputed per estimate (`f64::ln` is not `const`).
+    const DENOM: f64 = -0.0004884004981088745;
     if zeros == 0 {
         return None;
     }
@@ -129,8 +132,7 @@ pub fn estimate_from_zeros(zeros: usize) -> Option<f64> {
     }
     let z = zeros as f64;
     // n = ln(z/m) / (k * ln(1 - 1/m)).
-    let denom = (1.0 - 1.0 / M).ln();
-    Some((z / M).ln() / (K * denom))
+    Some((z / M).ln() / (K * DENOM))
 }
 
 /// Estimated set size of raw filter bytes, or `None` when saturated
@@ -205,6 +207,26 @@ mod tests {
     fn rejects_wrong_length() {
         assert!(ScrapeBloom::from_bytes(&[0u8; 10]).is_none());
         assert!(ScrapeBloom::from_bytes(&[0u8; BLOOM_LEN]).is_some());
+    }
+
+    #[test]
+    fn estimator_matches_live_denominator_bitwise() {
+        // The folded denominator must reproduce the live formula
+        // bit-for-bit across the input range (no NaNs involved).
+        const M: f64 = BLOOM_BITS as f64;
+        const K: f64 = BLOOM_K as f64;
+        let live = |zeros: usize| {
+            if zeros == 0 {
+                return None;
+            }
+            if zeros >= BLOOM_BITS {
+                return Some(0.0);
+            }
+            Some((zeros as f64 / M).ln() / (K * (1.0 - 1.0 / M).ln()))
+        };
+        for zeros in [1, 2, 7, 100, 1000, 2047] {
+            assert_eq!(estimate_from_zeros(zeros), live(zeros), "zeros {zeros}");
+        }
     }
 
     #[test]
