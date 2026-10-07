@@ -55,12 +55,9 @@ async fn within<F: Future>(deadline: Option<Instant>, f: F) -> Result<F::Output,
 fn our_peer_id() -> [u8; PEER_ID_LEN] {
     let mut id = [0u8; PEER_ID_LEN];
     let random: [u8; PEER_ID_LEN] = rand::random();
-    for (i, slot) in id.iter_mut().enumerate() {
-        *slot = match PEER_ID_PREFIX.get(i) {
-            Some(b) => *b,
-            None => random.get(i).copied().unwrap_or_default(),
-        };
-    }
+    let n = PEER_ID_PREFIX.len();
+    id[..n].copy_from_slice(PEER_ID_PREFIX);
+    id[n..].copy_from_slice(&random[n..]);
     id
 }
 
@@ -273,4 +270,19 @@ async fn send_requests<W: AsyncWriteExt + Unpin>(
         wr.write_all(&out).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn our_peer_id_carries_prefix_and_random_tail() {
+        let a = our_peer_id();
+        let b = our_peer_id();
+        assert_eq!(&a[..PEER_ID_PREFIX.len()], PEER_ID_PREFIX);
+        assert_eq!(&b[..PEER_ID_PREFIX.len()], PEER_ID_PREFIX);
+        // 96 random tail bits collide with negligible probability.
+        assert_ne!(&a[PEER_ID_PREFIX.len()..], &b[PEER_ID_PREFIX.len()..]);
+    }
 }
