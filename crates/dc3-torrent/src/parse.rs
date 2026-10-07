@@ -367,10 +367,14 @@ fn decoded_list<'a>(
 /// Each list is decoded at most once and moved (never re-decoded): the old
 /// code re-decoded the legacy list (`leg_dec2`) and decoded the preferred
 /// list again in the counted-but-unlisted fallback (up to 4 list-decodes).
+///
+/// Returns the decoded components, the sanitised survivors, and whether the
+/// filename (last component) sanitised to something. A surviving directory
+/// prefix with an invalid filename must not be listed as a file.
 fn sanitised_path_components<'a>(
     fd: &'a Dict<'a>,
     enc: Option<&'static Encoding>,
-) -> Result<(Vec<Cow<'a, str>>, Vec<String>), ParseError> {
+) -> Result<(Vec<Cow<'a, str>>, Vec<String>, bool), ParseError> {
     let pref_dec = decoded_list(fd, b"path.utf-8", enc, true);
     let leg_dec = decoded_list(fd, b"path", enc, false);
     if pref_dec.is_none() && leg_dec.is_none() {
@@ -390,7 +394,12 @@ fn sanitised_path_components<'a>(
                 comps.push(a.clone());
             }
             if !san.is_empty() {
-                return Ok((comps, san));
+                let last_valid = p.last().zip(l.last()).is_some_and(|(a, b)| {
+                    sanitize_path_component(a)
+                        .or_else(|| sanitize_path_component(b))
+                        .is_some()
+                });
+                return Ok((comps, san, last_valid));
             }
             // Preferred sanitised to nothing: fall through to legacy below.
         }
@@ -402,7 +411,10 @@ fn sanitised_path_components<'a>(
             .filter_map(|c| sanitize_path_component(c))
             .collect();
         if !san.is_empty() {
-            return Ok((comps, san));
+            let last_valid = comps
+                .last()
+                .is_some_and(|c| sanitize_path_component(c).is_some());
+            return Ok((comps, san, last_valid));
         }
         // Preferred sanitised to nothing: fall back to the already-decoded
         // legacy list.
@@ -412,12 +424,15 @@ fn sanitised_path_components<'a>(
                 .filter_map(|c| sanitize_path_component(c))
                 .collect();
             if !san.is_empty() {
-                return Ok((comps, san));
+                let last_valid = comps
+                    .last()
+                    .is_some_and(|c| sanitize_path_component(c).is_some());
+                return Ok((comps, san, last_valid));
             }
         }
         // Both sanitise to nothing: the preferred decoded list is counted
         // but unlisted, matching existing unlistable handling.
-        return Ok((comps, Vec::new()));
+        return Ok((comps, Vec::new(), false));
     }
     // Only the legacy list exists (preferred was missing).
     let comps = leg_dec.unwrap_or_default();
@@ -426,10 +441,13 @@ fn sanitised_path_components<'a>(
         .filter_map(|c| sanitize_path_component(c))
         .collect();
     if !san.is_empty() {
-        return Ok((comps, san));
+        let last_valid = comps
+            .last()
+            .is_some_and(|c| sanitize_path_component(c).is_some());
+        return Ok((comps, san, last_valid));
     }
     // Legacy sanitised to nothing: counted but unlisted.
-    Ok((comps, Vec::new()))
+    Ok((comps, Vec::new(), false))
 }
 
 /// Collects the files of a v1 torrent: `files` (multi-file) or `length` (single file).
@@ -444,25 +462,34 @@ fn v1_files(
         for item in list {
             let fd = item.as_dict().ok_or(ParseError::InvalidField("files"))?;
             let length = file_length(fd)?;
-            let (components, sanitised) = sanitised_path_components(fd, enc)?;
+            let (components, sanitised, filename_valid) = sanitised_path_components(fd, enc)?;
             let attr = fd.get_bytes(b"attr");
             // The `.pad`-directory rule needs a directory part: a lone file
-            // named `.pad` is real content, not BEP 47 padding.
+            // named `.pad` is real content, not BEP 47 padding. An invalid
+            // filename contributes no `last` to the check.
             let raw_dir = components.len() >= 2;
             let san_dir = sanitised.len() >= 2;
+            let raw_last = filename_valid
+                .then(|| components.last().map(AsRef::as_ref))
+                .flatten();
+            let san_last = filename_valid
+                .then(|| sanitised.last().map(String::as_str))
+                .flatten();
             let padding = is_padding(
                 components.first().filter(|_| raw_dir).map(AsRef::as_ref),
-                components.last().map(AsRef::as_ref),
+                raw_last,
                 attr,
             ) || is_padding(
                 sanitised.first().filter(|_| san_dir).map(String::as_str),
-                sanitised.last().map(String::as_str),
+                san_last,
                 attr,
             );
             // Past the budget the joined path is not needed: parsing fails.
+            // An invalid filename yields no path: the surviving directory
+            // prefix must not be listed as a file.
             let mut path = None;
             let mut whole = false;
-            if !files.over_budget {
+            if filename_valid && !files.over_budget {
                 let mut capped = CappedPath::default();
                 for c in &sanitised {
                     capped.push(c);
@@ -581,15 +608,19 @@ impl OpenDirs {
     /// Shows the file `comp` in the current directory and returns its path.
     ///
     /// The joined path is built and shown while the budget lasts; otherwise,
-    /// or when the cap cut it, the names are shown on their own.
+    /// or when the cap cut it, the names are shown on their own. An invalid
+    /// filename (`None`) yields no path: the surviving directory prefix is
+    /// shown for the text budget but never listed as a file.
     fn show_file(&mut self, comp: Option<&str>, files: &mut Collector<'_>) -> Option<String> {
+        let Some(comp) = comp else {
+            self.show_names(files);
+            return None;
+        };
         let mut path = None;
         let mut whole = false;
         if !files.over_budget {
             let mut capped = self.path.clone();
-            if let Some(comp) = comp {
-                capped.push(comp);
-            }
+            capped.push(comp);
             whole = !capped.cut;
             path = capped.finish();
             if let Some(p) = &path {
@@ -598,9 +629,7 @@ impl OpenDirs {
         }
         if !whole {
             self.show_names(files);
-            if let Some(comp) = comp {
-                files.show(comp);
-            }
+            files.show(comp);
         }
         path
     }

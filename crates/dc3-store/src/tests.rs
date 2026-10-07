@@ -1172,9 +1172,13 @@ async fn lookups_and_stats(pool: PgPool) {
         .unwrap()
         .unwrap();
     assert_eq!(full.files.len(), 25);
+    // The preview is flagged: the client can tell the list is partial.
+    assert!(many[0].files_truncated);
+    assert!(!many[1].files_truncated);
     assert_eq!(
         TorrentRecord {
             files: full.files[..GET_MANY_MAX_FILES].to_vec(),
+            files_truncated: true,
             ..full.clone()
         },
         many[0]
@@ -1938,4 +1942,168 @@ async fn refresh_scraped_defers_without_a_lookup(pool: PgPool) {
             .unwrap()
     );
     assert_eq!(s.refresh_scraped(&[k]).await.unwrap(), 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn trim_negative_cap_deletes_nothing(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    for n in [41u8, 42] {
+        s.note_removal(&key(n).0).await.unwrap();
+    }
+    assert_eq!(s.removed_keys_count().await.unwrap(), 2);
+    // A negative cap keeps everything: forgetting all removal memory would
+    // re-admit cooled-down keys early.
+    assert_eq!(s.trim_removed_keys(-5).await.unwrap(), 0);
+    assert_eq!(s.removed_keys_count().await.unwrap(), 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn refresh_scraped_matches_alias_keys(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let (k1, k2) = (key(43), key(44));
+    let id = s
+        .complete(
+            &k1,
+            &NewTorrent {
+                dht_key: k1,
+                info_hash_v1: Some(k2),
+                ..torrent(k1, "hybrid")
+            },
+        )
+        .await
+        .unwrap();
+    s.record_scrape(id, Some(7), 2).await.unwrap();
+    // The row is stored under k1 but known as k2: a seed announce under the
+    // alias defers the next scrape just like one under the stored key.
+    let before = change_seq_of(&pool, id).await;
+    assert_eq!(s.refresh_scraped(&[k2]).await.unwrap(), 1);
+    assert_eq!(scrape_row(&pool, id).await, (Some(7), 0));
+    assert_eq!(change_seq_of(&pool, id).await, before);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn observe_leaves_tombstoned_rows_alone(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(45);
+    let id = s.complete(&k, &torrent(k, "doomed")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    let seen_before: i64 = sqlx::query_scalar("SELECT seen_count FROM torrents WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // The sighting never touches the dead row (no bump, no feed churn); the
+    // key falls through to the queue so a refetch can revive it.
+    let out = s.observe(&[obs(k, 5)], NO_LIMIT).await.unwrap();
+    assert_eq!((out.known, out.queued, out.dropped), (0, 1, 0));
+    let seen_after: i64 = sqlx::query_scalar("SELECT seen_count FROM torrents WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(seen_before, seen_after);
+    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_none());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn complete_under_alias_clears_stored_key_removal_memory(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let (k1, k2) = (key(46), key(47));
+    let id = s.complete(&k1, &torrent(k1, "orig")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    assert!(s.removal_cooldown_remaining(&k1.0, 7).await.unwrap() > Duration::ZERO);
+    // A successful refetch under another name for the same torrent clears
+    // the stored key's removal memory too, not just the fetched key's.
+    let id2 = s
+        .complete(
+            &k2,
+            &NewTorrent {
+                dht_key: k2,
+                info_hash_v1: Some(k1),
+                ..torrent(k2, "revived")
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(id, id2);
+    assert_eq!(
+        s.removal_cooldown_remaining(&k1.0, 7).await.unwrap(),
+        Duration::ZERO
+    );
+    assert_eq!(
+        s.removal_cooldown_remaining(&k2.0, 7).await.unwrap(),
+        Duration::ZERO
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn tombstone_clears_scrape_scheduling(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(48);
+    let id = s.complete(&k, &torrent(k, "scraped")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    s.record_scrape(id, Some(42), 3).await.unwrap();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    // A revived row must not inherit a stale estimate, failure count or
+    // last-scraped stamp for its next scrape scheduling.
+    let row: (Option<i32>, i32, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT seeders_est, scrape_failures, last_scraped_at FROM torrents WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (None, 0, None));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn seen_count_saturates_at_bigint_max(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(49);
+    let id = s.complete(&k, &torrent(k, "hot")).await.unwrap();
+    sqlx::query("UPDATE torrents SET seen_count = 9223372036854775800 WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Near-max plus fresh sightings clamps instead of aborting the batch.
+    let out = s.observe(&[obs(k, 200)], NO_LIMIT).await.unwrap();
+    assert_eq!(out.known, 1);
+    let seen: i64 = sqlx::query_scalar("SELECT seen_count FROM torrents WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(seen, i64::MAX);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn scrape_claim_returns_oldest_first(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let mut ids = Vec::new();
+    for (n, name) in [(51u8, "oldest"), (52, "middle"), (53, "newest")] {
+        ids.push(s.complete(&key(n), &torrent(key(n), name)).await.unwrap());
+    }
+    backdate_scrape(&pool, ids[0], days(30), Some(1)).await;
+    backdate_scrape(&pool, ids[1], days(20), Some(1)).await;
+    backdate_scrape(&pool, ids[2], days(10), Some(1)).await;
+    let claimed = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    assert_eq!(claimed.iter().map(|c| c.id).collect::<Vec<_>>(), ids);
 }

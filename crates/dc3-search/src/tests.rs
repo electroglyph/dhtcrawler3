@@ -90,7 +90,21 @@ fn overlong_tokens_are_dropped() {
         .iter()
         .map(|t| (t.text.as_str(), t.position))
         .collect();
-    assert_eq!(got, [("x", 0), (ok.as_str(), 1), ("y", 2)]);
+    // The dropped token leaves a position gap so phrase queries cannot
+    // match across it.
+    assert_eq!(got, [("x", 0), (ok.as_str(), 2), ("y", 3)]);
+}
+
+#[test]
+fn dropped_token_leaves_position_gap() {
+    // `x <overlong> ok` must not yield adjacent positions.
+    let long = "a".repeat(MAX_TOKEN_BYTES + 1);
+    let tokens = Dc3Tokenizer::new().tokens(&format!("x {long} ok"));
+    let got: Vec<(&str, usize)> = tokens
+        .iter()
+        .map(|t| (t.text.as_str(), t.position))
+        .collect();
+    assert_eq!(got, [("x", 0), ("ok", 2)]);
 }
 
 #[test]
@@ -222,6 +236,18 @@ fn prefix_gate_uses_folded_token_length() {
     assert!(parse_query("22.0").unwrap().words[0].prefix);
     // Single folded chars still do not qualify.
     assert!(!parse_query("é").unwrap().words[0].prefix);
+}
+
+#[test]
+fn truncated_word_does_not_become_prefix() {
+    // A word capped at the per-word token limit keeps its tokens but must
+    // not gain prefix expansion on the truncated tail.
+    let word: Vec<String> = ('a'..='t').map(|c| c.to_string()).collect();
+    let text = word.join("-");
+    let q = parse_query(&text).unwrap();
+    assert_eq!(q.words.len(), 1);
+    assert_eq!(q.words[0].tokens.len(), MAX_TOKENS_PER_WORD);
+    assert!(!q.words[0].prefix);
 }
 
 #[test]
@@ -805,7 +831,11 @@ proptest! {
         let tokens = Dc3Tokenizer::new().tokens(&s);
         for (i, t) in tokens.iter().enumerate() {
             prop_assert!(!t.text.is_empty() && t.text.len() <= MAX_TOKEN_BYTES);
-            prop_assert_eq!(t.position, i);
+            // Positions may have gaps from dropped overlong tokens.
+            prop_assert!(t.position >= i);
+            if i > 0 {
+                prop_assert!(t.position > tokens[i - 1].position);
+            }
             prop_assert!(t.offset_from <= t.offset_to && t.offset_to <= s.len());
             prop_assert!(s.is_char_boundary(t.offset_from) && s.is_char_boundary(t.offset_to));
         }
@@ -817,7 +847,10 @@ proptest! {
         for (i, t) in tokens.iter().enumerate() {
             prop_assert!(is_cjk_unigram(&t.text), "{:?}", t.text);
             prop_assert!(t.text.len() <= MAX_TOKEN_BYTES);
-            prop_assert_eq!(t.position, i);
+            prop_assert!(t.position >= i);
+            if i > 0 {
+                prop_assert!(t.position > tokens[i - 1].position);
+            }
             prop_assert!(t.offset_from <= t.offset_to && t.offset_to <= s.len());
             prop_assert!(s.is_char_boundary(t.offset_from) && s.is_char_boundary(t.offset_to));
         }

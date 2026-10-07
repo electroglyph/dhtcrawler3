@@ -200,12 +200,16 @@ pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
     let mut tokenizer = Dc3Tokenizer::new();
     let mut words = Vec::with_capacity(raw.len());
     let mut trailing_ignored = false;
+    let mut last_truncated = false;
     for w in raw {
         let mut tokens = tokenizer.token_texts(&w.text);
         if tokens.is_empty() {
             trailing_ignored = true;
             continue;
         }
+        // A truncated suffix must not become a prefix: the kept tail of a
+        // capped word would otherwise match docs lacking the full word.
+        let truncated = tokens.len() > MAX_TOKENS_PER_WORD;
         tokens.truncate(MAX_TOKENS_PER_WORD);
         if words.len() >= MAX_TERMS {
             return Err(QueryError::TooManyTerms {
@@ -220,6 +224,7 @@ pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
             prefix: false,
         });
         trailing_ignored = false;
+        last_truncated = truncated;
     }
 
     if !words.iter().any(|w| !w.exclude) {
@@ -240,6 +245,7 @@ pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
     {
         let eligible = !last.exclude
             && !last.quoted
+            && !last_truncated
             && last.tokens.iter().map(|t| t.chars().count()).sum::<usize>() >= PREFIX_MIN_CHARS
             && last.tokens.last().is_some_and(|t| !contains_cjk(t));
         last.prefix = eligible;

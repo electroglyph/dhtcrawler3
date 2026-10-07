@@ -14,3 +14,19 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 - Config/ops/docs: `scrape_*` + crawl keys, listen overlap only within same family (metrics/web addrs also checked), config text trimmed of controls, URL passwords refused, Rust image digest pinned, README trimmed to BEP 33 + rewrite note, design/ops docs updated, `audit.md` added.
 - Perf (~35 commits): no per-peer heap alloc for compact peers, `copy_from_slice` token prefix, two-copy peer IDs, branchless paths, single-peek decoder loop, counted key chars once, `format!`-free magnets, precomputed export sort keys, hoisted bucket/key lookups, per-subnet counting without scans, tiny-batch linear scan, zero-copy scrape filter union, owned-dict work-stack drains, constant-folded estimator, one-pass `Variants`/affix automaton, single `ParsedQuery`, one-shot path decode, borrowed `observe_chunk` keys, narrowed B-004 lock scope, partitioned refresh targets, batched evidence indexing, skipped lease renewal when untickable.
 - Tests: `cargo fmt`, opt-in live-network tests (bootstrap/lookup/peers/fetch, policy/search, hardened diagnostics), BEP 33 vectors, audit-gap regressions, e2e DB/DHT updates for scrape + removal flows.
+- Admission dedup: inserts now check both generations, so a key from the previous generation is not re-added to the current one and the dedup window keeps its full capacity.
+- Search tokenizer: dropped overlong tokens still advance the token position, so phrase queries can no longer match across a gap left by a dropped token.
+- Search query: a word cut short by the per-word token cap no longer gains prefix expansion on its truncated tail.
+- DHT routing: replacing a bad same-IP entry in another bucket now removes it from its own bucket, so no orphaned member is left behind and one-entry-per-IP holds.
+- DHT lookup: a candidate that would immediately evict itself from a full table is reported as not admitted (with its admission marks rolled back) instead of a phantom success.
+- DHT tokens: a delayed rotation tick that skipped two or more intervals refreshes both secrets, so tokens issued before the gap expire instead of staying valid.
+- DHT queries: failed sends now refund the send budget and release the per-host spacing reservation, like every other failure path.
+- Torrent parsing: a v1/v2 entry whose filename is invalid counts toward the totals but lists nothing, instead of listing its parent directory as a file.
+- Store `get_many`: the file preview now flags truncation when the torrent holds more files than the preview cap, matching `get_by_key`.
+- Store `complete`: a successful fetch under an alias clears removal memory for every name of the torrent, so a resurgent torrent is not penalised by the stored key's leftover cooldown.
+- Store `refresh_scraped`: seed announces match alias keys (v1 infohash, truncated v2 infohash) as well as stored DHT keys.
+- Store `observe`: sightings of tombstoned rows no longer bump the dead row; the key flows to the queue so a refetch can revive it.
+- Store `trim_removed_keys`: a negative cap deletes nothing instead of wiping all removal memory.
+- Store tombstones: dead rows no longer keep stale seeder estimates, failure counts or scrape stamps, so a revived row schedules its next scrape fresh.
+- Store counters: `seen_count` additions saturate at the bigint maximum instead of aborting the whole observe batch.
+- Store scrape claims: claimed rows come back oldest-scrape-first (never-scraped first) in a deterministic order.

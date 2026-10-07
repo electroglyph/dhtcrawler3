@@ -337,7 +337,12 @@ impl RoutingTable {
                 if !(proven && other_bad) {
                     return false;
                 }
-                self.remove_member(idx, &other);
+                // The conflicting entry lives in its own bucket, which may
+                // differ from the candidate's: removing from the wrong
+                // bucket silently keeps an orphaned member while the
+                // address map already points at the newcomer.
+                let other_idx = self.bucket_index(&other);
+                self.remove_member(other_idx, &other);
             }
             let Some(bucket) = self.buckets.get(idx) else {
                 return false;
@@ -1068,6 +1073,48 @@ mod tests {
         assert!(t6.on_response(a, "[2a00:1:2:3::1]:1".parse().unwrap(), true, now));
         assert!(!t6.on_response(c, "[2a00:1:2:3::2]:1".parse().unwrap(), true, now));
         assert!(t6.on_response(c, "[2a00:1:2:4::2]:1".parse().unwrap(), true, now));
+    }
+
+    #[test]
+    fn cross_bucket_ip_collision_evicts_the_old_entry() {
+        // Same IP in two buckets: when the old entry is bad, a proven
+        // candidate for the same IP must replace it in its own bucket.
+        // Removing from the candidate's bucket instead orphans the old
+        // member while the address map already points at the newcomer.
+        let now = Instant::now();
+        let mut t = table(now);
+        let own = t.own_id();
+        let old = own.random_with_prefix(0, true);
+        let old_addr: SocketAddr = "8.8.8.8:6881".parse().unwrap();
+        assert!(t.on_response(old, old_addr, true, now));
+        for i in 0..K {
+            assert!(t.on_response(
+                own.random_with_prefix(2 + i, true),
+                addr(i as u32),
+                true,
+                now
+            ));
+        }
+        assert!(t.num_buckets() > 1);
+        for _ in 0..MAX_FAILURES {
+            t.on_failure(&old_addr, now);
+        }
+        assert_eq!(t.status(t.member(&old).unwrap(), now), Status::Bad);
+        let old_bucket = t.bucket_index(&old);
+        let mut cand = None;
+        for prefix in [3, 4, 5, 6, 7, 8, 9, 10] {
+            let id = own.random_with_prefix(prefix, true);
+            if t.bucket_index(&id) != old_bucket {
+                cand = Some(id);
+                break;
+            }
+        }
+        let cand = cand.expect("a prefix in another bucket");
+        let cand_addr: SocketAddr = "8.8.8.8:6882".parse().unwrap();
+        assert!(t.on_response(cand, cand_addr, true, now));
+        assert!(t.member(&old).is_none());
+        assert!(t.member(&cand).is_some());
+        check(&t);
     }
 
     #[test]

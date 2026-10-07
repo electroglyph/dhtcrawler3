@@ -11,15 +11,17 @@ use crate::{
 };
 
 /// Visible torrents by id, in the order given, with at most `$2` file rows
-/// each (the first ones in stored order).
+/// each (the first ones in stored order). `cut` is true when rows were left
+/// out by the preview cap.
 const GET_MANY_SQL: &str = concat!(
     "SELECT ",
     torrent_columns_base!(),
-    ", x.files \
+    ", x.files, x.cut \
      FROM unnest($1::bigint[]) WITH ORDINALITY AS u(id, ord) \
      JOIN torrents t ON t.id = u.id \
      CROSS JOIN LATERAL ( \
-         SELECT coalesce(jsonb_agg(f.e ORDER BY f.o), '[]'::jsonb) AS files \
+         SELECT coalesce(jsonb_agg(f.e ORDER BY f.o), '[]'::jsonb) AS files, \
+                coalesce(jsonb_array_length(t.files) > $2, false) AS cut \
            FROM jsonb_array_elements(t.files) WITH ORDINALITY AS f(e, o) \
           WHERE f.o <= $2) x \
      WHERE ",
@@ -117,7 +119,14 @@ impl Store {
             .bind(max_files)
             .fetch_all(&self.pool)
             .await?;
-        rows.iter().map(TorrentRecord::from_row).collect()
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut record = TorrentRecord::from_row(row)?;
+            let cut: bool = get(row, "cut")?;
+            record.files_truncated |= cut;
+            out.push(record);
+        }
+        Ok(out)
     }
 
     /// Totals for the public home page. `torrents` is counted as in

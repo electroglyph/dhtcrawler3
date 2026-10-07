@@ -551,6 +551,9 @@ impl CrawlStore for MemoryStore {
     }
 
     async fn trim_removed_keys(&self, cap: i64) -> Result<u64> {
+        if cap < 0 {
+            return Ok(0);
+        }
         let mut state = self.lock();
         let len = state.removed.len();
         let excess = len.saturating_sub(usize::try_from(cap.max(0)).unwrap_or(0));
@@ -931,5 +934,52 @@ mod scrape_tests {
         assert_eq!(s.trim_removed_keys(10).await.unwrap(), 0);
         assert_eq!(s.trim_removed_keys(0).await.unwrap(), 1);
         assert_eq!(s.removed_keys_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trim_negative_cap_keeps_everything() {
+        let s = MemoryStore::new();
+        let k = key(21);
+        let id = s.complete(&k, &torrent(k)).await.unwrap();
+        let items = s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap();
+        let snap = items.iter().find(|c| c.id == id).unwrap().clone();
+        assert!(
+            s.tombstone_dead(id, snap.last_seen_at, snap.change_seq)
+                .await
+                .unwrap()
+        );
+        assert_eq!(s.removed_keys_count().await.unwrap(), 1);
+        assert_eq!(s.trim_removed_keys(-5).await.unwrap(), 0);
+        assert_eq!(s.removed_keys_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn observe_requeues_tombstoned_for_refetch() {
+        let s = MemoryStore::new();
+        let k = key(22);
+        let id = s.complete(&k, &torrent(k)).await.unwrap();
+        let items = s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap();
+        let snap = items.iter().find(|c| c.id == id).unwrap().clone();
+        assert!(
+            s.tombstone_dead(id, snap.last_seen_at, snap.change_seq)
+                .await
+                .unwrap()
+        );
+        // The dead row is untouched but the key re-queues, so a refetch can
+        // revive it once admission lets it through.
+        let out = s
+            .observe(
+                &[Observation {
+                    key: k,
+                    sightings: 5,
+                    priority: false,
+                }],
+                i64::MAX,
+            )
+            .await
+            .unwrap();
+        assert_eq!((out.known, out.queued, out.dropped), (0, 1, 0));
+        assert!(s.torrent(&k).is_none());
+        assert_eq!(s.pending_keys(), vec![k]);
     }
 }

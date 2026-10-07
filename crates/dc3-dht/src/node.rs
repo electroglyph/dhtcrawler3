@@ -633,12 +633,16 @@ impl Inner {
             Ok(packet) => packet,
             Err(_) => {
                 lock(&sock.state).txns.remove(tid, &addr);
+                lock(&self.budget).refund(1);
+                lock(&self.shared).spacing.release(&addr, Instant::now());
                 counters.drop_packet(DropReason::SendError);
                 return Err(QueryError::Send);
             }
         };
         if sock.socket.send_to(&packet, addr).await.is_err() {
             lock(&sock.state).txns.remove(tid, &addr);
+            lock(&self.budget).refund(1);
+            lock(&self.shared).spacing.release(&addr, Instant::now());
             counters.drop_packet(DropReason::SendError);
             return Err(QueryError::Send);
         }
@@ -751,12 +755,16 @@ impl Inner {
             Ok(packet) => packet,
             Err(_) => {
                 lock(&sock.state).txns.remove(tid, &addr);
+                lock(&self.scrape_budget).refund(1);
+                lock(&self.shared).spacing.release(&addr, Instant::now());
                 counters.drop_packet(DropReason::SendError);
                 return Err(QueryError::Send);
             }
         };
         if sock.socket.send_to(&packet, addr).await.is_err() {
             lock(&sock.state).txns.remove(tid, &addr);
+            lock(&self.scrape_budget).refund(1);
+            lock(&self.shared).spacing.release(&addr, Instant::now());
             counters.drop_packet(DropReason::SendError);
             return Err(QueryError::Send);
         }

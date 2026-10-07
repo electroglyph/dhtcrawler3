@@ -332,6 +332,10 @@ impl Analyzer<'_> {
 
     fn emit(&mut self, text: String, from: usize, to: usize) {
         if text.is_empty() || text.len() > MAX_TOKEN_BYTES {
+            // Dropped tokens still advance the position so a gap remains
+            // between the neighbours: otherwise `x <long> ok` yields
+            // adjacent positions and a phrase query `"x ok"` falsely matches.
+            self.position = self.position.saturating_add(1);
             return;
         }
         self.out.push(Token {

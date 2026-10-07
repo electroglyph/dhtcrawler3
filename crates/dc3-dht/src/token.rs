@@ -33,9 +33,18 @@ impl TokenSecrets {
     }
 
     /// Rotates the secret if the interval has passed. Returns true if it rotated.
+    /// A delayed tick that skipped whole intervals must not extend the
+    /// previous secret's window: if two or more intervals passed, both
+    /// secrets are fresh so a token issued before the gap expires.
     pub(crate) fn maybe_rotate(&mut self, now: Instant) -> bool {
         if now.saturating_duration_since(self.rotated_at) < self.interval {
             return false;
+        }
+        if now.saturating_duration_since(self.rotated_at) >= self.interval.saturating_mul(2) {
+            self.previous = rand::random();
+            self.current = rand::random();
+            self.rotated_at = now;
+            return true;
         }
         self.previous = self.current;
         self.current = rand::random();
@@ -138,6 +147,17 @@ mod tests {
         // Second rotation: it expires.
         assert!(!s.maybe_rotate(t0 + FIVE_MIN + Duration::from_secs(10)));
         assert!(s.maybe_rotate(t0 + FIVE_MIN * 2));
+        assert!(!s.verify(ip, &tok));
+    }
+
+    #[test]
+    fn delayed_tick_does_not_extend_window() {
+        // No maintenance for 3 periods then one rotate must expire the t0 token.
+        let t0 = Instant::now();
+        let mut s = TokenSecrets::new(t0, FIVE_MIN);
+        let ip: IpAddr = "2a00::1".parse().unwrap();
+        let tok = s.issue(ip);
+        assert!(s.maybe_rotate(t0 + FIVE_MIN * 3));
         assert!(!s.verify(ip, &tok));
     }
 

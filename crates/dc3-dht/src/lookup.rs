@@ -225,6 +225,15 @@ impl Lookup {
                     self.subnet_counts.remove(&key);
                 }
             }
+            if i == pos {
+                // The newcomer evicted itself: no farther fresh candidate
+                // existed, so it is not retained. Roll back the admission
+                // marks so a later call may admit it again, and report
+                // non-admission instead of a phantom success.
+                self.seen_addrs.remove(&removed.node.addr);
+                self.seen_ids.remove(&removed.node.id);
+                return None;
+            }
         }
         Some(dist)
     }
@@ -754,6 +763,40 @@ mod tests {
                 .values()
                 .all(|c| usize::from(*c) <= MAX_CANDIDATES_PER_SUBNET)
         );
+    }
+
+    #[test]
+    fn full_table_reports_self_eviction_as_non_admission() {
+        let target = NodeId([0; 20]);
+        let mut l = lookup(target, Kind::FindNode, OwnAddrs::default());
+        for i in 0..128u32 {
+            let mut id = [0xff; 20];
+            id[16..].copy_from_slice(&i.to_be_bytes());
+            assert!(
+                l.add(CompactNode {
+                    id: NodeId(id),
+                    addr: SocketAddr::from(([9, (i >> 8) as u8, i as u8, 1], 1)),
+                })
+                .is_some()
+            );
+        }
+        assert_eq!(l.cands.len(), MAX_CANDIDATES);
+        for c in &mut l.cands {
+            c.state = CandState::InFlight;
+        }
+        let mut close = [0x10; 20];
+        close[19] = 0x01;
+        let node = CompactNode {
+            id: NodeId(close),
+            addr: SocketAddr::from(([8, 8, 8, 8], 6881)),
+        };
+        assert!(l.add(node).is_none());
+        assert_eq!(l.cands.len(), MAX_CANDIDATES);
+        // The failed admission left no permanent mark: once a slot frees,
+        // the same node admits normally.
+        l.cands[10].state = CandState::Failed;
+        assert!(l.add(node).is_some());
+        assert_eq!(l.cands.len(), MAX_CANDIDATES);
     }
 
     #[test]

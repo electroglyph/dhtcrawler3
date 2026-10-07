@@ -372,6 +372,22 @@ fn hybrid_takes_files_from_tree_and_records_both_hashes() {
 }
 
 #[test]
+fn invalid_filename_does_not_list_the_parent_dir() {
+    // A valid directory with an invalid filename counts toward the total
+    // but lists no file: the parent directory must not appear as a file.
+    let v = v1_multi(vec![v1_file(1, &["dir", ".."])]);
+    let m = parse(&v).unwrap();
+    assert_eq!(m.file_count, 1);
+    assert!(m.files.is_empty());
+    assert_eq!(m.total_size, 1);
+    let tree = d([("dir", d([("..", v2_file(1))]))]);
+    let m = parse(&v2_only(tree)).unwrap();
+    assert_eq!(m.file_count, 1);
+    assert!(m.files.is_empty());
+    assert_eq!(m.total_size, 1);
+}
+
+#[test]
 fn meta_version_without_tree_or_wrong_version_is_not_v2() {
     let v = without(v2_only(d([("a", v2_file(1))])), "file tree");
     assert_eq!(parse(&v), Err(ParseError::NotATorrent));

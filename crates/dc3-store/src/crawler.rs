@@ -19,32 +19,55 @@ use crate::{
     get, lock_change_shared, lock_keys, prefix, secs, to_i64,
 };
 
-/// Bumps `seen_count` of torrents stored under the given DHT keys. `change_seq`
-/// moves only when floor(log2(seen_count)) changes: for positive a and b the
-/// highest set bit is equal exactly when (a XOR b) < (a AND b).
+/// Bumps `seen_count` of live torrents stored under the given DHT keys.
+/// `change_seq` moves only when floor(log2(seen_count)) changes: for
+/// positive a and b the highest set bit is equal exactly when
+/// (a XOR b) < (a AND b). Tombstoned rows are left alone: only a fetch
+/// revives those. The addition saturates at the bigint maximum instead of
+/// aborting the batch.
 const OBSERVE_KNOWN_SQL: &str = "\
-WITH input(k, n) AS (SELECT * FROM unnest($1::bytea[], $2::bigint[]))
+WITH input(k, n) AS (SELECT * FROM unnest($1::bytea[], $2::bigint[])),
+sums AS (
+  SELECT i.k AS k,
+         CASE WHEN t.seen_count > 9223372036854775807 - i.n
+              THEN 9223372036854775807
+              ELSE t.seen_count + i.n END AS new_seen,
+         t.seen_count AS old_seen
+    FROM input i JOIN torrents t ON t.dht_key = i.k AND t.deleted_at IS NULL
+)
 UPDATE torrents t
-   SET seen_count = t.seen_count + i.n,
+   SET seen_count = s.new_seen,
        last_seen_at = now(),
-       change_seq = CASE WHEN (t.seen_count # (t.seen_count + i.n)) > (t.seen_count & (t.seen_count + i.n))
+       change_seq = CASE WHEN (s.old_seen # s.new_seen) > (s.old_seen & s.new_seen)
                          THEN nextval('change_seq') ELSE t.change_seq END
-  FROM input i
- WHERE t.dht_key = i.k
-RETURNING i.k";
+  FROM sums s
+ WHERE t.dht_key = s.k AND t.deleted_at IS NULL
+RETURNING s.k";
 
 /// Same, for keys that are another name of a stored torrent (its v1 infohash or
 /// truncated v2 infohash, while the row is stored under a different DHT key).
+/// Tombstoned rows are left alone, as above; the addition saturates, as above.
 const OBSERVE_ALIAS_SQL: &str = "\
-WITH input(k, n) AS (SELECT * FROM unnest($1::bytea[], $2::bigint[]))
+WITH input(k, n) AS (SELECT * FROM unnest($1::bytea[], $2::bigint[])),
+sums AS (
+  SELECT i.k AS k,
+         CASE WHEN t.seen_count > 9223372036854775807 - i.n
+              THEN 9223372036854775807
+              ELSE t.seen_count + i.n END AS new_seen,
+         t.seen_count AS old_seen
+    FROM input i JOIN torrents t
+      ON (t.info_hash_v1 = i.k OR substring(t.info_hash_v2 FROM 1 FOR 20) = i.k)
+     AND t.deleted_at IS NULL
+)
 UPDATE torrents t
-   SET seen_count = t.seen_count + i.n,
+   SET seen_count = s.new_seen,
        last_seen_at = now(),
-       change_seq = CASE WHEN (t.seen_count # (t.seen_count + i.n)) > (t.seen_count & (t.seen_count + i.n))
+       change_seq = CASE WHEN (s.old_seen # s.new_seen) > (s.old_seen & s.new_seen)
                          THEN nextval('change_seq') ELSE t.change_seq END
-  FROM input i
- WHERE t.info_hash_v1 = i.k OR substring(t.info_hash_v2 FROM 1 FOR 20) = i.k
-RETURNING i.k";
+  FROM sums s
+ WHERE (t.info_hash_v1 = s.k OR substring(t.info_hash_v2 FROM 1 FOR 20) = s.k)
+   AND t.deleted_at IS NULL
+RETURNING s.k";
 
 /// Queues new keys and counts sightings of keys already queued.
 ///
@@ -56,13 +79,19 @@ RETURNING i.k";
 const OBSERVE_QUEUE_SQL: &str = "\
 INSERT INTO pending AS p (dht_key, seen_count)
 SELECT k, n FROM unnest($1::bytea[], $2::bigint[]) AS i(k, n)
-ON CONFLICT (dht_key) DO UPDATE SET seen_count = p.seen_count + EXCLUDED.seen_count
+ON CONFLICT (dht_key) DO UPDATE
+   SET seen_count = CASE WHEN p.seen_count > 9223372036854775807 - EXCLUDED.seen_count
+                         THEN 9223372036854775807
+                         ELSE p.seen_count + EXCLUDED.seen_count END
 RETURNING (xmax = 0) AS inserted";
 
 /// Counts sightings of keys already queued; queues nothing (the queue is full).
+/// The addition saturates at the bigint maximum instead of aborting the batch.
 const OBSERVE_COUNT_ONLY_SQL: &str = "\
 UPDATE pending p
-   SET seen_count = p.seen_count + i.n
+   SET seen_count = CASE WHEN p.seen_count > 9223372036854775807 - i.n
+                         THEN 9223372036854775807
+                         ELSE p.seen_count + i.n END
   FROM unnest($1::bytea[], $2::bigint[]) AS i(k, n)
  WHERE p.dht_key = i.k
 RETURNING p.dht_key";
@@ -114,7 +143,9 @@ UPDATE torrents
        info_hash_v2 = CASE WHEN $4 THEN info_hash_v2 ELSE $5 END,
        name = $6, total_size = $7, file_count = $8, files = $9,
        files_truncated = $10, piece_length = $11,
-       seen_count = seen_count + $12,
+       seen_count = CASE WHEN seen_count > 9223372036854775807 - $12
+                         THEN 9223372036854775807
+                         ELSE seen_count + $12 END,
        last_seen_at = now(),
        deleted_at = NULL,
        -- A duplicate completion (same content columns) is liveness only:
@@ -142,22 +173,33 @@ RETURNING id";
 /// are re-polled less often; rows with an estimate use the live interval.
 /// The live clause is gated on `seeders_est IS NOT NULL`, else it would also
 /// match unaware rows and the unknown interval would never apply.
+///
+/// Rows come back oldest-scrape first (never-scraped first): the inner
+/// pick selects the due set in that order and the outer join re-applies it,
+/// since an `UPDATE ... RETURNING` on its own promises no order.
 const CLAIM_SCRAPE_SQL: &str = "\
-UPDATE torrents t
-   SET last_scraped_at = now()
- WHERE t.id IN (
-        SELECT s.id FROM torrents s
-         WHERE s.deleted_at IS NULL
-           AND (s.last_scraped_at IS NULL
-                OR (s.seeders_est IS NULL
-                    AND s.last_scraped_at IS NOT NULL
-                    AND s.last_scraped_at < now() - make_interval(secs => $2))
-                OR (s.seeders_est IS NOT NULL
-                    AND s.last_scraped_at < now() - make_interval(secs => $3)))
-         ORDER BY s.last_scraped_at ASC NULLS FIRST
-         LIMIT $1
-           FOR UPDATE SKIP LOCKED)
-RETURNING t.id, t.dht_key, t.seeders_est, t.scrape_failures, t.last_seen_at, t.change_seq";
+WITH picked AS (
+  SELECT s.id, s.last_scraped_at AS old_scraped FROM torrents s
+   WHERE s.deleted_at IS NULL
+     AND (s.last_scraped_at IS NULL
+          OR (s.seeders_est IS NULL
+              AND s.last_scraped_at IS NOT NULL
+              AND s.last_scraped_at < now() - make_interval(secs => $2))
+          OR (s.seeders_est IS NOT NULL
+              AND s.last_scraped_at < now() - make_interval(secs => $3)))
+   ORDER BY s.last_scraped_at ASC NULLS FIRST, s.id
+   LIMIT $1
+     FOR UPDATE SKIP LOCKED),
+updated AS (
+  UPDATE torrents t
+     SET last_scraped_at = now()
+    FROM picked
+   WHERE t.id = picked.id
+  RETURNING t.id, t.dht_key, t.seeders_est, t.scrape_failures, t.last_seen_at, t.change_seq
+)
+SELECT u.id, u.dht_key, u.seeders_est, u.scrape_failures, u.last_seen_at, u.change_seq
+  FROM updated u JOIN picked p ON p.id = u.id
+ ORDER BY p.old_scraped ASC NULLS FIRST, p.id";
 
 /// Stats-only scrape write: no `change_seq` bump (the indexer must not see
 /// churn) and no `files` touch (which would fire `torrents_files_shape`).
@@ -176,10 +218,13 @@ UPDATE torrents AS t
  WHERE t.id = i.id";
 
 /// Conditional scrape tombstone: wipes name/files but only when the row is
-/// still exactly as claimed, so a concurrent fetch is never clobbered.
+/// still exactly as claimed, so a concurrent fetch is never clobbered. The
+/// scrape scheduling columns go too: a revived row must not inherit a stale
+/// estimate, failure count or last-scraped stamp.
 const TOMBSTONE_DEAD_SQL: &str = "\
 UPDATE torrents
    SET name = '', files = '[]'::jsonb, files_truncated = false,
+       seeders_est = NULL, scrape_failures = 0, last_scraped_at = NULL,
        deleted_at = coalesce(deleted_at, now()),
        change_seq = nextval('change_seq')
  WHERE id = $1 AND deleted_at IS NULL AND last_seen_at = $2 AND change_seq = $3";
@@ -421,13 +466,6 @@ impl Store {
             None => (0, None),
         };
 
-        // A successful fetch is positive liveness proof: clear removal
-        // memory, so a resurgent torrent is not penalised forever (§4a).
-        sqlx::query("DELETE FROM removed_keys WHERE key = $1")
-            .bind(key.as_bytes().as_slice())
-            .execute(&mut *tx)
-            .await?;
-
         let rows = sqlx::query(
             "SELECT id, dht_key, info_hash_v1, info_hash_v2 FROM torrents \
              WHERE dht_key = $1 OR info_hash_v1 = $2 OR info_hash_v2 = $3 \
@@ -445,6 +483,34 @@ impl Store {
             let r1: Option<Vec<u8>> = get(row, "info_hash_v1")?;
             let r2: Option<Vec<u8>> = get(row, "info_hash_v2")?;
             existing.push((id, dk, r1, r2));
+        }
+        // A successful fetch is positive liveness proof: clear removal
+        // memory for every name of the torrent, so a resurgent torrent is
+        // not penalised forever. Clearing only the fetched key would leave
+        // the stored key's cooldown behind when the two differ (aliases).
+        {
+            let mut clear: Vec<&[u8]> = vec![key.as_bytes()];
+            for (_, dk, r1, r2) in &existing {
+                clear.push(dk.as_slice());
+                if let Some(r1) = r1 {
+                    clear.push(r1.as_slice());
+                }
+                if let Some(r2) = r2 {
+                    clear.push(prefix(r2));
+                }
+            }
+            if let Some(k) = &v1 {
+                clear.push(k.as_slice());
+            }
+            if let Some(k) = &v2_prefix {
+                clear.push(k.as_bytes());
+            }
+            clear.sort_unstable();
+            clear.dedup();
+            sqlx::query("DELETE FROM removed_keys WHERE key = ANY($1::bytea[])")
+                .bind(&clear)
+                .execute(&mut *tx)
+                .await?;
         }
         let target = existing
             .iter()
@@ -840,7 +906,9 @@ impl Store {
         let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
         let res = sqlx::query(
             "UPDATE torrents SET last_scraped_at = now(), scrape_failures = 0 \
-             WHERE dht_key = ANY($1::bytea[]) AND deleted_at IS NULL",
+             WHERE deleted_at IS NULL \
+               AND (dht_key = ANY($1::bytea[]) OR info_hash_v1 = ANY($1::bytea[]) \
+                    OR substring(info_hash_v2 FROM 1 FOR 20) = ANY($1::bytea[]))",
         )
         .bind(&raw)
         .execute(&self.pool)
@@ -859,7 +927,12 @@ impl Store {
     /// Deletes the oldest `removed_keys` rows beyond `cap` (LRU over
     /// `removed_at`), so a flap storm cannot grow the table forever.
     /// Returns the number removed. The cap is approximate under concurrency.
+    /// A negative cap deletes nothing: forgetting all removal memory would
+    /// re-admit every cooled-down key early (fail-open).
     pub async fn trim_removed_keys(&self, cap: i64) -> Result<u64> {
+        if cap < 0 {
+            return Ok(0);
+        }
         let n: i64 = self.removed_keys_count().await?.saturating_sub(cap.max(0));
         if n <= 0 {
             return Ok(0);
@@ -968,6 +1041,10 @@ async fn observe_chunk(
             .await?;
         known.extend(aliases);
     }
+    // Keys of tombstoned rows are not known-live: they fall through to the
+    // queue below, so a resurgent torrent can be refetched (and revived by
+    // completion) once admission lets it through. Only a fetch revives them;
+    // this path never touches the dead row itself.
     out.known = count_u64(known.len());
 
     let rest: Vec<&Merged> = rest

@@ -211,10 +211,12 @@ impl DedupSet {
     }
 
     /// Adds `key`. Returns true if a new generation started because the
-    /// current one was full.
+    /// current one was full. Keys already present in either generation are
+    /// not re-added (a previous-generation key re-added to current would
+    /// occupy a slot in both generations and halve the dedup window).
     pub fn insert(&mut self, key: &DhtKey, now: Instant) -> bool {
         let fp = self.fingerprint(key);
-        if self.current.contains(&fp) {
+        if self.current.contains(&fp) || self.previous.contains(&fp) {
             return false;
         }
         let rotated = self.current.len() >= self.capacity;
@@ -917,6 +919,22 @@ mod tests {
         assert!(d.contains(&key(3)));
         assert!(d.maybe_rotate(t0 + Duration::from_secs(120)));
         assert!(d.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dedup_insert_ignores_previous_generation() {
+        // A previous-only key must not be re-added to current.
+        let t0 = Instant::now();
+        let mut d = DedupSet::new(3, Duration::from_secs(60), t0);
+        for n in 0..3 {
+            assert!(!d.insert(&key(n), t0));
+        }
+        assert!(d.insert(&key(3), t0));
+        assert_eq!(d.len(), (1, 3));
+        // key(0) lives only in previous now; re-insert must be a no-op.
+        assert!(!d.insert(&key(0), t0));
+        assert_eq!(d.len(), (1, 3));
+        assert!(d.contains(&key(0)));
     }
 
     #[test]
