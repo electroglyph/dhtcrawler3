@@ -12,7 +12,7 @@ dhtcrawler4 is a fork of [dhtcrawler3](https://github.com/poonasor/dhtcrawler3) 
 - **Added BEP 33 seeder scrapes:** bloom filter + estimator, `scrape=1` traversals on a dedicated budget, scrape worker with conditional tombstones, liveness-ordered fetch queue, seeder counts in web/API with `sort=seeders`, 7→30→90-day removal memory.
 - **Hardened DHT / parsing / fetch:** stricter BEP 42 and routing-table rules, IPv6 `/48` rate limits, bounded iterative bencode, stricter torrent validation (padding, v2 tree, `pieces`), deadline + retry handling for metadata fetch.
 - **Fixed search / store / web:** prefix-expansion budgets, index-total pagination, leased-queue and admission fail-closed fixes, Origin-checked POSTs, stricter `base_url`/config validation, secret redaction, least-privilege DB roles.
-- **Perf + tests:** ~35 alloc/scan eliminations, `cargo fmt`, opt-in live-network tests, BEP 33 vectors, updated e2e coverage. See [bep33.md](bep33.md) and [docs/](docs/).
+- **Perf + tests:** ~35 alloc/scan eliminations, `cargo fmt`, opt-in live-network tests, BEP 33 vectors, updated e2e coverage. See [docs/](docs/).
 
 ## License
 
