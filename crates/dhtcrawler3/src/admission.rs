@@ -183,12 +183,18 @@ impl std::fmt::Debug for DedupSet {
 
 impl DedupSet {
     /// An empty set whose first generation starts at `now`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is zero: a zero-capacity dedup set cannot exist,
+    /// so silently running with room for one key would be a worse surprise.
     pub fn new(capacity: usize, rotate_every: Duration, now: Instant) -> Self {
+        assert!(capacity > 0, "dedup set capacity must be non-zero");
         Self {
             fingerprint: RandomState::new(),
             current: FingerprintSet::default(),
             previous: FingerprintSet::default(),
-            capacity: capacity.max(1),
+            capacity,
             rotate_every,
             rotated_at: now,
         }
