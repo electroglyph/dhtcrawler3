@@ -704,17 +704,17 @@ impl RoutingTable {
     /// Up to `max` confirmed, non-bad members for persistence: good nodes
     /// first, then by most recent answer.
     pub(crate) fn export(&self, max: usize, now: Instant) -> Vec<CompactNode> {
-        let mut nodes: Vec<&NodeEntry> = self
+        let mut nodes: Vec<(bool, Option<Instant>, &NodeEntry)> = self
             .members()
             .filter(|e| e.confirmed() && self.status(e, now) != Status::Bad)
+            .map(|e| (self.status(e, now) == Status::Good, e.last_response, e))
             .collect();
-        nodes.sort_by_key(|e| {
-            (
-                std::cmp::Reverse(self.status(e, now) == Status::Good),
-                std::cmp::Reverse(e.last_response),
-            )
-        });
-        nodes.into_iter().take(max).map(NodeEntry::node).collect()
+        nodes.sort_by_key(|(good, last, _)| (std::cmp::Reverse(*good), std::cmp::Reverse(*last)));
+        nodes
+            .into_iter()
+            .take(max)
+            .map(|(_, _, e)| e.node())
+            .collect()
     }
 
     /// The same nodes organised around a new own ID.
@@ -841,8 +841,7 @@ mod tests {
         assert!(total > 8);
         for count in [0, 1, 7, 8, 9, total - 1, total, total + 5] {
             let got = t.closest(&target, count, now, true);
-            let want: Vec<NodeId> =
-                keyed.iter().take(count).map(|(_, n)| n.id).collect();
+            let want: Vec<NodeId> = keyed.iter().take(count).map(|(_, n)| n.id).collect();
             assert_eq!(
                 got.iter().map(|n| n.id).collect::<Vec<_>>(),
                 want,
@@ -1375,5 +1374,34 @@ mod tests {
                 .find(|o| o.id == e.id);
             assert!(old.is_some() || replacement.is_some());
         }
+    }
+
+    #[test]
+    fn export_orders_good_before_questionable_by_recency() {
+        let t0 = Instant::now();
+        let mut t = table(t0);
+        let own = t.own_id();
+        let stale = own.random_with_prefix(10, true);
+        let shaky = own.random_with_prefix(11, true);
+        let fresh = own.random_with_prefix(12, true);
+        t.on_response(stale, addr(1), true, t0);
+        t.on_response(shaky, addr(2), true, t0);
+        t.on_response(fresh, addr(3), true, t0 + Duration::from_secs(60));
+        // One failure demotes an otherwise-confirmed node to questionable.
+        t.on_failure(&addr(2), t0 + Duration::from_secs(60));
+        check(&t);
+        let now = t0 + Duration::from_secs(60);
+        assert_eq!(
+            t.status(t.members().find(|e| e.id == shaky).unwrap(), now),
+            Status::Questionable
+        );
+        let got = t.export(10, now);
+        let ids: Vec<NodeId> = got.iter().map(|n| n.id).collect();
+        // Good nodes first ordered by most recent answer, then questionable.
+        assert_eq!(ids, vec![fresh, stale, shaky]);
+        assert_eq!(
+            t.export(2, now).iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![fresh, stale]
+        );
     }
 }
