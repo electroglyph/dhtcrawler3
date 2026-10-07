@@ -902,6 +902,7 @@ impl Store {
         .bind(&raw)
         .fetch_all(&self.pool)
         .await?;
+        let strong: HashSet<&DhtKey> = strong_evidence.iter().collect();
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             let key: Vec<u8> = get(row, "key")?;
@@ -910,7 +911,7 @@ impl Store {
             let sightings: i32 = get(row, "sightings")?;
             let key = DhtKey::from_slice(&key)
                 .map_err(|e| StoreError::Corrupt(format!("removed_keys.key: {e}")))?;
-            let strong = strong_evidence.contains(&key);
+            let strong = strong.contains(&key);
             out.push(RemovalCooldown {
                 remaining: remaining_since(removed_at, removals, sightings, base_days, strong),
                 sightings: u32::try_from(sightings.max(0)).unwrap_or(u32::MAX),

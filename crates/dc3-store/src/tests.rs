@@ -2142,6 +2142,32 @@ async fn removal_cooldown_shortens_on_strong_evidence_but_never_bypasses(pool: P
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn removal_cooldowns_matches_evidence_at_scale(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // 64 removed keys; even-indexed ones carry strong evidence, plus a few
+    // evidence keys that were never removed (must be ignored, not error).
+    let all: Vec<DhtKey> = (0..64u8).map(key).collect();
+    for k in &all {
+        s.note_removal(&k.0).await.unwrap();
+    }
+    let mut evidence: Vec<DhtKey> = all.iter().step_by(2).copied().collect();
+    evidence.push(key(100));
+    evidence.push(key(200));
+
+    let rows = s.removal_cooldowns(&all, 8, &evidence).await.unwrap();
+    assert_eq!(rows.len(), all.len());
+    for (i, k) in all.iter().enumerate() {
+        let r = rows.iter().find(|r| r.key == *k).unwrap();
+        if i % 2 == 0 {
+            assert!(r.remaining > Duration::ZERO, "shortened, never bypassed");
+            assert!(r.remaining <= days(2), "{:?}", r.remaining);
+        } else {
+            assert!(r.remaining > days(6), "{:?}", r.remaining);
+        }
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn record_scrapes_writes_a_batch_without_index_churn(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let mut ids = Vec::new();
