@@ -361,6 +361,22 @@ fn encoder_int_edge_cases_without_alloc() {
 }
 
 #[test]
+fn decoder_single_peek_branches() {
+    // One peek per loop iteration covering dict-close, list-close and
+    // value dispatch.
+    assert!(decode(b"le", &Limits::KRPC).unwrap().as_list().unwrap().is_empty());
+    assert!(decode(b"de", &Limits::KRPC).unwrap().as_dict().unwrap().iter().next().is_none());
+    let v = decode(b"d1:a1:b1:c1:de", &Limits::KRPC).unwrap();
+    let d = v.as_dict().unwrap();
+    assert_eq!(d.get_bytes(b"a"), Some(&b"b"[..]));
+    let v = decode(b"l4:spam4:eggse", &Limits::KRPC).unwrap();
+    assert_eq!(v.as_list().unwrap().len(), 2);
+    let v = decode(b"d1:al1:xi0eee", &Limits::KRPC).unwrap();
+    assert_eq!(encode(&v.to_owned_value()), b"d1:al1:xi0eee");
+    assert!(decode(b"di0e1:a1:be", &Limits::KRPC).is_err());
+}
+
+#[test]
 fn bep5_example_ping() {
     let q = b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t2:aa1:y1:qe";
     let v = decode(q, &Limits::KRPC).unwrap();

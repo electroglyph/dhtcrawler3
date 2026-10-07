@@ -81,6 +81,9 @@ impl<'a> Decoder<'a> {
         let mut stack: Vec<(Frame<'a>, usize)> = Vec::new();
 
         loop {
+            // Peek once per iteration and reuse it for the dict-close,
+            // list-close and value-dispatch checks below.
+            let b = self.peek()?;
             // Inside a dictionary with no pending key: read a key or the end.
             if let Some((
                 Frame::Dict {
@@ -91,7 +94,7 @@ impl<'a> Decoder<'a> {
             )) = stack.last_mut()
             {
                 let start = *start;
-                if self.peek()? == b'e' {
+                if b == b'e' {
                     self.advance(1);
                     let builder = std::mem::take(builder);
                     stack.pop();
@@ -101,7 +104,7 @@ impl<'a> Decoder<'a> {
                     }
                     continue;
                 }
-                if !self.peek()?.is_ascii_digit() {
+                if !b.is_ascii_digit() {
                     return self.err(ErrorKind::NonStringKey);
                 }
                 let key_pos = self.pos;
@@ -119,7 +122,7 @@ impl<'a> Decoder<'a> {
 
             // Inside a list: the end marker closes it.
             if let Some((Frame::List { items }, start)) = stack.last_mut()
-                && self.peek()? == b'e'
+                && b == b'e'
             {
                 let start = *start;
                 self.advance(1);
@@ -134,7 +137,7 @@ impl<'a> Decoder<'a> {
             // A value begins here. Containers push a frame; scalars are gated
             // by the same depth (their depth is stack.len() + 1).
             let start = self.pos;
-            let value = match self.peek()? {
+            let value = match b {
                 b'i' => {
                     if stack.len() >= self.limits.max_depth {
                         return self.err(ErrorKind::TooDeep);
