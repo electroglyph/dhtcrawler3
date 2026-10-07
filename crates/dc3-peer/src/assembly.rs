@@ -139,6 +139,8 @@ impl Assembly {
 
     /// Checks one data message without storing it, and returns its piece
     /// index. The same checks run again in [`accept`](Self::accept).
+    /// A redundant copy of an already-received piece is acceptable: `accept`
+    /// ignores it, so validation does too (idempotent, not an error).
     pub(crate) fn validate(
         &self,
         piece: i64,
@@ -162,13 +164,14 @@ impl Assembly {
                 data.len()
             )));
         }
-        if self.state.get(index) == Some(&PieceState::Received) {
-            return Err(FetchError::Protocol(format!("duplicate piece {index}")));
-        }
         Ok(index)
     }
 
-    /// Accepts one data message.
+    /// Accepts one data message. A redundant copy of an already-received
+    /// piece is ignored (first copy wins): our own retry re-emits expired
+    /// `Requested` pieces without touching `outstanding`, so a merely-slow
+    /// peer may answer both the original and the retry, and that must not
+    /// fail the fetch. Integrity still rests on the final hash check.
     pub(crate) fn accept(
         &mut self,
         piece: i64,
@@ -181,9 +184,9 @@ impl Assembly {
             .get_mut(index)
             .ok_or_else(|| FetchError::Protocol(format!("piece {piece} out of range")))?;
         match *state {
-            PieceState::Received => {
-                return Err(FetchError::Protocol(format!("duplicate piece {index}")));
-            }
+            // Already stored: ignore the redundant copy without touching
+            // `outstanding` (already decremented) or `received`.
+            PieceState::Received => return Ok(()),
             PieceState::Requested => self.outstanding = self.outstanding.saturating_sub(1),
             PieceState::NotRequested => {}
         }
@@ -305,6 +308,28 @@ mod tests {
         a.requested_at[1] = Some(long_ago());
         assert_eq!(a.next_requests(), vec![1, 4]);
         assert_eq!(a.next_requests(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn duplicate_data_is_ignored_without_touching_accounting() {
+        let size = 3 * METADATA_PIECE_LEN;
+        let mut a = Assembly::new(size).unwrap();
+        assert_eq!(a.next_requests(), vec![0, 1, 2]);
+        let total = size as i64;
+        let full = vec![7u8; METADATA_PIECE_LEN];
+        a.accept(0, total, &full).unwrap();
+        let (outstanding, received) = (a.outstanding, a.received);
+        // Redundant copy (original + retry both answered): ignored, and the
+        // pipeline accounting is untouched.
+        a.accept(0, total, &full).unwrap();
+        assert_eq!((a.outstanding, a.received), (outstanding, received));
+        // The first copy wins: a conflicting second copy cannot corrupt the
+        // assembly (the final hash check is the integrity gate).
+        let mut other = vec![7u8; METADATA_PIECE_LEN];
+        other[0] ^= 0x01;
+        a.accept(0, total, &other).unwrap();
+        assert_eq!(a.pieces[0].as_ref().unwrap(), &full);
+        assert!(!a.is_complete());
     }
 
     #[test]

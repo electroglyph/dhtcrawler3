@@ -471,7 +471,14 @@ impl CrawlStore for MemoryStore {
         let mut state = self.lock();
         let now = Instant::now();
         let mut n = 0u64;
+        // Last-wins on duplicate ids, counting distinct matched rows — the
+        // same contract as the SQL batch write.
+        let mut merged: std::collections::BTreeMap<i64, (Option<u32>, u32)> =
+            std::collections::BTreeMap::new();
         for (id, est, failures) in rows.iter().copied() {
+            merged.insert(id, (est, failures));
+        }
+        for (id, (est, failures)) in merged {
             if let Some(sc) = state.scrapes.values_mut().find(|sc| sc.id == id) {
                 sc.est = est;
                 sc.failures = failures;

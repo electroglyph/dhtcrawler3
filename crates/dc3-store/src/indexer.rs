@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::types::{IndexRow, visible_sql};
+use crate::types::IndexRow;
 use crate::{
     CHANGE_LOCK_KEY, FEED_PAGE_MAX_BYTES, HWM_LOCK_TIMEOUT, MAX_FEED_PAGE, Result,
     SQLSTATE_LOCK_NOT_AVAILABLE, Store, get, has_sqlstate,
@@ -14,14 +14,23 @@ use crate::{
 /// text (the first row is always included). The sizes come from the JSON text
 /// of `files`, which is at least as long as the joined paths. Only the rows
 /// kept are joined back and have their paths assembled.
+///
+/// Hard-purged tombstones join the same stream: `purge_tombstoned` records
+/// one `purged_torrents` row per deleted id with its own `change_seq` stamp,
+/// served back below as a `visible = false` row with dummy payload columns
+/// (the indexer deletes by id, like for tombstones).
 const CHANGES_SQL: &str = concat!(
     "\
 WITH page AS (
-    SELECT t.id, t.change_seq, octet_length(t.name)::bigint + octet_length(t.files::text) AS bytes
-      FROM torrents t
-     WHERE t.change_seq > $1 AND t.change_seq <= $2
-     ORDER BY t.change_seq
-     LIMIT $3
+    (SELECT t.id, t.change_seq, octet_length(t.name)::bigint + octet_length(t.files::text) AS bytes
+       FROM torrents t
+      WHERE t.change_seq > $1 AND t.change_seq <= $2)
+    UNION ALL
+    (SELECT p.torrent_id AS id, p.purged_seq AS change_seq, 0 AS bytes
+       FROM purged_torrents p
+      WHERE p.purged_seq > $1 AND p.purged_seq <= $2)
+    ORDER BY change_seq
+    LIMIT $3
 ), sized AS (
     SELECT p.id, p.change_seq,
            coalesce(sum(p.bytes) OVER (ORDER BY p.change_seq
@@ -29,15 +38,21 @@ WITH page AS (
                AS before
       FROM page p
 )
-SELECT t.id, t.change_seq, t.dht_key, t.info_hash_v1, t.info_hash_v2, t.name, x.files_text,
-       t.total_size, t.file_count, t.first_seen_at, t.seen_count, t.last_scraped_at, t.seeders_est, ",
-    visible_sql!(),
+SELECT s.id, s.change_seq,
+       coalesce(t.dht_key, decode('0000000000000000000000000000000000000000', 'hex')) AS dht_key,
+       t.info_hash_v1, t.info_hash_v2,
+       coalesce(t.name, '') AS name, coalesce(x.files_text, '') AS files_text,
+       coalesce(t.total_size, 0) AS total_size, coalesce(t.file_count, 0) AS file_count,
+       coalesce(t.first_seen_at, 'epoch'::timestamptz) AS first_seen_at,
+       coalesce(t.seen_count, 0) AS seen_count,
+       t.last_scraped_at, t.seeders_est, ",
+    "(t.id IS NOT NULL AND t.deleted_at IS NULL)",
     " AS visible
   FROM sized s
-  JOIN torrents t ON t.id = s.id
- CROSS JOIN LATERAL (
+  LEFT JOIN torrents t ON t.id = s.id
+ LEFT JOIN LATERAL (
        SELECT coalesce(string_agg(f.e ->> 'p', E'\\n' ORDER BY f.o), '') AS files_text
-         FROM jsonb_array_elements(t.files) WITH ORDINALITY AS f(e, o)) x
+         FROM jsonb_array_elements(coalesce(t.files, '[]')) WITH ORDINALITY AS f(e, o)) x ON true
  WHERE s.before < $4
  ORDER BY s.change_seq"
 );

@@ -213,8 +213,27 @@ async fn supervise_roles(
                 Err(_) => {
                     tracing::error!("roles did not stop in time; aborting the rest");
                     tasks.abort_all();
-                    // Aborted tasks finish promptly; reap them without waiting.
-                    while tasks.join_next().await.is_some() {}
+                    // An aborted task stuck in a synchronous blocking call
+                    // (no await point) never observes the abort, so reaping
+                    // without a bound would wait for the blocking call to
+                    // return and defeat the shutdown timeout above. Reap only
+                    // up to one more timeout, then give up the reap: the
+                    // stuck tasks stay aborted and are detached with the set.
+                    let reap_deadline = tokio::time::Instant::now() + shutdown_timeout;
+                    while !tasks.is_empty() {
+                        match tokio::time::timeout_at(reap_deadline, tasks.join_next()).await {
+                            Ok(_) => {}
+                            Err(_) => {
+                                tracing::error!(
+                                    remaining = tasks.len(),
+                                    "roles still blocked in synchronous calls; \
+                                     giving up the reap"
+                                );
+                                tasks.detach_all();
+                                break;
+                            }
+                        }
+                    }
                     break;
                 }
             },
@@ -278,6 +297,48 @@ mod tests {
             "unexpected error: {err:?}"
         );
         assert!(tasks.is_empty(), "aborted tasks are reaped");
+    }
+
+    // A task stuck in a synchronous blocking call never observes `abort_all`:
+    // the reap after the shutdown timeout must itself be bounded instead of
+    // waiting for the blocking call to return.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn sync_blocked_role_does_not_defeat_the_shutdown_timeout() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancel = CancellationToken::new();
+        let roles = cancel.child_token();
+        let mut tasks: JoinSet<(&'static str, anyhow::Result<()>)> = JoinSet::new();
+        tasks.spawn(async { ("failing", Err(anyhow!("boom"))) });
+        // No await point: `abort_all` cannot preempt this. It spins until the
+        // watchdog releases it, so a broken (unbounded) reap hangs until the
+        // watchdog fires while the fixed reap gives up after the timeout.
+        let release = Arc::new(AtomicBool::new(false));
+        let spinner_release = Arc::clone(&release);
+        let watchdog_release = Arc::clone(&release);
+        tasks.spawn(async move {
+            while !spinner_release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            ("blocked", Ok(()))
+        });
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            watchdog_release.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        let err = supervise_roles(&mut tasks, &roles, &cancel, Duration::from_millis(50)).await;
+        let elapsed = start.elapsed();
+        let err = err.expect("the failing role error is returned");
+        assert!(
+            err.to_string().contains("the failing role failed"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "reap waited for the blocked role: {elapsed:?}"
+        );
+        release.store(true, Ordering::SeqCst);
     }
 
     #[tokio::test(start_paused = true)]

@@ -233,14 +233,36 @@ UPDATE torrents
 /// frees the most disk (win 5). Returns the number removed. The grace lets
 /// the indexer observably drop the document first (it sees `visible=false`
 /// through the change feed).
+///
+/// Every deleted id is also recorded in `purged_torrents` with its own
+/// `change_seq` stamp, which the change feed serves back as a `visible=false`
+/// row: an indexer lagging past the grace still learns the delete instead of
+/// serving the document forever. `ON CONFLICT DO NOTHING` keeps concurrent
+/// sweeps benign (the loser records nothing and deletes nothing).
 const PURGE_TOMBSTONED_SQL: &str = "\
-DELETE FROM torrents
- WHERE id IN (
-        SELECT t.id FROM torrents t
-         WHERE t.deleted_at IS NOT NULL
-           AND t.deleted_at < now() - make_interval(secs => $1)
-         ORDER BY t.total_size DESC
-         LIMIT $2)";
+WITH doomed AS (
+  SELECT t.id FROM torrents t
+   WHERE t.deleted_at IS NOT NULL
+     AND t.deleted_at < now() - make_interval(secs => $1)
+   ORDER BY t.total_size DESC
+   LIMIT $2
+),
+fed AS (
+  INSERT INTO purged_torrents (torrent_id, purged_seq)
+  SELECT id, nextval('change_seq') FROM doomed
+  ON CONFLICT DO NOTHING
+  RETURNING torrent_id
+)
+DELETE FROM torrents WHERE id IN (SELECT torrent_id FROM fed)";
+
+/// Purge-feed entries older than this are pruned by [`Store::purge_tombstoned`].
+/// An indexer resuming from a checkpoint older than that must re-sync from
+/// scratch.
+const PURGED_FEED_RETENTION_SECS: i64 = 90 * 24 * 3600;
+
+/// Deletes purge-feed entries older than [`PURGED_FEED_RETENTION_SECS`].
+const PRUNE_PURGED_SQL: &str = "\
+DELETE FROM purged_torrents WHERE purged_at < now() - make_interval(secs => $1)";
 
 /// Upserts removal memory: a new row starts at one consecutive removal, an
 /// existing one escalates while its sighting counter restarts.
@@ -675,15 +697,22 @@ impl Store {
     /// Records a whole scrape batch in one statement (win 7, bep33.md §12):
     /// same stats-only column set as [`Store::record_scrape`], so a batch
     /// of any size moves no feed position. Returns the rows written (one
-    /// per input row whose `id` exists).
+    /// per distinct input `id` that exists). Duplicate ids in the batch are
+    /// merged (last wins) so the count is deterministic.
     pub async fn record_scrapes(&self, rows: &[(i64, Option<u32>, u32)]) -> Result<u64> {
         if rows.is_empty() {
             return Ok(0);
         }
-        let mut ids = Vec::with_capacity(rows.len());
-        let mut ests = Vec::with_capacity(rows.len());
-        let mut failures = Vec::with_capacity(rows.len());
+        // Last-wins on duplicate ids: matches what the single-statement
+        // update below applies, and keeps the returned count exact.
+        let mut merged: BTreeMap<i64, (Option<u32>, u32)> = BTreeMap::new();
         for (id, est, fail) in rows.iter().copied() {
+            merged.insert(id, (est, fail));
+        }
+        let mut ids = Vec::with_capacity(merged.len());
+        let mut ests = Vec::with_capacity(merged.len());
+        let mut failures = Vec::with_capacity(merged.len());
+        for (id, (est, fail)) in merged {
             ids.push(id);
             ests.push(
                 est.map(|e| {
@@ -756,8 +785,15 @@ impl Store {
     /// first, so each sweep frees the most disk (win 5).
     /// Returns the number
     /// removed. The grace lets the indexer observably drop the document
-    /// first (it sees `visible=false` through the change feed).
+    /// first (it sees `visible=false` through the change feed); the purge
+    /// itself is also fed (one `visible=false` row per deleted id), so a
+    /// lagging indexer still converges. Expired purge-feed entries are
+    /// pruned (see `PURGED_FEED_RETENTION_SECS`).
     pub async fn purge_tombstoned(&self, grace: Duration, limit: i64) -> Result<u64> {
+        sqlx::query(PRUNE_PURGED_SQL)
+            .bind(PURGED_FEED_RETENTION_SECS)
+            .execute(&self.pool)
+            .await?;
         let res = sqlx::query(PURGE_TOMBSTONED_SQL)
             .bind(secs(grace))
             .bind(limit.max(0))

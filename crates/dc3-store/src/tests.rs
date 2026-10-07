@@ -1306,6 +1306,40 @@ async fn settings_are_validated_and_audited(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn concurrent_set_setting_on_a_new_key_audits_every_transition(pool: PgPool) {
+    use tokio::task::JoinSet;
+    // Racers on a fresh key used to all read `old = None` and each log an
+    // `old=null` audit, losing the intermediate transitions. The per-key
+    // advisory lock serialises them: exactly one audit carries `old=null`.
+    for round in 0..5 {
+        let key = format!("race-key-{round}");
+        let mut tasks = JoinSet::new();
+        for n in 0..8 {
+            let s = Store::from_pool(pool.clone());
+            let (k, v) = (key.clone(), format!("v{n}"));
+            tasks.spawn(async move { s.set_setting(&k, &v).await });
+        }
+        let mut changed = 0;
+        while let Some(r) = tasks.join_next().await {
+            if r.unwrap().unwrap() {
+                changed += 1;
+            }
+        }
+        // All 8 values differ, so every write changes the setting.
+        assert_eq!(changed, 8);
+        let nulls: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE action = 'set-setting' \
+             AND subject = $1 AND detail->>'old' IS NULL",
+        )
+        .bind(&key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(nulls, 1, "round {round}: every transition must be audited");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn schema_constraints(pool: PgPool) {
     // Bad key lengths, enum values and file lists are rejected by the database
     // itself.
@@ -1654,6 +1688,37 @@ async fn purge_tombstoned_keeps_fresh_rows(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn purge_tombstoned_emits_a_visible_false_feed_row(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(44);
+    let id = s.complete(&k, &torrent(k, "doomed")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE torrents SET deleted_at = now() - interval '2 hours' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A lagging indexer that never saw the tombstone still learns the delete:
+    // everything after its checkpoint, including the purge itself.
+    let checkpoint = s.high_water_mark().await.unwrap().unwrap();
+    assert_eq!(s.purge_tombstoned(Duration::ZERO, 1000).await.unwrap(), 1);
+    assert!(s.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_none());
+    let mark = s.high_water_mark().await.unwrap().unwrap();
+    assert!(mark > checkpoint);
+    let rows = s.changes_since(checkpoint, mark, 100).await.unwrap();
+    let purged = rows.iter().find(|r| r.id == id).unwrap_or_else(|| {
+        panic!("purged id {id} missing from the feed: {rows:?}");
+    });
+    assert!(!purged.visible);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn removal_memory_blocks_then_clears_on_refetch(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let k = key(51);
@@ -1907,6 +1972,16 @@ async fn record_scrapes_writes_a_batch_without_index_churn(pool: PgPool) {
         0
     );
     assert_eq!(s.record_scrapes(&[]).await.unwrap(), 0);
+
+    // Duplicate ids merge last-wins with an exact count: two inputs for one
+    // existing row write once, not twice with an unspecified winner.
+    assert_eq!(
+        s.record_scrapes(&[(ids[0], Some(7), 0), (ids[0], Some(42), 1)])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(scrape_row(&pool, ids[0]).await, (Some(42), 1));
 
     // No change_seq moved: the batch is stats-only (win 7).
     let after: Vec<i64> = sqlx::query_scalar(

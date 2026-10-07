@@ -1,5 +1,5 @@
 /target
-/audit.md
+/audit*.md
 **/fuzz/target
 **/fuzz/corpus
 **/fuzz/artifacts

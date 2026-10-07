@@ -155,10 +155,8 @@ async fn misbehaviours_fail_safely() {
             *e == FetchError::MetadataSizeInvalid(1 << 40)
         }),
         (Misbehaviour::SlowLoris, |e| *e == FetchError::Timeout),
-        (
-            Misbehaviour::DuplicatePiece,
-            |e| matches!(e, FetchError::Protocol(m) if m.contains("duplicate")),
-        ),
+        // DuplicatePiece is not here: a redundant copy is ignored and the
+        // fetch succeeds (see `duplicate_piece_is_ignored` below).
         (Misbehaviour::NoUtMetadata, |e| {
             *e == FetchError::NoMetadataSupport
         }),
@@ -177,6 +175,18 @@ async fn misbehaviours_fail_safely() {
         assert!(expected(&err), "{mb:?} gave {err:?}");
         task.abort();
     }
+}
+
+#[tokio::test]
+async fn duplicate_piece_is_ignored() {
+    // The seeder answers one piece twice back-to-back (the shape our own
+    // retry can self-induce on a slow peer): the redundant copy is ignored
+    // and the fetch still succeeds with intact bytes.
+    let info = info_of_len(2 * PIECE + 100);
+    let key = v1_key(&info);
+    let (addr, task) = start_seeder(key, info.clone(), Misbehaviour::DuplicatePiece).await;
+    assert_eq!(fetch_timed(addr, key).await.unwrap(), info);
+    task.abort();
 }
 
 #[tokio::test]

@@ -165,10 +165,9 @@ fn assembly_validate_does_not_store() {
     assert_eq!(a.validate(1, size, &[7]), Ok(1));
     assert_eq!(a.validate(1, size, &[7]), Ok(1));
     a.accept(1, size, &[7]).unwrap();
-    assert!(matches!(
-        a.validate(1, size, &[7]),
-        Err(FetchError::Protocol(_))
-    ));
+    // Validation is idempotent like accept: an already-received piece still
+    // validates, and accept ignores the redundant copy.
+    assert_eq!(a.validate(1, size, &[7]), Ok(1));
     assert!(matches!(
         a.validate(2, size, &[7]),
         Err(FetchError::Protocol(_))
@@ -328,10 +327,14 @@ fn assembly_pipelines_and_orders() {
     a.accept(2, total, &full).unwrap();
     assert_eq!(a.next_requests(), vec![4]);
     assert_eq!(a.next_requests(), Vec::<usize>::new());
-    assert!(matches!(
-        a.accept(2, total, &full),
-        Err(FetchError::Protocol(_))
-    ));
+    // A redundant copy is ignored, not an error, and the assembly still
+    // completes normally afterwards.
+    a.accept(2, total, &full).unwrap();
+    a.accept(0, total, &full).unwrap();
+    a.accept(1, total, &full).unwrap();
+    a.accept(3, total, &full).unwrap();
+    a.accept(4, total, &full).unwrap();
+    assert!(a.is_complete());
     assert!(matches!(
         a.accept(6, total, &[0]),
         Err(FetchError::Protocol(_))

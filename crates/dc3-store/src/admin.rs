@@ -52,6 +52,8 @@ impl Store {
 
     /// Sets a setting and, when the value changes, writes a `set-setting`
     /// audit row with the old and new values. Returns whether it changed.
+    /// Concurrent writes to the same key are serialised, so every audit row
+    /// carries the value its writer actually replaced.
     ///
     /// Keys in [`crate::NUMERIC_SETTINGS`] take a decimal integer in
     /// `0..=MAX_NUMERIC_SETTING`, without sign or leading spaces.
@@ -64,6 +66,14 @@ impl Store {
             )));
         }
         let mut tx = self.pool.begin().await?;
+        // Serialise racers on the same key: `SELECT ... FOR UPDATE` locks
+        // nothing when the row does not exist yet, so without this N
+        // concurrent first-writes would all read `old = None` and each log
+        // an `old=null` audit, losing the intermediate transitions.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
         let old: Option<String> =
             sqlx::query_scalar("SELECT value FROM settings WHERE key = $1 FOR UPDATE")
                 .bind(key)

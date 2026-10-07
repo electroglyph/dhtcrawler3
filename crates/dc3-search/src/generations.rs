@@ -464,12 +464,24 @@ impl IndexRoot {
     /// Deletes directories left in the trash by interrupted cleanups.
     fn sweep_trash(&self) -> Result<()> {
         for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
+            let entry = match entry {
+                // A concurrent deleter may remove an entry after the
+                // directory was listed: skip it instead of aborting the
+                // sweep, mirroring `cleanup` above.
+                Err(e) if is_not_found(&e) => continue,
+                entry => entry?,
+            };
             let is_trash = entry
                 .file_name()
                 .to_str()
                 .is_some_and(|name| name.starts_with(TRASH_PREFIX));
-            if is_trash && entry.file_type()?.is_dir() {
+            // `file_type` stats on some filesystems (and always on Windows):
+            // tolerate a concurrent delete here too.
+            let file_type = match entry.file_type() {
+                Err(e) if is_not_found(&e) => continue,
+                file_type => file_type?,
+            };
+            if is_trash && file_type.is_dir() {
                 remove_dir_if_present(&entry.path())?;
             }
         }

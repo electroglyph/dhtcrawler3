@@ -287,10 +287,19 @@ async fn supervise(mut s: Supervised) -> Result<(), CrawlError> {
     tracing::info!("crawl role stopping");
 
     let deadline = Instant::now() + s.shutdown_wait;
+    // A panicked worker must fail the role, not vanish into the log: fetch
+    // capacity silently dropping to zero with an `Ok(())` shutdown has no
+    // alerting signal.
+    let mut worker_error: Option<String> = None;
     loop {
         match tokio::time::timeout_at(deadline, s.workers.join_next()).await {
             Ok(Some(Ok(()))) => {}
-            Ok(Some(Err(e))) => tracing::error!(error = %e, "a fetch worker failed"),
+            Ok(Some(Err(e))) => {
+                tracing::error!(error = %e, "a fetch worker failed");
+                if worker_error.is_none() {
+                    worker_error = Some(e.to_string());
+                }
+            }
             Ok(None) => break,
             Err(_) => {
                 tracing::warn!(
@@ -316,6 +325,9 @@ async fn supervise(mut s: Supervised) -> Result<(), CrawlError> {
     tracing::info!("crawl role stopped");
     if let Some(joined) = admission_join {
         return Err(admission_early_error(joined));
+    }
+    if let Some(msg) = worker_error {
+        return Err(CrawlError::Task(format!("a fetch worker failed: {msg}")));
     }
     Ok(())
 }
