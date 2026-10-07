@@ -425,7 +425,9 @@ fn to_value(msg: &Message) -> OwnedValue {
         top.insert(key(b"v"), OwnedValue::bytes(v.clone()));
     }
     if let Some(ip) = &msg.ip {
-        top.insert(key(b"ip"), OwnedValue::bytes(compact::encode_peer(ip)));
+        let mut scratch = [0u8; compact::COMPACT_PEER_V6_LEN];
+        let n = compact::encode_peer_scratch(ip, &mut scratch);
+        top.insert(key(b"ip"), OwnedValue::bytes(&scratch[..n]));
     }
     if msg.read_only {
         top.insert(key(b"ro"), OwnedValue::Int(1));
@@ -523,7 +525,11 @@ fn response_fields(r: &Response) -> BTreeMap<Vec<u8>, OwnedValue> {
     if let Some(values) = &r.values {
         let list = values
             .iter()
-            .map(|v| OwnedValue::bytes(compact::encode_peer(v)))
+            .map(|v| {
+                let mut scratch = [0u8; compact::COMPACT_PEER_V6_LEN];
+                let n = compact::encode_peer_scratch(v, &mut scratch);
+                OwnedValue::bytes(&scratch[..n])
+            })
             .collect();
         d.insert(key(b"values"), OwnedValue::List(list));
     }

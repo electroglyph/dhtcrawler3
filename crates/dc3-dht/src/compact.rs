@@ -132,20 +132,34 @@ pub fn decode_bep42_ip(bytes: &[u8]) -> Option<SocketAddr> {
     }
 }
 
+/// Writes the compact form of `addr` into `scratch` (6 bytes for IPv4,
+/// 18 for IPv6) and returns the number of bytes written, so hot encode
+/// paths can reuse one stack buffer instead of heap-allocating per peer.
+pub fn encode_peer_scratch(addr: &SocketAddr, scratch: &mut [u8; COMPACT_PEER_V6_LEN]) -> usize {
+    match addr {
+        SocketAddr::V4(a) => scratch[..4].copy_from_slice(&a.ip().octets()),
+        SocketAddr::V6(a) => scratch[..16].copy_from_slice(&a.ip().octets()),
+    }
+    let n = match addr {
+        SocketAddr::V4(_) => COMPACT_PEER_V4_LEN,
+        SocketAddr::V6(_) => COMPACT_PEER_V6_LEN,
+    };
+    scratch[n - 2..n].copy_from_slice(&addr.port().to_be_bytes());
+    n
+}
+
 /// Appends the compact form of `addr` (6 or 18 bytes) to `out`.
 pub fn encode_peer_into(addr: &SocketAddr, out: &mut Vec<u8>) {
-    match addr {
-        SocketAddr::V4(a) => out.extend_from_slice(&a.ip().octets()),
-        SocketAddr::V6(a) => out.extend_from_slice(&a.ip().octets()),
-    }
-    out.extend_from_slice(&addr.port().to_be_bytes());
+    let mut scratch = [0u8; COMPACT_PEER_V6_LEN];
+    let n = encode_peer_scratch(addr, &mut scratch);
+    out.extend_from_slice(&scratch[..n]);
 }
 
 /// The compact form of `addr` (6 or 18 bytes).
 pub fn encode_peer(addr: &SocketAddr) -> Vec<u8> {
-    let mut out = Vec::with_capacity(COMPACT_PEER_V6_LEN);
-    encode_peer_into(addr, &mut out);
-    out
+    let mut scratch = [0u8; COMPACT_PEER_V6_LEN];
+    let n = encode_peer_scratch(addr, &mut scratch);
+    scratch[..n].to_vec()
 }
 
 /// Decodes a compact node list of the given family. Returns `None` when the
@@ -491,6 +505,23 @@ mod tests {
         assert_eq!(decode_peer(&[0; 5]), None);
         assert_eq!(decode_peer(&[0; 7]), None);
         assert_eq!(decode_peer(&[]), None);
+    }
+
+    #[test]
+    fn scratch_writer_matches_allocating_encoder() {
+        for (s, n) in [
+            ("1.2.3.4:6881", COMPACT_PEER_V4_LEN),
+            ("0.0.0.0:0", COMPACT_PEER_V4_LEN),
+            ("[2001:4860::1]:51413", COMPACT_PEER_V6_LEN),
+            ("[::]:0", COMPACT_PEER_V6_LEN),
+            ("[::ffff:9.9.9.9]:53", COMPACT_PEER_V6_LEN),
+        ] {
+            let a = sa(s);
+            let mut scratch = [0xAAu8; COMPACT_PEER_V6_LEN];
+            assert_eq!(encode_peer_scratch(&a, &mut scratch), n, "{s}");
+            assert_eq!(&scratch[..n], &encode_peer(&a)[..], "{s}");
+            assert!(scratch[n..].iter().all(|&b| b == 0xAA), "{s}");
+        }
     }
 
     #[test]
