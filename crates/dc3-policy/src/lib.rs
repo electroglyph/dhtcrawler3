@@ -18,7 +18,7 @@ pub use normalise::{MAX_NORMALISE_PASSES, normalise};
 /// The seed blocked-term list shipped with the repository.
 pub const SEED_TERMS: &str = include_str!("../../../policy/blocked-terms.txt");
 
-/// Maximum number of characters in one term line (after removing comments).
+/// Maximum number of characters in one raw term line (before comment-stripping).
 pub const MAX_TERM_LINE_CHARS: usize = 1024;
 /// Maximum number of tokens in one term (phrase).
 pub const MAX_TERM_TOKENS: usize = 16;
