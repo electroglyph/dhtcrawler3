@@ -193,11 +193,19 @@ impl Failure {
 /// One page of results: the number of visible matches, and the visible
 /// torrents on the page in search-hit order.
 ///
-/// `total` counts matches the database still shows; hits that were hidden,
-/// denied, deleted or policy-blocked during hydration are subtracted so the
-/// count cannot be compared against the page to reveal moderated hits.
+/// `total` is the index match count minus hits hidden on *this* page
+/// (missing, denied, deleted or policy-blocked during hydration), so a
+/// single-page query cannot be compared against its page to reveal the
+/// moderated count. It is exact when all matches fit on one page; on
+/// multi-page queries hits hidden on other pages are still counted and
+/// `total` may differ per page. Pages are not refilled: a short page
+/// already reveals per-page filtering, so `total` claims no more.
+/// `index_total` is the unadjusted index count and drives pagination
+/// (`has_next`): a page that filters heavily must not hide later pages
+/// that still have visible hits.
 pub(crate) struct Found {
     pub total: u64,
+    pub index_total: u64,
     pub torrents: Vec<(TorrentRecord, Shown)>,
 }
 
@@ -255,12 +263,16 @@ pub(crate) async fn execute<B: Backend>(
     let scores: HashMap<i64, f32> = results.hits.iter().map(|hit| (hit.id, hit.score)).collect();
     order_page(&mut torrents, &scores, sort, st.seeder_freshness);
     // Hits the database no longer shows (hidden, denied, deleted) or that
-    // contain a blocked term were skipped above; subtract them so `total`
-    // counts visible matches instead of leaking the moderated count.
+    // contain a blocked term were skipped above; subtract those on this
+    // page so a single-page `total` counts visible matches instead of
+    // leaking the moderated count. Pagination still uses the index count:
+    // hidden-heavy pages must not hide later pages with visible hits.
+    let index_total = results.total;
     let dropped = u64::try_from(results.hits.len().saturating_sub(torrents.len()))
         .unwrap_or(u64::MAX);
     Ok(Found {
-        total: results.total.saturating_sub(dropped),
+        total: index_total.saturating_sub(dropped),
+        index_total,
         torrents,
     })
 }
@@ -411,8 +423,10 @@ pub(crate) async fn search_page<B: Backend>(
     };
 
     let skipped = u64::from(page_number.saturating_sub(1)).saturating_mul(u64::from(per_page));
+    // Pagination follows the index count, not the page-adjusted visible
+    // count: a heavily filtered page must still offer the next page.
     let has_next =
-        page_number < MAX_PAGE && skipped.saturating_add(u64::from(per_page)) < found.total;
+        page_number < MAX_PAGE && skipped.saturating_add(u64::from(per_page)) < found.index_total;
     let summary = match found.total {
         0 => "No torrents match your search.".to_owned(),
         1 => "1 torrent matches your search.".to_owned(),
