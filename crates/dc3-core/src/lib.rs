@@ -77,7 +77,15 @@ impl FromStr for DhtKey {
     /// Accepts 40 hex characters (any case) or 32 base32 characters (any case),
     /// as allowed in magnet links (BEP 9).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.chars().count() {
+        Self::parse_counted(s, s.chars().count())
+    }
+}
+
+impl DhtKey {
+    /// Parses with a precomputed character count so callers that already
+    /// counted (such as [`AnyKey`]) do not walk the string twice.
+    fn parse_counted(s: &str, n: usize) -> Result<Self, KeyParseError> {
+        match n {
             40 => {
                 let mut out = [0u8; 20];
                 hex::decode_to_slice(s, &mut out).map_err(|_| KeyParseError::BadHex)?;
@@ -156,8 +164,16 @@ impl FromStr for InfoHashV2 {
     type Err = KeyParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.chars().count() != 64 {
-            return Err(KeyParseError::BadV2Length(s.chars().count()));
+        Self::parse_counted(s, s.chars().count())
+    }
+}
+
+impl InfoHashV2 {
+    /// Parses with a precomputed character count so callers that already
+    /// counted (such as [`AnyKey`]) do not walk the string twice.
+    fn parse_counted(s: &str, n: usize) -> Result<Self, KeyParseError> {
+        if n != 64 {
+            return Err(KeyParseError::BadV2Length(n));
         }
         let mut out = [0u8; 32];
         hex::decode_to_slice(s, &mut out).map_err(|_| KeyParseError::BadHex)?;
@@ -189,10 +205,13 @@ impl FromStr for AnyKey {
     type Err = KeyParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.chars().count() == 64 {
-            s.parse().map(AnyKey::V2)
+        // Count once and reuse it: the delegated parsers would walk the
+        // string again to measure it.
+        let n = s.chars().count();
+        if n == 64 {
+            InfoHashV2::parse_counted(s, n).map(AnyKey::V2)
         } else {
-            s.parse().map(AnyKey::V1OrDht)
+            DhtKey::parse_counted(s, n).map(AnyKey::V1OrDht)
         }
     }
 }
@@ -329,6 +348,35 @@ mod tests {
             "b".repeat(64).parse::<AnyKey>(),
             Ok(AnyKey::V2(_))
         ));
+    }
+
+    #[test]
+    fn any_key_single_count_covers_all_arms() {
+        // Error lengths are reported from the one measurement.
+        assert_eq!("abc".parse::<AnyKey>(), Err(KeyParseError::BadLength(3)));
+        assert_eq!(
+            "b".repeat(65).parse::<AnyKey>(),
+            Err(KeyParseError::BadLength(65))
+        );
+        // A long invalid input reports its full character count.
+        let long = "é".repeat(10_000);
+        assert_eq!(
+            long.parse::<AnyKey>(),
+            Err(KeyParseError::BadLength(10_000))
+        );
+        assert_eq!(
+            long.parse::<InfoHashV2>(),
+            Err(KeyParseError::BadV2Length(10_000))
+        );
+        // The 32-char base32 arm is reachable through dispatch.
+        let k: DhtKey = "0123456789abcdef0123456789abcdef01234567".parse().unwrap();
+        let b32 = data_encoding::BASE32_NOPAD.encode(&k.0);
+        assert_eq!(b32.parse::<AnyKey>(), Ok(AnyKey::V1OrDht(k)));
+        // 64-char non-hex reaches the v2 decoder, not the v1 one.
+        assert_eq!(
+            "z".repeat(64).parse::<AnyKey>(),
+            Err(KeyParseError::BadHex)
+        );
     }
 
     #[test]
