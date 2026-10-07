@@ -496,6 +496,15 @@ pub fn new_torrent(key: DhtKey, meta: TorrentMeta) -> NewTorrent {
 /// Renews a lease in the background until dropped.
 struct RenewalGuard(tokio::task::JoinHandle<()>);
 
+/// True when a background lease renewal could act before the fetch's own
+/// deadline: the first tick fires at `renew_every`, and past `key_deadline`
+/// the fetch is already timed out. With default tuning (90 s vs 60 s) the
+/// tick never fires, so spawning the guard is pure overhead (a task plus a
+/// timer per key across all workers).
+fn renewal_before_deadline(renew_every: Duration, key_deadline: Duration) -> bool {
+    renew_every.max(MIN_RENEW_INTERVAL) < key_deadline
+}
+
 impl RenewalGuard {
     fn spawn<S: CrawlStore>(store: S, key: DhtKey, lease: Duration, every: Duration) -> Self {
         let every = every.max(MIN_RENEW_INTERVAL);
@@ -598,12 +607,15 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
     /// Fetches, checks and stores one claimed key.
     pub async fn process(&self, item: &PendingItem) -> FetchOutcome {
         let key = item.dht_key;
-        let renewal = RenewalGuard::spawn(
-            self.store.clone(),
-            key,
-            self.tuning.lease,
-            self.tuning.renew_every,
-        );
+        let renewal = renewal_before_deadline(self.tuning.renew_every, self.tuning.key_deadline)
+            .then(|| {
+                RenewalGuard::spawn(
+                    self.store.clone(),
+                    key,
+                    self.tuning.lease,
+                    self.tuning.renew_every,
+                )
+            });
         let obtained = tokio::time::timeout(self.tuning.key_deadline, self.obtain(key))
             .await
             .unwrap_or(Obtained::Failed);
@@ -1235,6 +1247,14 @@ mod tests {
     }
 
     fn fetcher<P: PeerSource>(store: &MemoryStore, peers: P) -> Arc<Fetcher<MemoryStore, P>> {
+        fetcher_with(store, peers, test_tuning())
+    }
+
+    fn fetcher_with<P: PeerSource>(
+        store: &MemoryStore,
+        peers: P,
+        tuning: FetchTuning,
+    ) -> Arc<Fetcher<MemoryStore, P>> {
         let filter = PeerFilter {
             allow_private: true,
             by_endpoint: true,
@@ -1250,7 +1270,7 @@ mod tests {
                 max_metadata_bytes: 1024 * 1024,
                 max_inflight_metadata_bytes: 1024 * 1024,
             },
-            test_tuning(),
+            tuning,
         ))
     }
 
@@ -1271,6 +1291,66 @@ mod tests {
             attempts: 0,
             seen_count: 1,
         }
+    }
+
+    #[test]
+    fn renewal_guard_spawns_only_before_the_deadline() {
+        // Default tuning: the first tick (90 s) never fires before the
+        // fetch times out (60 s).
+        assert!(!renewal_before_deadline(
+            Duration::from_secs(90),
+            Duration::from_secs(60)
+        ));
+        assert!(renewal_before_deadline(
+            Duration::from_millis(50),
+            Duration::from_secs(10)
+        ));
+        // A tick exactly at the deadline races the timeout: useless too.
+        assert!(!renewal_before_deadline(
+            Duration::from_secs(10),
+            Duration::from_secs(10)
+        ));
+        // A zero interval is clamped to MIN_RENEW_INTERVAL, still useful.
+        assert!(renewal_before_deadline(
+            Duration::ZERO,
+            Duration::from_secs(10)
+        ));
+    }
+
+    /// A peer that accepts connections and then never speaks, so the
+    /// handshake runs its full timeout.
+    async fn holding_listener() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(sock);
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn slow_fetch_renews_its_lease() {
+        let store = MemoryStore::new();
+        let k = DhtKey([7; 20]);
+        store.enqueue(k);
+        // Renewals only count against a claimed lease.
+        let claimed = store.claim(1, Duration::from_secs(120)).await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        let tuning = FetchTuning {
+            renew_every: Duration::from_millis(50),
+            ..test_tuning()
+        };
+        let f = fetcher_with(&store, FixedPeers(vec![holding_listener().await]), tuning);
+        // The handshake runs its 1 s timeout, far past the 50 ms renewal
+        // interval, so the guard must have been spawned and must have
+        // renewed the still-queued key.
+        assert_eq!(f.process(&claimed[0]).await, FetchOutcome::FetchFailed);
+        assert!(store.renewals() >= 1);
     }
 
     #[tokio::test]
