@@ -472,12 +472,13 @@ async fn run(
         }
         rounds = rounds.saturating_add(1);
         let best_before = lookup.best_live();
-        let round: HashSet<SocketAddr> = batch.iter().map(|n| n.addr).collect();
-        for node in batch {
-            in_flight.push(ask(inner, sock, node, kind, target));
+        // Batches hold at most ALPHA nodes (K on the final sweep), so a
+        // linear scan beats hashing a fresh set every round.
+        let mut waiting = batch.len();
+        for node in &batch {
+            in_flight.push(ask(inner, sock, *node, kind, target));
         }
         let slow_at = after(Instant::now(), tuning.query_slow_after).min(deadline);
-        let mut waiting = round.len();
         let mut answered = 0usize;
         let mut improved = false;
         while waiting > 0 {
@@ -486,7 +487,7 @@ async fn run(
                 () = tokio::time::sleep_until(slow_at) => None,
             };
             let Some((addr, result)) = next else { break };
-            if round.contains(&addr) {
+            if batch.iter().any(|n| n.addr == addr) {
                 waiting = waiting.saturating_sub(1);
                 if result.is_ok() {
                     answered = answered.saturating_add(1);
