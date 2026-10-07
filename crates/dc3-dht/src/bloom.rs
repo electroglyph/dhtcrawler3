@@ -75,7 +75,12 @@ impl ScrapeBloom {
 
     /// Bitwise OR-union (for combining responses across nodes/families).
     pub fn union_into(&mut self, other: &Self) {
-        for (a, b) in self.0.iter_mut().zip(other.0.iter()) {
+        self.union_into_array(&other.0);
+    }
+
+    /// Bitwise OR-union with raw bytes (no filter wrapping needed).
+    pub fn union_into_array(&mut self, other: &[u8; BLOOM_LEN]) {
+        for (a, b) in self.0.iter_mut().zip(other.iter()) {
             *a |= *b;
         }
     }
@@ -128,6 +133,14 @@ pub fn estimate_from_zeros(zeros: usize) -> Option<f64> {
     Some((z / M).ln() / (K * denom))
 }
 
+/// Estimated set size of raw filter bytes, or `None` when saturated
+/// (UNKNOWN). Reads the bytes in place instead of copying them into a
+/// filter first. Empty maps to `Some(0.0)`.
+#[must_use]
+pub fn estimate_array(arr: &[u8; BLOOM_LEN]) -> Option<f64> {
+    estimate_from_zeros(arr.iter().map(|b| b.count_zeros() as usize).sum())
+}
+
 /// Estimated set size of the OR-union of raw 256-byte filters, rounded
 /// down. `None` when there are no filters (UNKNOWN: no aware response,
 /// §3) or the union is saturated (UNKNOWN, §0). An empty union (aware
@@ -139,7 +152,7 @@ pub fn estimate_or(filters: &[[u8; BLOOM_LEN]]) -> Option<u64> {
     }
     let mut union = ScrapeBloom::empty();
     for f in filters {
-        union.union_into(&ScrapeBloom(*f));
+        union.union_into_array(f);
     }
     union.estimate().map(|n| n.floor() as u64)
 }
@@ -192,6 +205,33 @@ mod tests {
     fn rejects_wrong_length() {
         assert!(ScrapeBloom::from_bytes(&[0u8; 10]).is_none());
         assert!(ScrapeBloom::from_bytes(&[0u8; BLOOM_LEN]).is_some());
+    }
+
+    #[test]
+    fn array_helpers_match_filter_methods() {
+        let cases: Vec<[u8; BLOOM_LEN]> = vec![[0u8; BLOOM_LEN], [0xFFu8; BLOOM_LEN], {
+            let mut arr = [0u8; BLOOM_LEN];
+            for (i, b) in arr.iter_mut().enumerate() {
+                *b = (i.wrapping_mul(37) % 251) as u8;
+            }
+            arr
+        }];
+        for arr in &cases {
+            assert_eq!(estimate_array(arr), ScrapeBloom(*arr).estimate());
+            let mut via_filter = ScrapeBloom::empty();
+            via_filter.union_into(&ScrapeBloom(*arr));
+            let mut via_array = ScrapeBloom::empty();
+            via_array.union_into_array(arr);
+            assert_eq!(via_array, via_filter);
+        }
+        // `estimate_or` over raw arrays agrees with the manual union of
+        // the same bytes wrapped as filters.
+        let filters: Vec<ScrapeBloom> = cases.iter().map(|a| ScrapeBloom(*a)).collect();
+        let manual = ScrapeBloom::union_all(filters.iter())
+            .estimate()
+            .map(|n| n.floor() as u64);
+        assert_eq!(estimate_or(&cases), manual);
+        assert_eq!(estimate_or(&[]), None);
     }
 
     /// The BEP 33 test vector: 192.0.2.0–192.0.2.255 plus 2001:DB8::-2001:DB8::3E7

@@ -95,7 +95,7 @@ impl ScrapeOutcome {
         }
         let mut union = crate::bloom::ScrapeBloom::empty();
         for f in &self.seed_filters {
-            union.union_into(&crate::bloom::ScrapeBloom(*f));
+            union.union_into_array(f);
         }
         Some(union)
     }
@@ -303,9 +303,8 @@ impl Lookup {
                     // response whose own seeds filter estimates nonzero
                     // is one live proof for the early exit (win 2); zeros
                     // and saturated filters prove nothing and never count.
-                    let live = crate::bloom::ScrapeBloom::from_bytes(&sd[..])
-                        .and_then(|f| f.estimate())
-                        .is_some_and(|e| e > 0.0);
+                    // The estimate reads the wire bytes in place.
+                    let live = crate::bloom::estimate_array(&sd).is_some_and(|e| e > 0.0);
                     if live {
                         self.live_proofs = self.live_proofs.saturating_add(1);
                     }
