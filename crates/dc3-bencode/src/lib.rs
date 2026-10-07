@@ -29,7 +29,6 @@ mod encode;
 pub use decode::{decode, decode_prefix};
 pub use encode::{OwnedValue, encode, encode_into};
 
-use std::collections::BTreeMap;
 use std::collections::HashSet;
 
 /// Resource limits for one decode call.
@@ -194,12 +193,11 @@ impl<'a> Value<'a> {
                         .len()
                         .checked_sub(n)
                         .expect("to_owned_value dict key underflow");
-                    let vals: Vec<OwnedValue> = results.drain(vstart..).collect();
-                    let ks: Vec<Vec<u8>> = keys.drain(kstart..).collect();
-                    let mut map = BTreeMap::new();
-                    for (k, v) in ks.into_iter().zip(vals) {
-                        map.insert(k, v);
-                    }
+                    // Drain only this frame's entries: a bare `drain(..)`
+                    // would steal outer frames' pending keys/values on
+                    // nested input. Collecting straight into the map also
+                    // skips the two temp vectors.
+                    let map = keys.drain(kstart..).zip(results.drain(vstart..)).collect();
                     results.push(OwnedValue::Dict(map));
                 }
             }

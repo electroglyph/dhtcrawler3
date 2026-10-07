@@ -202,6 +202,30 @@ fn item_limit() {
 }
 
 #[test]
+fn to_owned_value_keeps_nested_dict_keys_with_their_frames() {
+    // Each dict frame must drain only its own keys/values: the inner
+    // dict's entries stay inner, the outer keeps both of its keys.
+    let v = decode(b"d1:ad1:x1:ye1:bi1ee", &L).unwrap();
+    let owned = v.to_owned_value();
+    let OwnedValue::Dict(outer) = &owned else {
+        panic!("expected outer dict");
+    };
+    assert_eq!(outer.len(), 2);
+    let OwnedValue::Dict(inner) = &outer[b"a".as_slice()] else {
+        panic!("expected inner dict under 'a'");
+    };
+    assert_eq!(inner.len(), 1);
+    assert_eq!(inner[b"x".as_slice()], OwnedValue::Bytes(b"y".to_vec()));
+    assert_eq!(outer[b"b".as_slice()], OwnedValue::Int(1));
+    // Structural check plus a canonical round-trip.
+    assert_eq!(encode(&owned), b"d1:ad1:x1:ye1:bi1ee");
+    // Sibling sublists under one dict exercise the list drain next to a
+    // dict drain in the same frame.
+    let v = decode(b"d1:al1:xi0ee1:bl1:yi1eee", &L).unwrap();
+    assert_eq!(encode(&v.to_owned_value()), b"d1:al1:xi0ee1:bl1:yi1eee");
+}
+
+#[test]
 fn regression_f01_to_owned_value_is_iterative() {
     // F-01: to_owned_value on a deep value must not overflow the stack.
     // Build depth-5000 iteratively via decode, convert on a small stack.
