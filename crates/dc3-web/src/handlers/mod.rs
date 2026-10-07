@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::extract::Path;
 use axum::extract::rejection::PathRejection;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use dc3_core::{AnyKey, magnet_link, text};
 use dc3_policy::TermMatcher;
 use dc3_store::{FileRow, MAX_NAME_CHARS, MAX_PATH_CHARS, TorrentRecord};
@@ -55,9 +55,20 @@ pub(crate) fn torrent_href(record: &TorrentRecord) -> String {
 /// that produced it is still fresh (bep33.md §7). Stale or missing
 /// estimates display and rank as if missing.
 pub(crate) fn fresh_seeders(record: &TorrentRecord, freshness: Duration) -> Option<u64> {
+    fresh_seeders_at(record, freshness, Utc::now())
+}
+
+/// [`fresh_seeders`] against an explicit clock reading, so a whole page can
+/// rank against one shared `now` instead of sampling the clock per record or
+/// per comparison.
+pub(crate) fn fresh_seeders_at(
+    record: &TorrentRecord,
+    freshness: Duration,
+    now: DateTime<Utc>,
+) -> Option<u64> {
     let est = record.seeders_est?;
     let scraped = record.last_scraped_at?;
-    let age = Utc::now().signed_duration_since(scraped);
+    let age = now.signed_duration_since(scraped);
     (age <= chrono::Duration::from_std(freshness).unwrap_or(chrono::Duration::MAX)).then_some(est)
 }
 
@@ -400,6 +411,47 @@ mod tests {
             files_cut: false,
             magnet: None,
         }
+    }
+
+    #[test]
+    fn fresh_seeders_at_pins_the_boundary_against_a_fixed_clock() {
+        use std::time::Duration;
+        let freshness = Duration::from_secs(7 * 24 * 60 * 60);
+        let window = chrono::Duration::from_std(freshness).unwrap();
+        let now = Utc::now();
+        let scraped_at = |age: chrono::Duration| {
+            let mut r = record("x", &[]);
+            r.seeders_est = Some(7);
+            r.last_scraped_at = Some(now - age);
+            r
+        };
+        // Exactly at the window edge still counts as fresh …
+        assert_eq!(
+            fresh_seeders_at(&scraped_at(window), freshness, now),
+            Some(7)
+        );
+        // … one second past it does not.
+        assert_eq!(
+            fresh_seeders_at(
+                &scraped_at(window + chrono::Duration::seconds(1)),
+                freshness,
+                now
+            ),
+            None
+        );
+        // A scrape timestamped after `now` (clock skew) counts as fresh.
+        let mut skewed = record("x", &[]);
+        skewed.seeders_est = Some(7);
+        skewed.last_scraped_at = Some(now + chrono::Duration::seconds(1));
+        assert_eq!(fresh_seeders_at(&skewed, freshness, now), Some(7));
+        // The shared reading decides: the same record is fresh and stale
+        // against different `now`s with no clock sampled in between.
+        let r = scraped_at(window);
+        assert_eq!(fresh_seeders_at(&r, freshness, now), Some(7));
+        assert_eq!(
+            fresh_seeders_at(&r, freshness, now + chrono::Duration::seconds(2)),
+            None
+        );
     }
 
     #[test]

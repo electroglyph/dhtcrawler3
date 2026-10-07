@@ -11,6 +11,7 @@ use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
+use chrono::{DateTime, Utc};
 use dc3_search::{
     DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, ParsedQuery, QueryError,
     SEARCH_TIMEOUT, SearchError, SearchQuery, Sort, parse_query, seeder_multiplier,
@@ -19,7 +20,7 @@ use dc3_store::TorrentRecord;
 use serde::Deserialize;
 
 use super::{
-    Detail, Shown, encode_query_value, fresh_seeders, log_backend_error, show_all, torrent_href,
+    Detail, Shown, encode_query_value, fresh_seeders_at, log_backend_error, show_all, torrent_href,
 };
 use crate::Backend;
 use crate::app::{AppState, routes};
@@ -293,18 +294,23 @@ pub(crate) fn order_page(
     sort: Sort,
     freshness: Duration,
 ) {
+    // One clock reading shared by every comparison below. Sampling `now`
+    // per comparison would cost a clock call each time and let the
+    // freshness boundary move mid-sort, ranking the same record both ways.
+    let now = Utc::now();
     match sort {
         Sort::Seeders => {
             torrents.sort_by(|a, b| {
-                fresh_seeders(&b.0, freshness).cmp(&fresh_seeders(&a.0, freshness))
+                fresh_seeders_at(&b.0, freshness, now).cmp(&fresh_seeders_at(&a.0, freshness, now))
             });
         }
         Sort::Relevance => {
             torrents.sort_by(|a, b| {
-                boosted(&b.0, scores.get(&b.0.id), freshness).total_cmp(&boosted(
+                boosted_at(&b.0, scores.get(&b.0.id), freshness, now).total_cmp(&boosted_at(
                     &a.0,
                     scores.get(&a.0.id),
                     freshness,
+                    now,
                 ))
             });
         }
@@ -315,8 +321,19 @@ pub(crate) fn order_page(
 /// `score` with the web-side seeder boost (bep33.md §7): fresh estimates
 /// multiply by `1 + SEEDER_WEIGHT·log10(1+est)`; anything else is unchanged.
 pub(crate) fn boosted(record: &TorrentRecord, score: Option<&f32>, freshness: Duration) -> f32 {
+    boosted_at(record, score, freshness, Utc::now())
+}
+
+/// [`boosted`] against an explicit clock reading, so page-wide ranking can
+/// share one `now` with [`fresh_seeders_at`].
+pub(crate) fn boosted_at(
+    record: &TorrentRecord,
+    score: Option<&f32>,
+    freshness: Duration,
+    now: DateTime<Utc>,
+) -> f32 {
     let base = score.copied().unwrap_or(0.0);
-    match fresh_seeders(record, freshness) {
+    match fresh_seeders_at(record, freshness, now) {
         Some(est) => {
             #[allow(clippy::cast_possible_truncation)]
             let boost = seeder_multiplier(est) as f32;
@@ -469,7 +486,7 @@ fn result_row(record: &TorrentRecord, shown: Shown, freshness: Duration) -> Resu
         first_seen: date(record.first_seen_at),
         first_seen_iso: rfc3339(record.first_seen_at),
         seen: plural(record.seen_count, "time", "times"),
-        seeders: fresh_seeders(record, freshness).map(grouped),
+        seeders: fresh_seeders_at(record, freshness, Utc::now()).map(grouped),
         magnet: shown.magnet,
     }
 }
