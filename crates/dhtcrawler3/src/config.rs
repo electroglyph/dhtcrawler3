@@ -658,10 +658,17 @@ fn has_control(s: &str) -> bool {
 }
 
 /// True when two listen addresses would claim the same socket: same port and
-/// equal IPs, or a wildcard on either side (a wildcard also overlaps the other
-/// family on dual-stack hosts, so any wildcard counts).
+/// equal IPs, or a wildcard covering an address of the same family. A
+/// wildcard never overlaps the other family (`0.0.0.0:9100` and `[::1]:9100`
+/// bind distinct sockets), so `is_unspecified` only counts within one family.
 fn listen_addrs_overlap(a: SocketAddr, b: SocketAddr) -> bool {
-    a.port() == b.port() && (a.ip() == b.ip() || a.ip().is_unspecified() || b.ip().is_unspecified())
+    if a.port() != b.port() {
+        return false;
+    }
+    if a.ip() == b.ip() {
+        return true;
+    }
+    (a.ip().is_unspecified() || b.ip().is_unspecified()) && a.ip().is_ipv4() == b.ip().is_ipv4()
 }
 
 impl Config {
@@ -671,8 +678,7 @@ impl Config {
         self.validate_crawl()?;
         self.validate_index()?;
         self.validate_web()?;
-        if listen_addrs_overlap(self.metrics.listen, self.web.listen)
-            && self.web.listen.port() != 0
+        if listen_addrs_overlap(self.metrics.listen, self.web.listen) && self.web.listen.port() != 0
         {
             return Err(invalid("metrics.listen and web.listen must differ"));
         }
@@ -1341,6 +1347,31 @@ mod tests {
         // Different ports are fine.
         c.metrics.listen = "0.0.0.0:9100".parse().unwrap();
         c.web.listen = "127.0.0.1:8080".parse().unwrap();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn cross_family_listen_addrs_do_not_overlap() {
+        let mut c = Config::default();
+        // IPv4 wildcard vs IPv6 loopback on the same port: distinct sockets.
+        c.metrics.listen = "0.0.0.0:9100".parse().unwrap();
+        c.web.listen = "[::1]:9100".parse().unwrap();
+        assert!(c.validate().is_ok());
+        // IPv6 wildcard vs IPv4 loopback on the same port: distinct sockets.
+        c.metrics.listen = "[::]:9100".parse().unwrap();
+        c.web.listen = "127.0.0.1:9100".parse().unwrap();
+        assert!(c.validate().is_ok());
+        // Same-family wildcard pairs are still rejected.
+        c.metrics.listen = "[::]:9100".parse().unwrap();
+        c.web.listen = "[::1]:9100".parse().unwrap();
+        assert!(c.validate().is_err());
+        // Exact IPv6 equality is still rejected.
+        c.metrics.listen = "[::1]:9100".parse().unwrap();
+        c.web.listen = "[::1]:9100".parse().unwrap();
+        assert!(c.validate().is_err());
+        // Distinct IPv6 loopbacks on the same port do not overlap.
+        c.metrics.listen = "[::1]:9100".parse().unwrap();
+        c.web.listen = "[::2]:9100".parse().unwrap();
         assert!(c.validate().is_ok());
     }
 
