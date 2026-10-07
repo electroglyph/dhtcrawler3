@@ -19,7 +19,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 unicode-normalization.workspace = true
-unicode-script.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

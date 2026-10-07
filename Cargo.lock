@@ -669,6 +669,7 @@ dependencies = [
  "serde",
  "thiserror",
  "unicode-normalization",
+ "unicode-script",
 ]
 
 [[package]]
@@ -716,10 +717,10 @@ name = "dc3-policy"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "dc3-core",
  "proptest",
  "thiserror",
  "unicode-normalization",
- "unicode-script",
  "unicode-security",
 ]
 
@@ -737,7 +738,6 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-normalization",
- "unicode-script",
 ]
 
 [[package]]

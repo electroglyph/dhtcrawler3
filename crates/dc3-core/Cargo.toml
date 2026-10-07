@@ -17,6 +17,7 @@ percent-encoding.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
+unicode-script.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -18,7 +18,6 @@ use tantivy::tokenizer::{
 };
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
-use unicode_script::{Script, UnicodeScript};
 
 /// Name under which [`Dc3Tokenizer`] is registered with Tantivy.
 pub const TOKENIZER_NAME: &str = "dc3";
@@ -29,24 +28,9 @@ pub const CJK1_TOKENIZER_NAME: &str = "dc3_cjk1";
 /// Tokens longer than this many bytes (after normalisation) are dropped.
 pub const MAX_TOKEN_BYTES: usize = 64;
 
-/// Scripts whose characters get CJK treatment.
-const CJK_SCRIPTS: [Script; 4] = [
-    Script::Han,
-    Script::Hiragana,
-    Script::Katakana,
-    Script::Hangul,
-];
-
-/// True when `c` belongs to (or is used by) a CJK script. Uses
-/// Script_Extensions so that e.g. the prolonged sound mark `ー` counts as
-/// Katakana rather than Common.
-pub fn is_cjk(c: char) -> bool {
-    let ext = c.script_extension();
-    if ext.is_common() || ext.is_inherited() {
-        return false;
-    }
-    CJK_SCRIPTS.iter().any(|s| ext.contains_script(*s))
-}
+// The shared CJK definition lives in [`dc3_core::text`]; re-exported so
+// `crate::is_cjk` keeps resolving for existing users.
+pub use dc3_core::text::is_cjk;
 
 /// True when `s` contains at least one CJK character.
 pub fn contains_cjk(s: &str) -> bool {

@@ -12,9 +12,9 @@ workspace = true
 
 [dependencies]
 aho-corasick.workspace = true
+dc3-core.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
-unicode-script.workspace = true
 unicode-security.workspace = true
 
 [dev-dependencies]

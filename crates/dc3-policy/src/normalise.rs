@@ -9,8 +9,8 @@
 //! The result is then split into tokens. Four token-sequence variants are
 //! derived from it (see [`Variants`]).
 
+use dc3_core::text::is_cjk;
 use unicode_normalization::UnicodeNormalization;
-use unicode_script::{Script, UnicodeScript};
 
 /// Maximum number of passes of the character pipeline while looking for a
 /// fixed point. Real text converges after one or two.
@@ -75,14 +75,6 @@ fn is_default_ignorable(c: char) -> bool {
 
 fn is_combining_diacritic(c: char) -> bool {
     in_ranges(c, &COMBINING_DIACRITICS)
-}
-
-/// True for characters that become single-character tokens.
-fn is_cjk(c: char) -> bool {
-    matches!(
-        c.script(),
-        Script::Han | Script::Hiragana | Script::Katakana | Script::Hangul
-    )
 }
 
 fn is_word_char(c: char) -> bool {
@@ -277,6 +269,15 @@ pub fn normalise(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn katakana_prolonged_mark_splits_like_cjk() {
+        // ー is Script=Common but used by Katakana: the shared definition
+        // splits it out exactly as search indexing classifies it, instead
+        // of gluing it to neighbouring word characters.
+        assert_eq!(normalise("abーメcd"), ["ab", "ー", "メ", "cd"]);
+        assert_eq!(normalise("ラーメン"), ["ラ", "ー", "メ", "ン"]);
+    }
 
     #[test]
     fn basic_tokens() {

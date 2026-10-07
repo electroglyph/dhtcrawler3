@@ -7,6 +7,30 @@
 //! template engine's job at output time.
 
 use unicode_normalization::UnicodeNormalization;
+use unicode_script::{Script, UnicodeScript};
+
+/// Scripts whose characters get CJK treatment.
+const CJK_SCRIPTS: [Script; 4] = [
+    Script::Han,
+    Script::Hiragana,
+    Script::Katakana,
+    Script::Hangul,
+];
+
+/// True when `c` belongs to (or is used by) a CJK script. Uses
+/// Script_Extensions so that e.g. the prolonged sound mark `ー` counts as
+/// Katakana rather than Common.
+///
+/// This is the single definition shared by search indexing and content
+/// policy, so the same character cannot classify differently at index and
+/// blocklist time.
+pub fn is_cjk(c: char) -> bool {
+    let ext = c.script_extension();
+    if ext.is_common() || ext.is_inherited() {
+        return false;
+    }
+    CJK_SCRIPTS.iter().any(|s| ext.contains_script(*s))
+}
 
 /// True for the Unicode bidirectional formatting controls that can reorder how
 /// text is displayed (e.g. make `gpj.exe` render as `exe.jpg`).
@@ -147,5 +171,21 @@ mod tests {
     #[test]
     fn noncharacters_removed() {
         assert_eq!(sanitize_display("a\u{FFFE}b\u{FFFF}c\u{1FFFE}", 10), "abc");
+    }
+
+    #[test]
+    fn cjk_covers_scripts_and_their_extensions() {
+        assert!(is_cjk('学'));
+        assert!(is_cjk('あ'));
+        assert!(is_cjk('カ'));
+        assert!(is_cjk('한'));
+        // The prolonged sound mark is Script=Common but used by Katakana.
+        assert!(is_cjk('ー'));
+        // The ideographic comma is Common too, but used by Han.
+        assert!(is_cjk('、'));
+        // Inherited marks and non-CJK scripts stay out.
+        assert!(!is_cjk('\u{0301}'));
+        assert!(!is_cjk('é'));
+        assert!(!is_cjk('a'));
     }
 }
