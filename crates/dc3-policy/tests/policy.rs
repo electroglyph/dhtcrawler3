@@ -126,6 +126,58 @@ fn regression_f06_combined_separator_and_digit_evasion_matches() {
 }
 
 #[test]
+fn affixed_checks_share_one_variant_pass() {
+    // Every evasion class fires from a single walk over the variant, with
+    // all seeds matched in one automaton pass per haystack.
+    let m = TermMatcher::load("ab\ncd\nef\n").unwrap();
+    // Each check in isolation: affix, fragment, digit-strip, combined.
+    assert!(m.matches_affixed("xxabxx"));
+    assert!(m.matches_affixed("c.d"));
+    assert!(m.matches_affixed("a1b"));
+    assert!(m.matches_affixed("e.1.f"));
+    // Several seeds across several checks in one text.
+    assert!(m.matches_affixed("xxabxx c.d e1f"));
+    // A later seed still fires when earlier ones are absent.
+    assert!(m.matches_affixed("zz e.1.f zz"));
+    // Near misses across every derived form stay negative.
+    assert!(!m.matches_affixed("axb cxd exf"));
+    assert!(!m.matches_affixed("a1x c2y e3z"));
+}
+
+#[test]
+fn affixed_handles_empty_and_long_only_matchers() {
+    let m = TermMatcher::load("ab\n").unwrap();
+    // Separator-only and empty texts have no tokens to scan.
+    assert!(!m.matches_affixed("..."));
+    assert!(!m.matches_affixed(""));
+    // Without short seeds the affix fast path stays silent, while whole
+    // tokens still match.
+    let m = TermMatcher::load("abcdefgh\n").unwrap();
+    assert!(!m.matches_affixed("xxabcdefghxx"));
+    assert!(!m.matches_affixed("a.b.c.d.e.f.g.h"));
+    assert!(m.matches_affixed("abcdefgh"));
+}
+
+#[test]
+fn affixed_finds_every_seed_in_one_pass() {
+    // Dozens of seeds share one automaton pass per haystack; each must be
+    // found affixed on its own, and a text holding none must stay clean.
+    let seeds: Vec<String> = ('a'..='h')
+        .flat_map(|a| ('a'..='h').map(move |b| format!("{a}{b}")))
+        .collect();
+    assert_eq!(seeds.len(), 64);
+    let m = TermMatcher::load(&seeds.join("\n")).unwrap();
+    for seed in ["ab", "cd", "ef", "gh", "ha", "bd", "ec", "ga", "dh", "fb"] {
+        assert!(
+            m.matches_affixed(&format!("xx{seed}xx")),
+            "missed seed: {seed:?}"
+        );
+    }
+    assert!(!m.matches_affixed("qq qq"));
+    assert!(!m.matches_affixed("qq1q q.q"));
+}
+
+#[test]
 fn regression_f07_raw_line_length_is_bounded() {
     // F-07: the length gate measures the raw line, so a megabyte of
     // comment text cannot slip past it.

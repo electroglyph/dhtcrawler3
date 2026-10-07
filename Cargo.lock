@@ -715,6 +715,7 @@ dependencies = [
 name = "dc3-policy"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "proptest",
  "thiserror",
  "unicode-normalization",

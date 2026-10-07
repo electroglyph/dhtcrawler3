@@ -33,6 +33,7 @@ panic = "warn"
 indexing_slicing = "warn"
 
 [workspace.dependencies]
+aho-corasick = "1"
 dc3-core = { path = "crates/dc3-core" }
 dc3-bencode = { path = "crates/dc3-bencode" }
 dc3-torrent = { path = "crates/dc3-torrent" }

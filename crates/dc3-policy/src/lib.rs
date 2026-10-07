@@ -12,6 +12,7 @@ mod normalise;
 
 use std::collections::{HashMap, HashSet};
 
+use aho_corasick::AhoCorasick;
 use normalise::Variants;
 pub use normalise::{MAX_NORMALISE_PASSES, normalise};
 
@@ -62,6 +63,41 @@ pub enum PolicyError {
     TooManyTerms { max: usize },
 }
 
+/// Normalized single-token seeds of at most [`MAX_AFFIX_SEED_CHARS`]
+/// characters, with the multi-pattern matcher that finds them inside
+/// longer tokens in one pass.
+///
+/// `seeds` owns the strings (and drives `Debug`); `ac` is the same set
+/// compiled once at load, so [`matches_affixed`](TermMatcher::matches_affixed)
+/// scans each haystack once instead of once per seed. `ac` is `None`
+/// while loading and when there are no seeds.
+#[derive(Clone, Default)]
+struct ShortSeeds {
+    seeds: Vec<String>,
+    ac: Option<AhoCorasick>,
+}
+
+impl ShortSeeds {
+    /// True when there are no seeds to look for.
+    fn is_empty(&self) -> bool {
+        self.seeds.is_empty()
+    }
+
+    /// True when any seed appears anywhere inside `haystack`.
+    fn is_match(&self, haystack: &str) -> bool {
+        self.ac.as_ref().is_some_and(|ac| ac.is_match(haystack))
+    }
+}
+
+impl std::fmt::Debug for ShortSeeds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShortSeeds")
+            .field("seeds", &self.seeds)
+            .field("built", &self.ac.is_some())
+            .finish()
+    }
+}
+
 /// A set of blocked terms, each a sequence of base-normalised tokens.
 ///
 /// Terms are indexed by their first token. Matching a text of `n` tokens
@@ -72,9 +108,8 @@ pub enum PolicyError {
 pub struct TermMatcher {
     /// First token → full token sequences starting with it.
     index: HashMap<String, Vec<Vec<String>>>,
-    /// Normalized single-token seeds of at most [`MAX_AFFIX_SEED_CHARS`]
-    /// characters, for the affix rule in [`matches_affixed`](Self::matches_affixed).
-    short: Vec<String>,
+    /// Short affix seeds with their one-pass matcher.
+    short: ShortSeeds,
     len: usize,
 }
 
@@ -128,10 +163,19 @@ impl TermMatcher {
             bucket.push(tokens);
             if let Some(seed) = short_seed {
                 if seen_short.insert(seed.clone()) {
-                    matcher.short.push(seed);
+                    matcher.short.seeds.push(seed);
                 }
             }
             matcher.len = matcher.len.saturating_add(1);
+        }
+        if !matcher.short.seeds.is_empty() {
+            // Infallible in practice: at most MAX_TERMS patterns of at most
+            // MAX_AFFIX_SEED_CHARS characters each, far below every
+            // automaton limit (billions of states/patterns, huge patterns).
+            #[allow(clippy::expect_used)]
+            let ac = AhoCorasick::new(&matcher.short.seeds)
+                .expect("bounded short seeds fit the automaton");
+            matcher.short.ac = Some(ac);
         }
         Ok(matcher)
     }
@@ -179,6 +223,12 @@ impl TermMatcher {
     /// Two evasions are also covered: tokens joined with separators
     /// removed (`p.t.h.c` → `pthc`), and tokens with digits stripped
     /// (`p1thc` → `pthc`).
+    ///
+    /// Each variant is walked once: its tokens feed the token check, are
+    /// joined a single time for the fragment checks, and the digit checks
+    /// run only when the joined form holds a digit (every digit there comes
+    /// from a token, so one test gates both). Every check is one
+    /// automaton pass over its haystack, not one scan per seed.
     pub fn matches_affixed(&self, text: &str) -> bool {
         if self.index.is_empty() && self.short.is_empty() {
             return false;
@@ -192,62 +242,42 @@ impl TermMatcher {
         if self.short.is_empty() {
             return false;
         }
-        if variants
-            .all()
-            .iter()
-            .flat_map(|tokens| tokens.iter())
-            .any(|tok| self.short.iter().any(|seed| tok.contains(seed.as_str())))
-        {
-            return true;
-        }
-        // Separator-fragmented seeds: `p.t.h.c` normalises to single-letter
-        // tokens, so no one token contains the seed. Joining each variant's
-        // tokens (separators removed) recovers it.
-        let fragmented = variants.all().iter().any(|tokens| {
-            if tokens.is_empty() {
-                return false;
-            }
-            let compact: String = tokens.concat();
-            self.short.iter().any(|seed| compact.contains(seed.as_str()))
-        });
-        if fragmented {
-            return true;
-        }
-        // Digit-interleaved seeds: `p1thc` is one token in every variant
-        // (leet maps `1` to `i`, giving `pithc`), so neither the plain nor
-        // the leet form contains the seed. Stripping digits recovers it.
-        if variants
-            .all()
-            .iter()
-            .flat_map(|tokens| tokens.iter())
-            .any(|tok| {
-                if !tok.chars().any(|c| c.is_numeric()) {
-                    return false;
-                }
-                let stripped: String =
-                    tok.chars().filter(|c| !c.is_numeric()).collect();
-                !stripped.is_empty()
-                    && self.short.iter().any(|seed| stripped.contains(seed.as_str()))
-            })
-        {
-            return true;
-        }
-        // Combined evasion: separators fragment AND digits interleave
-        // (`p.1.t.h.c` compacts to `p1thc`, which no single check above
-        // catches). Stripping digits from each variant's joined tokens
-        // recovers the seed.
         variants.all().iter().any(|tokens| {
+            if tokens.iter().any(|tok| self.short.is_match(tok)) {
+                return true;
+            }
+            // Separator-fragmented seeds: `p.t.h.c` normalises to
+            // single-letter tokens, so no one token contains the seed.
+            // Joining the variant's tokens (separators removed) recovers it.
             if tokens.is_empty() {
                 return false;
             }
             let compact: String = tokens.concat();
+            if self.short.is_match(&compact) {
+                return true;
+            }
             if !compact.chars().any(|c| c.is_numeric()) {
                 return false;
             }
-            let stripped: String =
-                compact.chars().filter(|c| !c.is_numeric()).collect();
-            !stripped.is_empty()
-                && self.short.iter().any(|seed| stripped.contains(seed.as_str()))
+            // Digit-interleaved seeds: `p1thc` is one token in every variant
+            // (leet maps `1` to `i`, giving `pithc`), so neither the plain
+            // nor the leet form contains the seed. Stripping digits
+            // recovers it.
+            if tokens.iter().any(|tok| {
+                if !tok.chars().any(|c| c.is_numeric()) {
+                    return false;
+                }
+                let stripped: String = tok.chars().filter(|c| !c.is_numeric()).collect();
+                !stripped.is_empty() && self.short.is_match(&stripped)
+            }) {
+                return true;
+            }
+            // Combined evasion: separators fragment AND digits interleave
+            // (`p.1.t.h.c` compacts to `p1thc`, which no single check above
+            // catches). Stripping digits from the joined tokens recovers
+            // the seed.
+            let stripped: String = compact.chars().filter(|c| !c.is_numeric()).collect();
+            !stripped.is_empty() && self.short.is_match(&stripped)
         })
     }
 
@@ -309,5 +339,23 @@ mod tests {
                 line.chars().count()
             );
         }
+    }
+
+    #[test]
+    fn short_automaton_is_built_once_at_load() {
+        // The one-pass matcher must exist exactly when short seeds do: the
+        // affix checks consult it, so a missing build would silently
+        // disable every evasion rule.
+        let m = TermMatcher::load("ab\ncdefgh\n").unwrap();
+        assert!(!m.short.is_empty());
+        assert!(m.short.ac.is_some());
+        assert!(m.short.is_match("xxabxx"));
+        assert!(!m.short.is_match("xxaxxx"));
+
+        let m = TermMatcher::load("cdefgh\n").unwrap();
+        assert!(m.short.is_empty());
+        assert!(m.short.ac.is_none());
+
+        assert!(TermMatcher::empty().short.ac.is_none());
     }
 }

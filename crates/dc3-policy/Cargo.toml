@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+aho-corasick.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
 unicode-script.workspace = true
