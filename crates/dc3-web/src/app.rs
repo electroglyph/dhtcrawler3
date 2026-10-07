@@ -16,6 +16,7 @@ use tokio::sync::Semaphore;
 use crate::handlers::{api, health, pages, search, torrent};
 use crate::middleware::{MAX_BODY_BYTES, MAX_CONCURRENT_REQUESTS, guard};
 use crate::ratelimit::{RATE_LIMIT_IDLE_EXPIRY, RATE_LIMIT_MAX_KEYS, RateLimiter};
+use crate::search_cache::{SearchCache, SearchCacheConfig};
 use crate::templates::PageMeta;
 use crate::{
     Backend, MAX_CONCURRENT_DETAILS, SECURITY_TXT_VALIDITY, WebConfig, WebDeps, format,
@@ -115,6 +116,8 @@ pub(crate) struct AppState<B> {
     pub site: Site,
     pub backend: B,
     pub search: SearchHandle,
+    /// Server-side index-result cache shared by HTML and JSON search.
+    pub(crate) cache: SearchCache,
     /// Home-page totals; `None` until the first successful load.
     stats: RwLock<Option<PublicStats>>,
     pub limiter: RateLimiter,
@@ -166,10 +169,13 @@ pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Ar
         panic!("invalid WebConfig: {e}");
     }
     let seeder_freshness = cfg.seeder_freshness;
+    let cache_config = SearchCacheConfig::new(cfg.search_cache_entries, cfg.search_cache_ttl);
+    let initial_stamp = deps.search.stamp();
     let state = Arc::new(AppState {
         site: Site::new(cfg, Utc::now()),
         backend: deps.backend,
         search: deps.search,
+        cache: SearchCache::new(cache_config, initial_stamp),
         stats: RwLock::new(None),
         limiter: RateLimiter::new(RATE_LIMIT_MAX_KEYS, RATE_LIMIT_IDLE_EXPIRY),
         requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
@@ -304,6 +310,8 @@ mod tests {
                 hsts: false,
                 trusted_proxies: Vec::new(),
                 seeder_freshness: Duration::from_secs(604800),
+                search_cache_entries: crate::DEFAULT_SEARCH_CACHE_ENTRIES,
+                search_cache_ttl: Duration::from_secs(crate::DEFAULT_SEARCH_CACHE_TTL_SECS),
             },
             Utc::now(),
         );

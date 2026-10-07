@@ -519,7 +519,7 @@ async fn live_search_roundtrips_fetched_torrents() {
             let runs = name.split(|c: char| !c.is_alphanumeric());
             for cand in runs.filter(|s| s.chars().count() >= 3) {
                 let hits = match index.search(&SearchQuery::new(cand)) {
-                    Ok(results) => results.hits,
+                    Ok((results, _)) => results.hits,
                     // Unparseable runs (stop words, lone affixes) cannot
                     // retrieve anything; the next run may.
                     Err(_) => continue,

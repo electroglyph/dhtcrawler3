@@ -162,6 +162,7 @@ async fn search_ids(search: &SearchHandle, text: &str) -> Vec<i64> {
         .search(SearchQuery::new(text), Duration::from_secs(5))
         .await
         .unwrap()
+        .0
         .hits
         .iter()
         .map(|h| h.id)
@@ -268,6 +269,8 @@ async fn scenario(options: PgConnectOptions) {
         hsts: false,
         trusted_proxies: Vec::new(),
         seeder_freshness: Duration::from_secs(7 * 24 * 60 * 60),
+        search_cache_entries: dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES,
+        search_cache_ttl: Duration::from_secs(dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS),
     };
     let app = dc3_web::router(
         web_cfg,

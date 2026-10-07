@@ -31,7 +31,7 @@ pub use generations::{
 };
 pub use handle::{MIN_WATCH_INTERVAL, SearchHandle};
 pub use index::{
-    DEFAULT_WRITER_HEAP_BYTES, FILES_TEXT_MAX_BYTES, Hit, IndexDoc, IndexWriterHandle,
+    DEFAULT_WRITER_HEAP_BYTES, FILES_TEXT_MAX_BYTES, Hit, IndexDoc, IndexStamp, IndexWriterHandle,
     MAX_CONCURRENT_SEARCHES, NAME_BOOST, POPULARITY_WEIGHT, PREFIX_BOOST, Result, SEARCH_TIMEOUT,
     SEEDER_WEIGHT, SearchError, SearchIndex, SearchResults, field_names, popularity_multiplier,
     schema, seeder_multiplier, truncate_on_char_boundary,

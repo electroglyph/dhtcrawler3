@@ -19,6 +19,7 @@ dc3-core.workspace = true
 dc3-search.workspace = true
 dc3-store.workspace = true
 ipnet.workspace = true
+lru.workspace = true
 metrics.workspace = true
 percent-encoding.workspace = true
 serde.workspace = true

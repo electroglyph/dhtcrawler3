@@ -1,5 +1,6 @@
 //! `GET /search`: results, pagination and errors.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::http::StatusCode;
@@ -219,10 +220,14 @@ async fn every_query_searches_normally() {
     assert_eq!(json["query"], "zzforbiddenzz");
     assert_eq!(json["per_page"], 5);
     // The no-match query never touched the database; the rest did.
+    // Hydration runs on every request, cached or not.
     assert_eq!(app.backend.get_many_calls(), 4);
+    // Five requests but four index searches: the repeated HTML query is
+    // served from the search cache (the API request differs by per_page,
+    // and the empty query is never inserted).
     assert_eq!(
         metrics().histogram_count("dc3_search_seconds"),
-        searches + 5
+        searches + 4
     );
 
     // Bad parameters still answer 400.
@@ -256,9 +261,11 @@ async fn short_prefixes_search_file_names() {
         assert_eq!(json["total"], 1, "{q}");
         assert_eq!(json["query"], q, "{q}");
     }
+    // Two index searches for four requests: each API request shares its
+    // HTML request's cache entry (same text, sort, page and per_page).
     assert_eq!(
         metrics().histogram_count("dc3_search_seconds"),
-        searches + 4
+        searches + 2
     );
 }
 
@@ -395,4 +402,175 @@ async fn cjk_and_prefix_searches() {
     assert_eq!(result_names(&r.body), ["東京大学 講義"]);
     let r = send(&app.router, get("/search?q=photog")).await;
     assert_eq!(result_names(&r.body), ["Photography basics"]);
+}
+
+// ------------------------------------------------------- search query cache
+
+#[tokio::test]
+async fn repeated_searches_hit_the_cache() {
+    let _serial = serial().await;
+    let app = app(vec![torrent(1, "zzforbiddenzz movie", &[("a", 1)])]);
+    let searches = metrics().histogram_count("dc3_search_seconds");
+    let hits = metrics().counter("dc3_search_cache_hits_total");
+    let misses = metrics().counter("dc3_search_cache_misses_total{reason=absent}");
+
+    // HTML first: a miss that searches the index once ...
+    let r = send(&app.router, get("/search?q=zzforbiddenzz")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.header("cache-control"), "no-store");
+    assert_eq!(result_names(&r.body), ["zzforbiddenzz movie"]);
+    // ... then the API shares the entry: same text, sort, page and per_page.
+    let r = send(&app.router, get("/api/v1/search?q=zzforbiddenzz")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.header("cache-control"), "no-store");
+    assert_eq!(r.json()["total"], 1);
+    // Repeat HTML: a hit, so no index search is recorded.
+    let r = send(&app.router, get("/search?q=zzforbiddenzz")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.header("cache-control"), "no-store");
+
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 1
+    );
+    assert_eq!(metrics().counter("dc3_search_cache_hits_total"), hits + 2);
+    assert_eq!(
+        metrics().counter("dc3_search_cache_misses_total{reason=absent}"),
+        misses + 1
+    );
+    // Hydration still runs on every request, cached or not.
+    assert_eq!(app.backend.get_many_calls(), 3);
+}
+
+#[tokio::test]
+async fn distinct_pages_and_sorts_search_again() {
+    let _serial = serial().await;
+    let app = app(many(45));
+    let searches = metrics().histogram_count("dc3_search_seconds");
+    let hits = metrics().counter("dc3_search_cache_hits_total");
+
+    for uri in [
+        "/search?q=common",
+        "/search?q=common&p=2",
+        "/search?q=common&sort=newest",
+    ] {
+        let r = send(&app.router, get(uri)).await;
+        assert_eq!(r.status, StatusCode::OK, "{uri}");
+    }
+    // Page and sort variants are separate index queries, so all three
+    // searched; repeating page 1 is a hit, not a fourth search.
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 3
+    );
+    let r = send(&app.router, get("/search?q=common")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 3
+    );
+    assert_eq!(metrics().counter("dc3_search_cache_hits_total"), hits + 1);
+}
+
+#[tokio::test]
+async fn empty_searches_are_never_cached() {
+    let _serial = serial().await;
+    let app = app(vec![torrent(1, "zzforbiddenzz movie", &[("a", 1)])]);
+    let searches = metrics().histogram_count("dc3_search_seconds");
+    let hits = metrics().counter("dc3_search_cache_hits_total");
+    let misses = metrics().counter("dc3_search_cache_misses_total{reason=absent}");
+
+    for _ in 0..2 {
+        let r = send(&app.router, get("/search?q=nothingmatches")).await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert!(r.body.contains("No torrents match your search."));
+    }
+    // Both runs searched the index: the empty outcome is shared by no
+    // flight and inserted nowhere, so the repeat is a miss, not a hit.
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 2
+    );
+    assert_eq!(metrics().counter("dc3_search_cache_hits_total"), hits);
+    assert_eq!(
+        metrics().counter("dc3_search_cache_misses_total{reason=absent}"),
+        misses + 2
+    );
+    assert_eq!(app.backend.get_many_calls(), 0);
+}
+
+#[tokio::test]
+async fn commit_between_requests_invalidates_the_cache() {
+    let _serial = serial().await;
+    let app = app(vec![torrent(1, "zzforbiddenzz one", &[("a", 1)])]);
+    let searches = metrics().histogram_count("dc3_search_seconds");
+    let hits = metrics().counter("dc3_search_cache_hits_total");
+    let stamps = metrics().counter("dc3_search_cache_misses_total{reason=stamp}");
+
+    let r = send(&app.router, get("/search?q=zzforbiddenzz")).await;
+    assert!(r.body.contains("1 torrent matches your search."));
+    // A repeat is a hit: still one index search.
+    let r = send(&app.router, get("/search?q=zzforbiddenzz")).await;
+    assert!(r.body.contains("1 torrent matches your search."));
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 1
+    );
+
+    // A commit changes the index stamp, so the whole cache clears: the next
+    // request searches again and sees the new torrent.
+    app.commit_torrent(torrent(2, "zzforbiddenzz two", &[("b", 2)]));
+    let r = send(&app.router, get("/search?q=zzforbiddenzz")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("2 torrents match your search."));
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 2
+    );
+    assert_eq!(metrics().counter("dc3_search_cache_hits_total"), hits + 1);
+    assert_eq!(
+        metrics().counter("dc3_search_cache_misses_total{reason=stamp}"),
+        stamps + 1
+    );
+}
+
+#[tokio::test]
+async fn concurrent_identical_misses_share_one_search() {
+    let _serial = serial().await;
+    let app = app(vec![torrent(1, "zzforbiddenzz movie", &[("a", 1)])]);
+    let searches = metrics().histogram_count("dc3_search_seconds");
+    let misses = metrics().counter("dc3_search_cache_misses_total{reason=absent}");
+    let hits = metrics().counter("dc3_search_cache_hits_total");
+    let coalesced = metrics().counter("dc3_search_cache_coalesced_total");
+
+    const N: usize = 16;
+    let gate = Arc::new(tokio::sync::Barrier::new(N));
+    let mut tasks = Vec::with_capacity(N);
+    for _ in 0..N {
+        let router = app.router.clone();
+        let gate = Arc::clone(&gate);
+        tasks.push(tokio::spawn(async move {
+            gate.wait().await;
+            send(&router, get("/search?q=zzforbiddenzz")).await
+        }));
+    }
+    for task in tasks {
+        let r = task.await.unwrap();
+        assert_eq!(r.status, StatusCode::OK);
+        assert_eq!(result_names(&r.body), ["zzforbiddenzz movie"]);
+    }
+    // Exactly one index search served all sixteen requests. Every
+    // non-hit lookup counts a miss — the leader's and each waiter's — and
+    // every waiter also counts coalesced; neither records index latency
+    // again. A late arrival may hit the installed entry instead of waiting,
+    // so the test asserts the conservation relations, not the split.
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 1
+    );
+    let missed = metrics().counter("dc3_search_cache_misses_total{reason=absent}") - misses;
+    let waited = metrics().counter("dc3_search_cache_coalesced_total") - coalesced;
+    let hit = metrics().counter("dc3_search_cache_hits_total") - hits;
+    assert_eq!(missed, waited + 1);
+    assert_eq!(hit + waited + 1, N as u64);
 }

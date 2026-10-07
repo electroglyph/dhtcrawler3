@@ -107,6 +107,12 @@ hsts = false
 # Reverse proxies whose X-Forwarded-For header is trusted (CIDR list). Behind
 # Docker's published port this is the network the proxy connects from, not 127.0.0.1.
 trusted_proxies = []
+# How many (text, sort, page, per_page) index results the search query cache
+# keeps (0 disables it).
+search_cache_size = 100
+# How long a search cache entry lives, in seconds, fixed from insert
+# (0 disables it).
+search_cache_ttl_secs = 3600
 
 [metrics]
 # Prometheus endpoint for whichever role is running. Keep it off the public network.

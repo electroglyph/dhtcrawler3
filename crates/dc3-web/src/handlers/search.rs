@@ -12,8 +12,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{DateTime, Utc};
 use dc3_search::{
-    DEFAULT_PER_PAGE, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, ParsedQuery, QueryError,
-    SEARCH_TIMEOUT, SearchError, SearchQuery, Sort, parse_query, seeder_multiplier,
+    DEFAULT_PER_PAGE, IndexStamp, MAX_PAGE, MAX_PER_PAGE, MAX_QUERY_CHARS, MAX_TERMS, ParsedQuery,
+    QueryError, SEARCH_TIMEOUT, SearchError, SearchQuery, SearchResults, Sort, parse_query,
+    seeder_multiplier,
 };
 use dc3_store::TorrentRecord;
 use serde::Deserialize;
@@ -25,6 +26,7 @@ use crate::Backend;
 use crate::app::{AppState, routes};
 use crate::format::{date, grouped, human_size, plural, rfc3339};
 use crate::render::{Flavor, error_response, error_with_query, html};
+use crate::search_cache::{CacheKey, Flight, PreSearch};
 use crate::telemetry::metric_names;
 use crate::templates::{ResultRow, SearchPage, SortLink};
 
@@ -170,6 +172,11 @@ pub(crate) struct Found {
 
 /// Searches the index, then loads the hits from the database. Hits that the
 /// database no longer shows (deleted) are skipped.
+///
+/// The index search goes through the shared query cache (`cache.md`): hits
+/// skip the index entirely, and concurrent identical misses share one search
+/// (singleflight). Hydration (`get_many` + `order_page`) still runs on every
+/// request — deletions and the seeder boost are time-dependent.
 pub(crate) async fn execute<B: Backend>(
     st: &AppState<B>,
     text: &str,
@@ -178,6 +185,54 @@ pub(crate) async fn execute<B: Backend>(
     per_page: u32,
     sort: Sort,
 ) -> Result<Found, Failure> {
+    let key = CacheKey {
+        text: text.to_owned(),
+        sort,
+        page,
+        per_page,
+    };
+    match st.cache.pre_search(&key, &st.search) {
+        // Disabled: today's uncached path, without even a stamp read.
+        None => {
+            let (results, _) = run_search(&st.search, text, parsed, page, per_page, sort).await?;
+            hydrate(st, &results, sort).await
+        }
+        Some(PreSearch::Hit(results)) => hydrate(st, &results, sort).await,
+        Some(PreSearch::Lead(cell)) => {
+            let flight = cell
+                .get_or_init(|| run_flight(&st.search, text, parsed, page, per_page, sort))
+                .await;
+            let flight: Arc<Flight> = Arc::clone(flight);
+            st.cache.install(&key, &cell, flight.clone());
+            match flight.as_ref() {
+                Ok((results, _)) => hydrate(st, results, sort).await,
+                Err(failure) => Err(clone_failure(failure)),
+            }
+        }
+        Some(PreSearch::Wait(cell)) => {
+            metrics::counter!(metric_names::SEARCH_CACHE_COALESCED).increment(1);
+            let flight = cell
+                .get_or_init(|| run_flight(&st.search, text, parsed, page, per_page, sort))
+                .await;
+            match flight.as_ref() {
+                Ok((results, _)) => hydrate(st, results, sort).await,
+                Err(failure) => Err(clone_failure(failure)),
+            }
+        }
+    }
+}
+
+/// One index search for `execute()`, recording `SEARCH_SECONDS`.
+/// The cache calls this once per flight (leader only); hits and coalesced
+/// waits never record index latency.
+async fn run_search(
+    search: &dc3_search::SearchHandle,
+    text: &str,
+    parsed: &ParsedQuery,
+    page: u32,
+    per_page: u32,
+    sort: Sort,
+) -> Result<(SearchResults, IndexStamp), Failure> {
     let query = SearchQuery {
         text: text.to_owned(),
         sort,
@@ -185,21 +240,53 @@ pub(crate) async fn execute<B: Backend>(
         per_page,
     };
     let started = Instant::now();
-    let result = st
-        .search
+    let result = search
         .search_parsed(query, parsed.clone(), SEARCH_TIMEOUT)
         .await;
     metrics::histogram!(metric_names::SEARCH_SECONDS).record(started.elapsed().as_secs_f64());
-    let results = match result {
-        Ok(results) => results,
-        Err(SearchError::Query(e)) => return Err(Failure::Query(e)),
-        Err(SearchError::Timeout | SearchError::Task(_)) => return Err(Failure::Busy),
+    match result {
+        Ok(ok) => Ok(ok),
+        Err(SearchError::Query(e)) => Err(Failure::Query(e)),
+        Err(SearchError::Timeout | SearchError::Task(_)) => Err(Failure::Busy),
         Err(e) => {
             tracing::error!(kind = error_kind(&e), "search index failed");
-            return Err(Failure::Broken);
+            Err(Failure::Broken)
         }
-    };
+    }
+}
 
+/// [`run_search`] shared via `Arc`: `Failure` is `Debug`-only on purpose
+/// (query text must never be cloned into logs or metrics), so flights share
+/// the outcome without cloning it.
+async fn run_flight(
+    search: &dc3_search::SearchHandle,
+    text: &str,
+    parsed: &ParsedQuery,
+    page: u32,
+    per_page: u32,
+    sort: Sort,
+) -> Arc<Flight> {
+    Arc::new(run_search(search, text, parsed, page, per_page, sort).await)
+}
+
+/// Rebuilds an owned [`Failure`] from a shared flight outcome.
+/// `QueryError` is `Clone`; the other variants are units.
+fn clone_failure(failure: &Failure) -> Failure {
+    match failure {
+        Failure::Query(e) => Failure::Query(e.clone()),
+        Failure::Busy => Failure::Busy,
+        Failure::Broken => Failure::Broken,
+        Failure::Database => Failure::Database,
+    }
+}
+
+/// Loads the index hits from the database and ranks one page.
+/// Runs on every request, cached or not.
+async fn hydrate<B: Backend>(
+    st: &AppState<B>,
+    results: &SearchResults,
+    sort: Sort,
+) -> Result<Found, Failure> {
     let ids: Vec<i64> = results.hits.iter().map(|hit| hit.id).collect();
     let records = if ids.is_empty() {
         Vec::new()

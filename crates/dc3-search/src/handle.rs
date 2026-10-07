@@ -8,7 +8,9 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use crate::generations::IndexRoot;
-use crate::index::{MAX_CONCURRENT_SEARCHES, Result, SearchError, SearchIndex, SearchResults};
+use crate::index::{
+    IndexStamp, MAX_CONCURRENT_SEARCHES, Result, SearchError, SearchIndex, SearchResults,
+};
 use crate::query::{ParsedQuery, SearchQuery};
 
 /// Shortest poll interval [`SearchHandle::watch`] uses.
@@ -70,7 +72,11 @@ impl SearchHandle {
     }
 
     /// Searches the live generation; see [`SearchIndex::search_async`].
-    pub async fn search(&self, q: SearchQuery, timeout: Duration) -> Result<SearchResults> {
+    pub async fn search(
+        &self,
+        q: SearchQuery,
+        timeout: Duration,
+    ) -> Result<(SearchResults, IndexStamp)> {
         let index = self.index();
         index.search_async(q, timeout).await
     }
@@ -83,7 +89,7 @@ impl SearchHandle {
         q: SearchQuery,
         parsed: ParsedQuery,
         timeout: Duration,
-    ) -> Result<SearchResults> {
+    ) -> Result<(SearchResults, IndexStamp)> {
         let index = self.index();
         index.search_parsed_async(q, parsed, timeout).await
     }
@@ -118,6 +124,18 @@ impl SearchHandle {
     pub fn current_generation(&self) -> u64 {
         // Indexes opened through an `IndexRoot` always carry a generation.
         self.index().generation().unwrap_or_default()
+    }
+
+    /// Snapshots the index version searches currently see; see
+    /// [`SearchIndex::stamp`]. No I/O.
+    pub fn stamp(&self) -> IndexStamp {
+        self.index().stamp()
+    }
+
+    /// True when `stamp` matches the live index version; see
+    /// [`SearchIndex::stamp_matches`]. No map clone, no I/O.
+    pub fn stamp_matches(&self, stamp: &IndexStamp) -> bool {
+        self.index().stamp_matches(stamp)
     }
 
     /// Number of live documents in the current generation.

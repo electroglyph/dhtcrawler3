@@ -29,6 +29,7 @@ mod listener;
 mod middleware;
 mod ratelimit;
 mod render;
+mod search_cache;
 mod serve;
 mod static_files;
 mod telemetry;
@@ -57,6 +58,11 @@ pub use serve::{
     STATS_RETRY_INTERVAL, serve,
 };
 pub use telemetry::{describe_metrics, metric_names};
+
+pub use search_cache::{
+    DEFAULT_SEARCH_CACHE_ENTRIES, DEFAULT_SEARCH_CACHE_TTL_SECS, MAX_SEARCH_CACHE_ENTRIES,
+    MAX_SEARCH_CACHE_TTL_SECS, SearchCacheConfig, validate_search_cache,
+};
 
 /// Most torrent-detail lookups (page or API) handled at once. Each one holds
 /// a full stored file list in memory.
@@ -87,6 +93,12 @@ pub struct WebConfig {
     /// after its scrape. Older estimates are hidden (stale) and rank as
     /// if missing. The crawl role sets this to `scrape_interval_secs`.
     pub seeder_freshness: Duration,
+    /// How many `(text, sort, page, per_page)` index results to cache.
+    /// Zero disables the search query cache.
+    pub search_cache_entries: usize,
+    /// How long a search cache entry lives (fixed from insert).
+    /// Zero disables the search query cache.
+    pub search_cache_ttl: Duration,
 }
 
 impl WebConfig {
@@ -102,6 +114,8 @@ impl WebConfig {
                 "web.site_name must not contain control characters".into(),
             ));
         }
+        validate_search_cache(self.search_cache_entries, self.search_cache_ttl.as_secs())
+            .map_err(WebError::Config)?;
         Ok(())
     }
 }

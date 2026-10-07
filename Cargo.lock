@@ -767,6 +767,7 @@ dependencies = [
  "dc3-search",
  "dc3-store",
  "ipnet",
+ "lru 0.18.4",
  "metrics",
  "percent-encoding",
  "serde",

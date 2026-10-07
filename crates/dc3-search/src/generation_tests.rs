@@ -39,6 +39,7 @@ fn ids(index: &SearchIndex, text: &str) -> Vec<i64> {
     let mut v: Vec<i64> = index
         .search(&SearchQuery::new(text))
         .unwrap()
+        .0
         .hits
         .iter()
         .map(|h| h.id)
@@ -52,6 +53,7 @@ async fn hit_ids(handle: &SearchHandle, text: &str) -> Vec<i64> {
         .search(SearchQuery::new(text), SEARCH_TIMEOUT)
         .await
         .unwrap()
+        .0
         .hits
         .iter()
         .map(|h| h.id)
@@ -722,7 +724,7 @@ async fn commit_in_one_instance_is_visible_in_another() {
         let index = handle.index();
         index
             .search(&SearchQuery::new("second"))
-            .is_ok_and(|r| r.total == 1)
+            .is_ok_and(|(r, _)| r.total == 1)
     };
     wait_for(second_visible).await;
     assert_eq!(hit_ids(&handle, "upload").await, [2]);
@@ -770,7 +772,7 @@ fn reader_instance_survives_commits_merges_and_gc() {
                     if reload {
                         index.reload().map_err(|e| e.to_string())?;
                     }
-                    let total = index.search(&query).map_err(|e| e.to_string())?.total;
+                    let total = index.search(&query).map_err(|e| e.to_string())?.0.total;
                     if !committed.lock().unwrap().contains(&total) {
                         return Err(format!("saw {total} documents, never committed"));
                     }
@@ -837,13 +839,13 @@ fn reader_instance_survives_commits_merges_and_gc() {
     assert_eq!(index.doc_count(), expected);
     assert_eq!(index.checkpoint().unwrap(), ROUNDS);
     assert_eq!(
-        index.search(&SearchQuery::new("common ")).unwrap().total,
+        index.search(&SearchQuery::new("common ")).unwrap().0.total,
         expected
     );
     let mut q = SearchQuery::new("common ");
     q.sort = Sort::Newest;
     q.per_page = MAX_PER_PAGE;
-    let newest = index.search(&q).unwrap();
+    let newest = index.search(&q).unwrap().0;
     assert_eq!(newest.hits.len(), MAX_PER_PAGE as usize);
     assert!(newest.hits.iter().all(|h| live.contains(&h.id)));
 

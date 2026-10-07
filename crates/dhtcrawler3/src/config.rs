@@ -288,6 +288,12 @@ pub struct WebSettings {
     pub hsts: bool,
     /// CIDR networks (or single addresses) whose `X-Forwarded-For` is trusted.
     pub trusted_proxies: Vec<String>,
+    /// How many `(text, sort, page, per_page)` index results to cache.
+    /// Zero disables the search query cache.
+    pub search_cache_size: usize,
+    /// How long a search cache entry lives, in seconds (fixed from insert).
+    /// Zero disables the search query cache.
+    pub search_cache_ttl_secs: u64,
 }
 
 impl Default for WebSettings {
@@ -298,6 +304,8 @@ impl Default for WebSettings {
             site_name: "dhtcrawler3".into(),
             hsts: false,
             trusted_proxies: Vec::new(),
+            search_cache_size: dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES,
+            search_cache_ttl_secs: dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS,
         }
     }
 }
@@ -884,6 +892,8 @@ impl Config {
                 "web.trusted_proxies has more than {MAX_TRUSTED_PROXIES} entries"
             )));
         }
+        dc3_web::validate_search_cache(w.search_cache_size, w.search_cache_ttl_secs)
+            .map_err(invalid)?;
         self.trusted_proxies()?;
         Ok(())
     }
@@ -1187,6 +1197,18 @@ mod tests {
     fn example_file_parses_and_equals_defaults() {
         let parsed = from_toml_str(EXAMPLE, env(&[])).unwrap();
         assert_eq!(parsed, Config::default());
+        // The example pins the cache knobs: whole-struct equality alone would
+        // also pass if the keys were missing (serde defaults fill them in).
+        assert!(EXAMPLE.contains("search_cache_size"));
+        assert!(EXAMPLE.contains("search_cache_ttl_secs"));
+        assert_eq!(
+            parsed.web.search_cache_size,
+            dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES
+        );
+        assert_eq!(
+            parsed.web.search_cache_ttl_secs,
+            dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS
+        );
         // No environment and no file at all gives the same result.
         assert_eq!(from_toml_str("", env(&[])).unwrap(), Config::default());
         // The example's commented role sections parse too.
@@ -1436,6 +1458,8 @@ mod tests {
             ("DC3_WEB__BASE_URL", "https://exa mple.com"),
             ("DC3_WEB__SITE_NAME", ""),
             ("DC3_WEB__TRUSTED_PROXIES", "not-a-net"),
+            ("DC3_WEB__SEARCH_CACHE_SIZE", "10001"),
+            ("DC3_WEB__SEARCH_CACHE_TTL_SECS", "604801"),
             ("DC3_METRICS__LISTEN", "127.0.0.1:8080"),
             ("DC3_DATABASE__URL", "mysql://h/db"),
             ("DC3_DATABASE__USER", ""),
@@ -1447,6 +1471,14 @@ mod tests {
                 matches!(err, ConfigError::Invalid(_) | ConfigError::Parse(_)),
                 "{name}={value}: {err}"
             );
+        }
+        // Out-of-range cache knobs name the limit, never the rejected value.
+        for (name, value) in [
+            ("DC3_WEB__SEARCH_CACHE_SIZE", "10001"),
+            ("DC3_WEB__SEARCH_CACHE_TTL_SECS", "604801"),
+        ] {
+            let err = with_env(&[(name, value)]).unwrap_err();
+            assert!(!err.to_string().contains(value), "{err}");
         }
         let both_off = with_env(&[("DC3_CRAWL__BIND_V4", ""), ("DC3_CRAWL__BIND_V6", "")]);
         assert!(both_off.is_err());
@@ -1500,6 +1532,33 @@ mod tests {
             err.to_string().contains("scrape_lookup_timeout_secs"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn search_cache_defaults_and_env_overrides() {
+        let w = Config::default().web;
+        assert_eq!(w.search_cache_size, 100);
+        assert_eq!(w.search_cache_size, dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES);
+        assert_eq!(w.search_cache_ttl_secs, 3600);
+        assert_eq!(
+            w.search_cache_ttl_secs,
+            dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS
+        );
+        let c = with_env(&[
+            ("DC3_WEB__SEARCH_CACHE_SIZE", "50"),
+            ("DC3_WEB__SEARCH_CACHE_TTL_SECS", "60"),
+        ])
+        .unwrap();
+        assert_eq!(c.web.search_cache_size, 50);
+        assert_eq!(c.web.search_cache_ttl_secs, 60);
+        // Zero of either knob disables the cache instead of erroring.
+        let c = with_env(&[
+            ("DC3_WEB__SEARCH_CACHE_SIZE", "0"),
+            ("DC3_WEB__SEARCH_CACHE_TTL_SECS", "0"),
+        ])
+        .unwrap();
+        assert_eq!(c.web.search_cache_size, 0);
+        assert_eq!(c.web.search_cache_ttl_secs, 0);
     }
 
     #[test]

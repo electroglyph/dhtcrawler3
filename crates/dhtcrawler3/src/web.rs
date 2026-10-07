@@ -40,6 +40,8 @@ pub fn web_config(cfg: &Config) -> Result<WebConfig, ConfigError> {
         hsts: w.hsts,
         trusted_proxies: cfg.trusted_proxies()?,
         seeder_freshness: Duration::from_secs(cfg.crawl.scrape_interval_secs),
+        search_cache_entries: w.search_cache_size,
+        search_cache_ttl: Duration::from_secs(w.search_cache_ttl_secs),
     })
 }
 
@@ -111,6 +113,14 @@ mod tests {
         assert_eq!(w.base_url, "http://127.0.0.1:8080");
         assert_eq!(w.site_name, "dhtcrawler3");
         assert!(w.hsts);
+        assert_eq!(
+            w.search_cache_entries,
+            dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES
+        );
+        assert_eq!(
+            w.search_cache_ttl,
+            Duration::from_secs(dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS)
+        );
         assert_eq!(
             w.trusted_proxies,
             vec!["172.30.80.0/24".parse::<ipnet::IpNet>().unwrap()]

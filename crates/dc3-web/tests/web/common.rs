@@ -165,6 +165,11 @@ impl FakeBackend {
         self.0.get_by_key_calls.load(Ordering::SeqCst)
     }
 
+    /// Adds a torrent to the fake database (but not the search index).
+    pub fn add(&self, t: TorrentRecord) {
+        self.0.torrents.lock().unwrap().push(t);
+    }
+
     /// Hides the torrent with this id, as if its row had been deleted.
     pub fn hide(&self, id: i64) {
         for t in self.0.torrents.lock().unwrap().iter_mut() {
@@ -314,6 +319,33 @@ pub fn index_of(torrents: &[TorrentRecord]) -> TestIndex {
     TestIndex { search, _dir: dir }
 }
 
+impl TestIndex {
+    /// Commits `t` to the index and reloads the searcher, so the next
+    /// request observes a new index stamp and the search cache invalidates.
+    /// Mirrors [`index_of`]; the checkpoint only advances the stored
+    /// payload, which the stamp ignores.
+    pub fn commit(&self, t: &TorrentRecord) {
+        let root = IndexRoot::open(self._dir.path()).unwrap();
+        let index = root.open_current().unwrap();
+        let mut writer = index.writer(WRITER_HEAP).unwrap();
+        let files: Vec<&str> = t.files.iter().map(|f| f.path.as_str()).collect();
+        writer
+            .upsert(&IndexDoc {
+                id: t.id,
+                name: t.name.clone(),
+                files: files.join("\n"),
+                size: t.total_size,
+                created: t.first_seen_at.timestamp(),
+                seen: t.seen_count,
+                file_count: t.file_count,
+            })
+            .unwrap();
+        writer.commit(2).unwrap();
+        writer.wait_merging_threads().unwrap();
+        self.search.refresh().unwrap();
+    }
+}
+
 // --------------------------------------------------------------------- app
 
 pub fn config() -> WebConfig {
@@ -324,6 +356,8 @@ pub fn config() -> WebConfig {
         hsts: true,
         trusted_proxies: Vec::new(),
         seeder_freshness: Duration::from_secs(7 * 24 * 60 * 60),
+        search_cache_entries: dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES,
+        search_cache_ttl: Duration::from_secs(dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS),
     }
 }
 
@@ -332,6 +366,15 @@ pub struct TestApp {
     pub backend: FakeBackend,
     /// Keeps the search index alive.
     _index: TestIndex,
+}
+
+impl TestApp {
+    /// Adds `t` to the fake database and commits it to the search index,
+    /// then reloads the searcher so the next request sees a new index stamp.
+    pub fn commit_torrent(&self, t: TorrentRecord) {
+        self.backend.add(t.clone());
+        self._index.commit(&t);
+    }
 }
 
 pub fn app(torrents: Vec<TorrentRecord>) -> TestApp {

@@ -639,6 +639,7 @@ mod tests {
             .search(SearchQuery::new(text), Duration::from_secs(5))
             .await
             .unwrap()
+            .0
             .hits
             .iter()
             .map(|h| h.id)

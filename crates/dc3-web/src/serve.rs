@@ -246,6 +246,8 @@ mod tests {
             hsts: false,
             trusted_proxies: Vec::new(),
             seeder_freshness: Duration::from_secs(604800),
+            search_cache_entries: crate::DEFAULT_SEARCH_CACHE_ENTRIES,
+            search_cache_ttl: Duration::from_secs(crate::DEFAULT_SEARCH_CACHE_TTL_SECS),
         };
         let deps = WebDeps {
             backend: backend.clone(),
@@ -325,6 +327,8 @@ mod tests {
             hsts: false,
             trusted_proxies: Vec::new(),
             seeder_freshness: Duration::from_secs(604800),
+            search_cache_entries: crate::DEFAULT_SEARCH_CACHE_ENTRIES,
+            search_cache_ttl: Duration::from_secs(crate::DEFAULT_SEARCH_CACHE_TTL_SECS),
         };
         let deps = WebDeps {
             backend: Slow,

@@ -141,7 +141,16 @@ Each role serves `/metrics`, `/healthz` (liveness) and `/readyz` (readiness) on 
 | Pipeline | `dc3_discovered_total{source,family}`, `dc3_admitted_total{source}`, `dc3_queue_depth`, `dc3_fetch_total{outcome}` (ok, no_peers, fetch_failed, parse_error, private, store_error), `dc3_blocked_total{reason}` (peer_address, removal_cooldown, queue_full), `dc3_destination_skipped_total{reason}` (busy, rate_limited, negative_cache, map_full) |
 | Scrape (BEP 33) | `dc3_scrape_total{outcome}` (live, dying, dead, unknown), `dc3_scrape_tombstones_total`, `dc3_purge_tombstoned_total`, `dc3_scrape_due_depth`, `dc3_removed_keys_count`, `dc3_scrape_zero_seeder_share`, `dc3_scrape_unaware_share` |
 | Index | `dc3_index_lag` (sequence numbers behind), `dc3_index_lag_seconds`, `dc3_index_docs` |
-| Web | `dc3_http_requests_total{route,status}`, `dc3_search_seconds`, `dc3_rate_limited_total{route}` |
+| Web | `dc3_http_requests_total{route,status}`, `dc3_search_seconds`, `dc3_rate_limited_total{route}`, `dc3_search_cache_hits_total`, `dc3_search_cache_misses_total{reason}` (`absent`, `expired`, `stamp`), `dc3_search_cache_coalesced_total`, `dc3_search_cache_entries` |
+
+Search cache knobs (`DC3_WEB__SEARCH_CACHE_SIZE`, `DC3_WEB__SEARCH_CACHE_TTL_SECS`;
+defaults 100 entries / 3600 s; either zero disables): `misses{reason="stamp"}`
+counts invalidations by index commits, `"expired"` counts TTL lapses, `"absent"`
+counts first-time queries — concurrent identical misses also count here, with
+`coalesced` counting the waiters that shared one index search. `dc3_search_seconds`
+records one observation per index search only, so dividing it by the request rate
+gives the sharing factor. Sizing: roughly 1–2 KB per entry, so the default is ≈
+200 KB and the 10 000-entry cap ≈ 20 MB.
 
 Access logs: the web role writes one line per request at `info` level under the log
 target `dc3_web::access`. Each line has the method, route template, status and latency,

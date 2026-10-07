@@ -391,6 +391,13 @@ rename.
   3. deletes the old generation after a grace period.
 - The checkpoint is stored in each generation's commit payload.
 
+**Index stamp.** `SearchIndex::stamp()` snapshots the open segment set plus delete
+opstamps — exactly what `reload_if_changed` compares — with no I/O, and
+`stamp_matches` compares a stored stamp without cloning. The web search cache
+(§12) versions all entries with one global stamp; any commit invalidates on the
+next request. The generation number is promotion-only and is not used: it misses
+the common intra-generation commits.
+
 **Indexer loop** (in the binary):
 1. Take the high-water mark (§10).
 2. Read up to 1 000 rows with `checkpoint < change_seq ≤ mark`.
@@ -401,7 +408,8 @@ rename.
 ## 12. dc3-web (R9–R12)
 
 ```rust
-pub struct WebConfig { listen, base_url, site_name, hsts, trusted_proxies: Vec<IpNet>, .. }
+pub struct WebConfig { listen, base_url, site_name, hsts, trusted_proxies: Vec<IpNet>,
+                       search_cache_entries: usize, search_cache_ttl: Duration, .. }
 pub fn app(state: AppState) -> axum::Router;
 pub async fn serve(cfg: WebConfig, store: Store, index: SearchHandle,
                    shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), WebError>;
@@ -419,6 +427,21 @@ pub async fn serve(cfg: WebConfig, store: Store, index: SearchHandle,
 | `GET /robots.txt`, `/.well-known/security.txt` | crawler and security contact files |
 | `GET /static/style.css` | stylesheet, embedded in the binary |
 | `GET /healthz`, `GET /readyz` | liveness and readiness |
+
+**Search query cache.** `GET /search` and `GET /api/v1/search` share a
+server-side cache of raw index results, keyed by `(text, sort, page, per_page)`
+— page and sort variants are separate index queries, so they are separate
+entries. Only non-empty successes are stored; hydration (`get_many` +
+`order_page`) still runs on every request, so deletions and the seeder boost
+stay fresh. Entries expire after `web.search_cache_ttl_secs` (fixed from
+insert: hits refresh LRU recency, never expiry), the least-recently-used entry
+is evicted past `web.search_cache_size`, and any index commit clears the whole
+cache — the stamp is the open segment set plus delete opstamps (§11), not the
+promotion-only generation number, so intra-generation commits invalidate on the
+next request. Concurrent identical misses share one index search (singleflight).
+Either knob at zero disables the cache. HTTP stays `Cache-Control: no-store`:
+the cache is server-side only. Memory is roughly 1–2 KB per entry, so the
+100-entry default is ≈ 200 KB and the 10 000-entry cap ≈ 20 MB.
 
 **Rendering:**
 - askama with auto-escaping. `|safe` is never used.
@@ -492,7 +515,7 @@ dhtcrawler3 [--config FILE] <COMMAND>
 - `[database.crawler]`, `[database.indexer]`, `[database.web]`: optional `user` and `password_file` overrides, used by `all`.
 - `[crawl]` (including `max_pending` and `max_inflight_metadata_bytes`).
 - `[index]`.
-- `[web]`.
+- `[web]` (search cache: `search_cache_size`, `search_cache_ttl_secs`).
 - `[metrics]` (`listen`).
 - `[log]`.
 

@@ -379,7 +379,7 @@ fn ranked(index: &SearchIndex, text: &str) -> Vec<i64> {
 }
 
 fn run(index: &SearchIndex, q: SearchQuery) -> SearchResults {
-    index.search(&q).unwrap()
+    index.search(&q).unwrap().0
 }
 
 #[test]
@@ -796,7 +796,7 @@ async fn async_search() {
         .search_async(SearchQuery::new("async"), Duration::from_secs(5))
         .await
         .unwrap();
-    assert_eq!(r.hits.len(), 1);
+    assert_eq!(r.0.hits.len(), 1);
     let e = index
         .search_async(SearchQuery::new(""), Duration::from_secs(5))
         .await
@@ -819,7 +819,7 @@ async fn async_search() {
         })
         .collect();
     for h in handles {
-        assert_eq!(h.await.unwrap().unwrap().total, 1);
+        assert_eq!(h.await.unwrap().unwrap().0.total, 1);
     }
 }
 

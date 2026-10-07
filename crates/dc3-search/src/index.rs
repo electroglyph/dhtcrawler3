@@ -23,7 +23,7 @@
 //! [`SearchHandle`](crate::SearchHandle) refresh) compares the open segments
 //! with `meta.json` and reloads when they differ.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +33,7 @@ use tantivy::collector::sort_key::NaturalComparator;
 use tantivy::collector::{Count, SegmentSortKeyComputer, SortKeyComputer, TopDocs};
 use tantivy::columnar::Column;
 use tantivy::directory::MmapDirectory;
+use tantivy::index::SegmentId;
 use tantivy::query::{
     BooleanQuery, BoostQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query, TermQuery, TermSetQuery,
 };
@@ -40,7 +41,7 @@ use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions,
 };
 use tantivy::{
-    DocId, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, Score, Searcher,
+    DocId, Index, IndexReader, IndexSettings, IndexWriter, Opstamp, ReloadPolicy, Score, Searcher,
     SegmentReader, TantivyDocument, Term,
 };
 use tokio::sync::Semaphore;
@@ -157,6 +158,14 @@ pub struct SearchResults {
     pub hits: Vec<Hit>,
     pub total: u64,
 }
+
+/// Version of the index a search ran against: the open segment set plus
+/// delete opstamps, as compared by [`SearchIndex::reload_if_changed`].
+///
+/// This is the cloned segments map itself — not tantivy's whole
+/// `SearcherGeneration`, whose per-`IndexReader` monotonic `generation_id`
+/// would make two readers over identical segments compare unequal.
+pub type IndexStamp = BTreeMap<SegmentId, Option<Opstamp>>;
 
 #[derive(Serialize, Deserialize)]
 struct CommitPayload {
@@ -414,17 +423,42 @@ impl SearchIndex {
         Ok(true)
     }
 
+    /// Snapshots the index version searches currently see. Cheap: one
+    /// `reader.searcher()` Arc clone plus a memory-only clone of the
+    /// handful-entry segments map. No I/O.
+    pub fn stamp(&self) -> IndexStamp {
+        self.reader.searcher().generation().segments().clone()
+    }
+
+    /// True when `stamp` matches the index version searches currently see.
+    /// One `reader.searcher()` Arc clone and a map comparison; no clone
+    /// of the map, no I/O.
+    pub fn stamp_matches(&self, stamp: &IndexStamp) -> bool {
+        self.reader.searcher().generation().segments() == stamp
+    }
+
     /// Runs a search on the calling thread.
-    pub fn search(&self, q: &SearchQuery) -> Result<SearchResults> {
+    ///
+    /// Returns the results with the stamp of the searcher that ran the
+    /// search, captured from the same `searcher` it queries.
+    pub fn search(&self, q: &SearchQuery) -> Result<(SearchResults, IndexStamp)> {
         let parsed = parse_query(&q.text)?;
         self.search_parsed(q, &parsed)
     }
 
     /// Runs a search on the calling thread with an already-parsed query.
     /// Saves the second `parse_query` on the prefix-gate path (B-005).
-    pub fn search_parsed(&self, q: &SearchQuery, parsed: &ParsedQuery) -> Result<SearchResults> {
+    ///
+    /// Returns the results with the stamp of the searcher that ran the
+    /// search, captured from the same `searcher` it queries.
+    pub fn search_parsed(
+        &self,
+        q: &SearchQuery,
+        parsed: &ParsedQuery,
+    ) -> Result<(SearchResults, IndexStamp)> {
         let offset = q.offset()?;
         let searcher = self.reader.searcher();
+        let stamp = searcher.generation().segments().clone();
         let query = self.build_query(parsed, &searcher)?;
         let per_page = usize::try_from(q.per_page).unwrap_or(usize::MAX);
         let top = TopDocs::for_doc_range(offset..offset.saturating_add(per_page))
@@ -437,10 +471,13 @@ impl SearchIndex {
                 score: key.0,
             })
             .collect();
-        Ok(SearchResults {
-            hits,
-            total: u64::try_from(total).unwrap_or(u64::MAX),
-        })
+        Ok((
+            SearchResults {
+                hits,
+                total: u64::try_from(total).unwrap_or(u64::MAX),
+            },
+            stamp,
+        ))
     }
 
     /// Runs a search on the blocking pool, at most
@@ -451,7 +488,7 @@ impl SearchIndex {
         self: &Arc<Self>,
         q: SearchQuery,
         timeout: Duration,
-    ) -> Result<SearchResults> {
+    ) -> Result<(SearchResults, IndexStamp)> {
         let this = Arc::clone(self);
         let permits = Arc::clone(&self.permits);
         let run = async move {
@@ -479,7 +516,7 @@ impl SearchIndex {
         q: SearchQuery,
         parsed: ParsedQuery,
         timeout: Duration,
-    ) -> Result<SearchResults> {
+    ) -> Result<(SearchResults, IndexStamp)> {
         let this = Arc::clone(self);
         let permits = Arc::clone(&self.permits);
         let run = async move {
@@ -819,5 +856,99 @@ impl IndexWriterHandle {
     pub fn wait_merging_threads(self) -> Result<()> {
         self.writer.wait_merging_threads()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::{IndexDoc, SearchIndex};
+    use crate::query::SearchQuery;
+
+    const HEAP: usize = 20 * 1024 * 1024;
+
+    fn doc(id: i64, name: &str) -> IndexDoc {
+        IndexDoc {
+            id,
+            name: name.into(),
+            ..IndexDoc::default()
+        }
+    }
+
+    fn generation_id(index: &SearchIndex) -> u64 {
+        index.reader.searcher().generation().generation_id()
+    }
+
+    #[test]
+    fn stamp_is_stable_without_commits() {
+        let index = SearchIndex::create_in_ram().unwrap();
+        let first = index.stamp();
+        assert_eq!(index.stamp(), first);
+        assert!(index.stamp_matches(&first));
+        // A search neither changes the stamp nor reports a different one.
+        let (results, stamped) = index.search(&SearchQuery::new("nothingmatches")).unwrap();
+        assert!(results.hits.is_empty());
+        assert_eq!(stamped, first);
+    }
+
+    #[test]
+    fn stamp_changes_after_commit_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SearchIndex::open_or_create(dir.path()).unwrap();
+        let before = index.stamp();
+        let mut writer = index.writer(HEAP).unwrap();
+        writer.upsert(&doc(1, "fresh upload")).unwrap();
+        writer.commit(1).unwrap();
+        index.reload().unwrap();
+        let after = index.stamp();
+        assert_ne!(after, before);
+        // `stamp_matches` agrees with `stamp() != stored` on both sides.
+        assert!(!index.stamp_matches(&before));
+        assert!(index.stamp_matches(&after));
+        assert_eq!(index.stamp_matches(&before), index.stamp() == before);
+        assert_eq!(index.stamp_matches(&after), index.stamp() == after);
+        // A delete changes the stamp again through the delete opstamp.
+        writer.delete(1).unwrap();
+        writer.commit(2).unwrap();
+        index.reload().unwrap();
+        assert_ne!(index.stamp(), after);
+        assert!(!index.stamp_matches(&after));
+    }
+
+    #[test]
+    fn reload_if_changed_reports_no_change_after_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SearchIndex::open_or_create(dir.path()).unwrap();
+        let mut writer = index.writer(HEAP).unwrap();
+        writer.upsert(&doc(1, "fresh upload")).unwrap();
+        writer.commit(1).unwrap();
+        index.reload().unwrap();
+        // Nothing changed on disk since the reload: no I/O-heavy reload.
+        assert!(!index.reload_if_changed().unwrap());
+        assert!(index.stamp_matches(&index.stamp()));
+    }
+
+    #[test]
+    fn two_readers_over_identical_segments_share_a_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer_side = SearchIndex::open_or_create(dir.path()).unwrap();
+        let mut writer = writer_side.writer(HEAP).unwrap();
+        writer.upsert(&doc(1, "fresh upload")).unwrap();
+        writer.commit(1).unwrap();
+        writer_side.reload().unwrap();
+        // A second reader over the same directory: a fresh per-reader
+        // counter over the same segments.
+        let reader_side = SearchIndex::open(dir.path()).unwrap();
+        // The trap is armed: tantivy bumps `generation_id` on every reload
+        // unconditionally (reader/mod.rs `reload` always builds a new
+        // searcher), so the two readers hold different ids ...
+        assert_ne!(
+            generation_id(&writer_side),
+            generation_id(&reader_side),
+            "trap disarmed: expected distinct generation_id counters"
+        );
+        // ... yet the stamps compare equal: the id is not part of the stamp.
+        assert_eq!(writer_side.stamp(), reader_side.stamp());
+        assert!(writer_side.stamp_matches(&reader_side.stamp()));
+        assert!(reader_side.stamp_matches(&writer_side.stamp()));
     }
 }
