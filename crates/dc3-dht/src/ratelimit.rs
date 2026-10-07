@@ -80,9 +80,11 @@ impl TokenBucket {
 
     /// How long until a token is available (zero if one is available now).
     /// On overflow (only possible with absurd stored state) it returns
-    /// `Duration::MAX`, failing closed: callers wait out their budget
-    /// instead of treating the bucket as immediately available. The token
-    /// itself stays gated: `take` returns `None` on the same overflow.
+    /// `Duration::MAX`, failing closed: callers treat the bucket as
+    /// unavailable until their deadline (far in the past relative to the
+    /// saturated wake) and give up instead of treating the bucket as
+    /// immediately available. The token itself stays gated: `take` returns
+    /// `None` when the saturated schedule does not fit the bucket.
     pub(crate) fn wait_time(&self, now: Instant) -> Duration {
         let next = self.tat.max(now).checked_add(self.emission);
         match (next, now.checked_add(self.capacity)) {
