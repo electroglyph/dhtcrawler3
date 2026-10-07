@@ -624,17 +624,19 @@ impl RoutingTable {
         now: Instant,
         confirmed_only: bool,
     ) -> Vec<CompactNode> {
+        if count == 0 {
+            return Vec::new();
+        }
         let mut all: Vec<(Distance, CompactNode)> = self
             .members()
             .filter(|e| (!confirmed_only || e.confirmed()) && self.status(e, now) != Status::Bad)
             .map(|e| (e.id.distance(target), e.node()))
             .collect();
-        if count > 0 && all.len() > count {
-            all.select_nth_unstable_by_key(count.saturating_sub(1), |(d, _)| *d);
+        if all.len() > count {
+            all.select_nth_unstable_by_key(count - 1, |(d, _)| *d);
             all.truncate(count);
         }
         all.sort_unstable_by_key(|(d, _)| *d);
-        all.truncate(count);
         all.into_iter().map(|(_, n)| n).collect()
     }
 
@@ -815,6 +817,38 @@ mod tests {
             }
         }
         assert!(t.closest(&target, 0, now, true).is_empty());
+    }
+
+    #[test]
+    fn closest_matches_full_sort_at_every_count() {
+        let now = Instant::now();
+        let mut t = table(now);
+        let own = t.own_id();
+        for i in 0..40u32 {
+            let id = own.random_with_prefix((i % 20) as usize, true);
+            t.on_response(id, addr(i), true, now);
+            check(&t);
+        }
+        let target = NodeId::random();
+        // Reference: filter, full-sort, then take.
+        let mut keyed: Vec<(Distance, CompactNode)> = t
+            .members()
+            .filter(|e| e.confirmed() && t.status(e, now) != Status::Bad)
+            .map(|e| (e.id.distance(&target), e.node()))
+            .collect();
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        let total = keyed.len();
+        assert!(total > 8);
+        for count in [0, 1, 7, 8, 9, total - 1, total, total + 5] {
+            let got = t.closest(&target, count, now, true);
+            let want: Vec<NodeId> =
+                keyed.iter().take(count).map(|(_, n)| n.id).collect();
+            assert_eq!(
+                got.iter().map(|n| n.id).collect::<Vec<_>>(),
+                want,
+                "count {count}"
+            );
+        }
     }
 
     #[test]
