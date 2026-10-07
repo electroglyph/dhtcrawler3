@@ -47,5 +47,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 dc3-bencode.workspace = true
+sha1.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

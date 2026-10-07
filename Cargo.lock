@@ -826,6 +826,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rand 0.9.5",
  "serde",
+ "sha1",
  "tempfile",
  "thiserror",
  "tokio",
