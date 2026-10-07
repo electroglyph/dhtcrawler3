@@ -105,12 +105,12 @@ impl SeederStats {
 
     /// `ut_metadata` rejects received from fetchers, over all connections.
     pub fn rejects_received(&self) -> usize {
-        self.rejects_received.load(Ordering::SeqCst)
+        self.rejects_received.load(Ordering::Relaxed)
     }
 
     /// Connections whose handler has finished.
     pub fn connections_closed(&self) -> usize {
-        self.connections_closed.load(Ordering::SeqCst)
+        self.connections_closed.load(Ordering::Relaxed)
     }
 }
 
@@ -158,7 +158,7 @@ pub async fn serve_observed(
                             tracing::debug!(reason = e.label(), "seeder connection ended")
                         }
                     }
-                    stats.connections_closed.fetch_add(1, Ordering::SeqCst);
+                    stats.connections_closed.fetch_add(1, Ordering::Relaxed);
                 });
             }
             Err(e) => {
@@ -303,7 +303,7 @@ async fn handle(
         let piece = match wire::parse_metadata_message(body)? {
             MetadataMessage::Request { piece } => piece,
             MetadataMessage::Reject { .. } => {
-                stats.rejects_received.fetch_add(1, Ordering::SeqCst);
+                stats.rejects_received.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             MetadataMessage::Data { .. } | MetadataMessage::Unknown(_) => continue,
