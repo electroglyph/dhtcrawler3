@@ -243,61 +243,13 @@ pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Ar
 }
 
 /// Checks that `url` is an `http://` or `https://` origin.
+///
+/// The policy itself is shared with the binary config validator (see
+/// `dc3_core::validate_base_url`); this only prefixes the field name so the
+/// same value cannot pass here and fail there.
 pub(crate) fn validate_base_url(url: &str) -> Result<(), String> {
-    let url = url.trim_end_matches('/');
-    let Some(authority) = strip_scheme(url) else {
-        return Err(format!(
-            "web.base_url must start with http:// or https://, got {url:?}"
-        ));
-    };
-    if authority.is_empty() {
-        return Err("web.base_url has no host".into());
-    }
-    let bad =
-        |c: char| matches!(c, '/' | '?' | '#' | '@' | '\\') || c.is_whitespace() || c.is_control();
-    if authority.chars().any(bad) {
-        return Err(format!(
-            "web.base_url must be an origin such as https://search.example.org (no path), got {url:?}"
-        ));
-    }
-    if has_default_port(url, authority) {
-        return Err(format!(
-            "web.base_url must omit the default port, as browsers do (got {url:?})"
-        ));
-    }
-    Ok(())
-}
-
-fn has_default_port(url: &str, authority: &str) -> bool {
-    let default_port = if url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://") {
-        443
-    } else {
-        80
-    };
-    let port_str = if let Some(inner) = authority.strip_prefix('[') {
-        let Some((_, after)) = inner.split_once(']') else {
-            return false;
-        };
-        match after.strip_prefix(':') {
-            Some(p) => p,
-            None => return false,
-        }
-    } else {
-        match authority.rsplit_once(':') {
-            Some((_, p)) => p,
-            None => return false,
-        }
-    };
-    port_str.parse::<u16>().is_ok_and(|p| p == default_port)
-}
-
-fn strip_scheme(url: &str) -> Option<&str> {
-    ["https://", "http://"].iter().find_map(|scheme| {
-        let head = url.get(..scheme.len())?;
-        head.eq_ignore_ascii_case(scheme)
-            .then(|| url.get(scheme.len()..))
-            .flatten()
-    })
+    dc3_core::validate_base_url(url, dc3_core::MAX_BASE_URL_CHARS)
+        .map_err(|reason| format!("web.base_url {reason}"))
 }
 
 /// `s` trimmed, with control characters removed.
@@ -337,8 +289,6 @@ mod tests {
         for ok in [
             "https://search.example.org",
             "http://127.0.0.1:8080",
-            "https://search.example.org/",
-            "HTTPS://Search.Example.org",
             "http://[::1]:8080",
             "https://example.com:8443",
             "http://example.com:8080",
@@ -349,6 +299,8 @@ mod tests {
             "",
             "search.example.org",
             "ftp://example.org",
+            "https://search.example.org/",
+            "HTTPS://Search.Example.org",
             "https://",
             "https://example.org/search",
             "https://example.org?x",
@@ -360,6 +312,7 @@ mod tests {
             "https://example.com:443/",
             "https://[::1]:443",
             "http://[::1]:80",
+            "https://[::1",
         ] {
             assert!(validate_base_url(bad).is_err(), "{bad:?}");
         }

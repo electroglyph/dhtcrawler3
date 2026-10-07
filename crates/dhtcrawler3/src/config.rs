@@ -23,6 +23,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use dc3_core::validate_base_url;
 use dc3_store::PgConnectOptions;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -70,7 +71,7 @@ pub const MAX_CONTACT_EMAIL_CHARS: usize = 320;
 /// Largest `web.dmca_agent`, in characters.
 pub const MAX_DMCA_AGENT_CHARS: usize = 2000;
 /// Largest `web.base_url`, in characters.
-pub const MAX_BASE_URL_CHARS: usize = 2048;
+pub use dc3_core::MAX_BASE_URL_CHARS;
 /// Most entries in `web.trusted_proxies`.
 pub const MAX_TRUSTED_PROXIES: usize = 1024;
 /// Name of the DHT state file inside `crawl.state_dir`.
@@ -875,7 +876,7 @@ impl Config {
 
     fn validate_web(&self) -> Result<(), ConfigError> {
         let w = &self.web;
-        validate_base_url(&w.base_url)
+        validate_base_url(&w.base_url, MAX_BASE_URL_CHARS)
             .map_err(|reason| invalid(format!("web.base_url {reason}")))?;
         let name_chars = w.site_name.chars().count();
         if w.site_name.trim().is_empty()
@@ -1189,77 +1190,6 @@ fn is_host_port(s: &str) -> bool {
         }
     };
     host_ok && port.parse::<u16>().is_ok_and(|p| p != 0)
-}
-
-/// Checks that `url` is an http(s) origin: lowercase scheme and host, an
-/// optional non-default port, and nothing else.
-fn validate_base_url(url: &str) -> Result<(), String> {
-    if url.chars().count() > MAX_BASE_URL_CHARS {
-        return Err(format!("is longer than {MAX_BASE_URL_CHARS} characters"));
-    }
-    let (rest, default_port) = if let Some(rest) = url.strip_prefix("https://") {
-        (rest, 443)
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        (rest, 80)
-    } else {
-        return Err("must start with http:// or https://".into());
-    };
-    if rest.is_empty() {
-        return Err("has no host".into());
-    }
-    if rest.contains(['/', '?', '#', '@', '\\'])
-        || rest.chars().any(|c| c.is_whitespace() || c.is_control())
-    {
-        return Err(
-            "must be an origin (scheme, host and optional port) without a path or trailing slash"
-                .into(),
-        );
-    }
-    if rest.chars().any(|c| c.is_ascii_uppercase()) {
-        return Err("must be lowercase, as browsers send it in the Origin header".into());
-    }
-    let (host, port) = match rest.strip_prefix('[') {
-        Some(inner) => {
-            let (ip, after) = inner
-                .split_once(']')
-                .ok_or_else(|| "has an unterminated IPv6 literal".to_owned())?;
-            Ipv6Addr::from_str(ip).map_err(|_| "has an invalid IPv6 literal".to_owned())?;
-            let port = match after {
-                "" => None,
-                p => Some(
-                    p.strip_prefix(':')
-                        .ok_or_else(|| "has junk after the IPv6 literal".to_owned())?,
-                ),
-            };
-            (ip, port)
-        }
-        None => match rest.split_once(':') {
-            Some((host, port)) => (host, Some(port)),
-            None => (rest, None),
-        },
-    };
-    if host.is_empty() {
-        return Err("has no host".into());
-    }
-    if !rest.starts_with('[')
-        && !host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
-    {
-        return Err("has an invalid host".into());
-    }
-    if let Some(port) = port {
-        let port: u16 = port.parse().map_err(|_| "has an invalid port".to_owned())?;
-        if port == 0 {
-            return Err("has port 0".into());
-        }
-        if port == default_port {
-            return Err(format!(
-                "must omit the default port {default_port}, as browsers do"
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

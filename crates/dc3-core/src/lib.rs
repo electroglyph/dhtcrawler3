@@ -4,12 +4,15 @@
 //!   (a v1 infohash or a truncated v2 infohash; see `docs/00-horismos.md` §3).
 //! * [`InfoHashV2`]: a full 32-byte BitTorrent v2 infohash.
 //! * [`magnet_link`]: builds a magnet URI from validated hashes only.
+//! * [`validate_base_url`]: the single `web.base_url` origin policy shared by
+//!   the binary config validator and the web front end.
 //! * [`text`]: sanitising of attacker-authored text (torrent names, paths).
 #![forbid(unsafe_code)]
 
 pub mod text;
 
 use std::fmt;
+use std::net::Ipv6Addr;
 use std::str::FromStr;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -17,6 +20,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Maximum number of characters of a display name placed in a magnet link.
 pub const MAGNET_DISPLAY_NAME_MAX_CHARS: usize = 200;
+
+/// Largest `web.base_url`, in characters.
+pub const MAX_BASE_URL_CHARS: usize = 2048;
 
 /// Error returned when parsing a [`DhtKey`] or [`InfoHashV2`] from text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -269,6 +275,81 @@ pub fn magnet_link(
     Some(out)
 }
 
+/// Checks that `url` is an `http(s)` origin: lowercase scheme and host, an
+/// optional non-default port, and nothing else.
+///
+/// This is the single policy shared by the binary config validator and the
+/// web front end, so the same value cannot pass one and fail the other.
+/// Reasons are bare fragments; callers prefix them with the field name.
+pub fn validate_base_url(url: &str, max_chars: usize) -> Result<(), String> {
+    if url.chars().count() > max_chars {
+        return Err(format!("is longer than {max_chars} characters"));
+    }
+    let (rest, default_port) = if let Some(rest) = url.strip_prefix("https://") {
+        (rest, 443)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (rest, 80)
+    } else {
+        return Err("must start with http:// or https://".into());
+    };
+    if rest.is_empty() {
+        return Err("has no host".into());
+    }
+    if rest.contains(['/', '?', '#', '@', '\\'])
+        || rest.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(
+            "must be an origin (scheme, host and optional port) without a path or trailing slash"
+                .into(),
+        );
+    }
+    if rest.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err("must be lowercase, as browsers send it in the Origin header".into());
+    }
+    let (host, port) = match rest.strip_prefix('[') {
+        Some(inner) => {
+            let (ip, after) = inner
+                .split_once(']')
+                .ok_or_else(|| "has an unterminated IPv6 literal".to_owned())?;
+            Ipv6Addr::from_str(ip).map_err(|_| "has an invalid IPv6 literal".to_owned())?;
+            let port = match after {
+                "" => None,
+                p => Some(
+                    p.strip_prefix(':')
+                        .ok_or_else(|| "has junk after the IPv6 literal".to_owned())?,
+                ),
+            };
+            (ip, port)
+        }
+        None => match rest.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (rest, None),
+        },
+    };
+    if host.is_empty() {
+        return Err("has no host".into());
+    }
+    if !rest.starts_with('[')
+        && !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return Err("has an invalid host".into());
+    }
+    if let Some(port) = port {
+        let port: u16 = port.parse().map_err(|_| "has an invalid port".to_owned())?;
+        if port == 0 {
+            return Err("has port 0".to_owned());
+        }
+        if port == default_port {
+            return Err(format!(
+                "must omit the default port {default_port}, as browsers do"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +522,55 @@ mod tests {
     fn serde_json_like(k: &DhtKey) -> String {
         // Avoid a serde_json dev-dependency: Display is what Serialize uses.
         k.to_string()
+    }
+
+    #[test]
+    fn shared_base_url_policy_accepts_strict_origins_only() {
+        for ok in [
+            "https://search.example.org",
+            "http://127.0.0.1:8080",
+            "https://example.com:8443",
+            "http://example.com:8080",
+            "http://my-host.example",
+            "http://[::1]:8080",
+            "https://[2001:db8::1]:8443",
+        ] {
+            assert!(validate_base_url(ok, MAX_BASE_URL_CHARS).is_ok(), "{ok}");
+        }
+        // Each of these passed one of the two previous per-crate validators:
+        // uppercase scheme/host passed the web one, trailing slashes and
+        // unterminated IPv6 literals passed it too, while the config one
+        // already rejected all of them. The shared policy rejects them all.
+        for bad in [
+            "",
+            "search.example.org",
+            "ftp://example.org",
+            "HTTPS://search.example.org",
+            "https://Search.Example.org",
+            "HTTPS://Search.Example.org",
+            "https://",
+            "https://search.example.org/",
+            "https://example.org/search",
+            "https://example.org?x",
+            "https://user@example.org",
+            "https://exa mple.org",
+            "https://example.org\r\nX: y",
+            "https://example.com:443",
+            "http://example.com:80",
+            "https://example.com:443/",
+            "https://[::1]:443",
+            "http://[::1]:80",
+            "https://[::1",
+            "https://example.com:0",
+            "https://[::1]x",
+        ] {
+            assert!(
+                validate_base_url(bad, MAX_BASE_URL_CHARS).is_err(),
+                "{bad:?}"
+            );
+        }
+        // The length gate counts characters against the caller's budget.
+        assert!(validate_base_url("https://example.com", 5).is_err());
+        assert!(validate_base_url("https://example.com", MAX_BASE_URL_CHARS).is_ok());
     }
 }
