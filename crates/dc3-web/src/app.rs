@@ -302,11 +302,12 @@ fn strip_scheme(url: &str) -> Option<&str> {
 
 /// `s` trimmed, with control characters removed.
 fn single_line(s: &str) -> String {
-    s.chars()
-        .filter(|c| !c.is_control())
-        .collect::<String>()
-        .trim()
-        .to_owned()
+    // Trim first so the filter only scans the kept middle; the trailing
+    // truncate drops spaces a removed trailing control would expose
+    // (`"foo \u{1}"` trims to `"foo"`, not `"foo "`).
+    let mut out: String = s.trim().chars().filter(|c| !c.is_control()).collect();
+    out.truncate(out.trim_end().len());
+    out
 }
 
 /// The RFC 9116 security.txt body.
@@ -382,6 +383,12 @@ mod tests {
     #[test]
     fn config_text_is_cleaned() {
         assert_eq!(single_line("  a\r\nb\u{7}  "), "ab");
+        // A removed trailing control must not expose a kept space.
+        assert_eq!(single_line("foo \u{1}"), "foo");
+        assert_eq!(single_line("  \u{1}foo\u{2}  "), "foo");
+        assert_eq!(single_line("a b"), "a b");
+        assert_eq!(single_line("   "), "");
+        assert_eq!(single_line(""), "");
         let site = Site::new(
             WebConfig {
                 listen: "127.0.0.1:0".parse().unwrap(),
