@@ -93,6 +93,30 @@ async fn results_follow_the_index_order_and_skip_missing_hits() {
 }
 
 #[tokio::test]
+async fn heavily_filtered_page_still_links_to_next_page() {
+    // F-16: pagination follows the index count, not the page-adjusted
+    // visible count. Page 1 hides both its hits, but page 2 still has
+    // visible hits, so a next link must be offered.
+    let _serial = serial().await;
+    let app = app(many(4));
+    // Relevance puts higher ids first, so page 1 (per_page=2) holds 4, 3.
+    app.backend.hide(4);
+    app.backend.hide(3);
+    let r = send(&app.router, get("/search?q=common&per_page=2")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(result_names(&r.body).len(), 0);
+    // Visible total on this page is 4 - 2, but the next page exists.
+    assert!(r.body.contains("2 torrents match your search."));
+    assert!(r.body.contains("rel=\"next\""));
+    let r = send(&app.router, get("/search?q=common&per_page=2&p=2")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        result_names(&r.body),
+        ["common item 2", "common item 1"]
+    );
+}
+
+#[tokio::test]
 async fn no_results() {
     let _serial = serial().await;
     let app = app(many(3));
