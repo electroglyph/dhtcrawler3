@@ -1024,6 +1024,45 @@ async fn complete_moves_change_seq_only_on_content_change(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn denied_mask_reports_each_key_in_one_round_trip(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+
+    // Empty input short-circuits without touching the database.
+    assert!(s.denied_mask(&[]).await.unwrap().is_empty());
+
+    let a = key(1);
+    let live = key(50);
+    let c_v2 = v2(3);
+    s.deny(a.as_bytes(), DenyReason::Dmca, None, "admin")
+        .await
+        .unwrap();
+    s.deny(c_v2.as_bytes(), DenyReason::Other, None, "admin")
+        .await
+        .unwrap();
+
+    // Denied, live, full v2, truncated v2: the mask matches `is_denied`
+    // position by position.
+    let c_trunc = c_v2.truncated();
+    let keys = [
+        a.as_bytes() as &[u8],
+        live.as_bytes(),
+        c_v2.as_bytes(),
+        c_trunc.as_bytes(),
+    ];
+    let mask = s.denied_mask(&keys).await.unwrap();
+    assert_eq!(mask, vec![true, false, true, true]);
+    for (key, denied) in keys.iter().zip(&mask) {
+        assert_eq!(s.is_denied(&[*key]).await.unwrap(), *denied);
+    }
+    // Duplicates report per position.
+    let mask = s
+        .denied_mask(&[live.as_bytes(), a.as_bytes(), live.as_bytes()])
+        .await
+        .unwrap();
+    assert_eq!(mask, vec![false, true, false]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn deny_tombstones_by_each_key_type(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
 

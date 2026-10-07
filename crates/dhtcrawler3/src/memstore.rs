@@ -51,6 +51,8 @@ struct State {
     denied: HashMap<[u8; DENY_PREFIX_LEN], Denial>,
     next_id: i64,
     observe_calls: usize,
+    deny_calls: usize,
+    deny_mask_calls: usize,
     observed: Vec<Observation>,
     failing_observes: usize,
     failing_completes: usize,
@@ -199,6 +201,16 @@ impl MemoryStore {
     /// Number of `observe` calls, including failed ones.
     pub fn observe_calls(&self) -> usize {
         self.lock().observe_calls
+    }
+
+    /// Number of `is_denied` calls.
+    pub fn deny_calls(&self) -> usize {
+        self.lock().deny_calls
+    }
+
+    /// Number of `denied_mask` calls.
+    pub fn deny_mask_calls(&self) -> usize {
+        self.lock().deny_mask_calls
     }
 
     /// Every observation of every successful `observe` call, in order.
@@ -665,7 +677,18 @@ impl CrawlStore for MemoryStore {
     }
 
     async fn is_denied(&self, keys: &[&[u8]]) -> Result<bool> {
-        Ok(Self::is_denied(&self.lock(), keys))
+        let mut state = self.lock();
+        state.deny_calls = state.deny_calls.saturating_add(1);
+        Ok(Self::is_denied(&state, keys))
+    }
+
+    async fn denied_mask(&self, keys: &[&[u8]]) -> Result<Vec<bool>> {
+        let mut state = self.lock();
+        state.deny_mask_calls = state.deny_mask_calls.saturating_add(1);
+        Ok(keys
+            .iter()
+            .map(|k| state.denied.contains_key(&prefix(k)))
+            .collect())
     }
 
     async fn removal_cooldowns(
@@ -1057,5 +1080,31 @@ mod scrape_tests {
         assert_eq!(s.trim_removed_keys(10).await.unwrap(), 0);
         assert_eq!(s.trim_removed_keys(0).await.unwrap(), 1);
         assert_eq!(s.removed_keys_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn denied_mask_reports_each_key_in_one_pass() {
+        let s = MemoryStore::new();
+        // Empty input: empty mask, but the call still counts.
+        assert!(s.denied_mask(&[]).await.unwrap().is_empty());
+        s.preload_denial(key(1).as_bytes(), DenyReason::Other);
+        // A 32-byte v2 key is denied by its 20-byte prefix, same as
+        // `is_denied`.
+        let mut v2 = [0u8; 32];
+        v2[..20].copy_from_slice(key(2).as_bytes());
+        s.preload_denial(&v2, DenyReason::Dmca);
+        let mask = s
+            .denied_mask(&[key(1).as_bytes(), key(9).as_bytes(), &v2])
+            .await
+            .unwrap();
+        assert_eq!(mask, vec![true, false, true]);
+        // Duplicates report per position; unknown keys stay false.
+        let mask = s
+            .denied_mask(&[key(9).as_bytes(), key(1).as_bytes(), key(9).as_bytes()])
+            .await
+            .unwrap();
+        assert_eq!(mask, vec![false, true, false]);
+        assert_eq!(s.deny_mask_calls(), 3);
+        assert_eq!(s.deny_calls(), 0);
     }
 }

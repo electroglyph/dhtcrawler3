@@ -621,6 +621,28 @@ impl Store {
         Ok(denied)
     }
 
+    /// Parallel deny mask over `keys`: `out[i]` is true when `keys[i]` is
+    /// covered by the denylist (20-byte prefix match, same as
+    /// [`Store::is_denied`]). One round-trip for the whole batch; an empty
+    /// input short-circuits without touching the database.
+    pub async fn denied_mask(&self, keys: &[&[u8]]) -> Result<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefixes: Vec<Vec<u8>> = keys.iter().map(|k| prefix(k).to_vec()).collect();
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT DISTINCT substring(d.key FROM 1 FOR 20) FROM denylist d WHERE substring(d.key FROM 1 FOR 20) = ANY($1::bytea[])",
+        )
+        .bind(&prefixes)
+        .fetch_all(&self.pool)
+        .await?;
+        let hit: HashSet<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+        Ok(prefixes
+            .iter()
+            .map(|p| hit.contains(p.as_slice()))
+            .collect())
+    }
+
     /// Denies `key` (20 or 32 bytes) in one transaction: adds it to the
     /// denylist (an existing entry is kept unchanged), tombstones every torrent
     /// whose DHT key, v1 infohash or truncated v2 infohash equals the key's

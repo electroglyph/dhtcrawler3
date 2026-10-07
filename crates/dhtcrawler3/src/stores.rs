@@ -88,6 +88,8 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
     fn removed_keys_count(&self) -> impl Future<Output = Result<i64>> + Send;
     /// See [`Store::is_denied`].
     fn is_denied(&self, keys: &[&[u8]]) -> impl Future<Output = Result<bool>> + Send;
+    /// See [`Store::denied_mask`].
+    fn denied_mask(&self, keys: &[&[u8]]) -> impl Future<Output = Result<Vec<bool>>> + Send;
     /// See [`Store::removal_cooldowns`].
     fn removal_cooldowns(
         &self,
@@ -210,6 +212,10 @@ impl CrawlStore for Store {
 
     fn is_denied(&self, keys: &[&[u8]]) -> impl Future<Output = Result<bool>> + Send {
         Store::is_denied(self, keys)
+    }
+
+    fn denied_mask(&self, keys: &[&[u8]]) -> impl Future<Output = Result<Vec<bool>>> + Send {
+        Store::denied_mask(self, keys)
     }
 
     fn removal_cooldowns(
