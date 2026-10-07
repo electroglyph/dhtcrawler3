@@ -1,16 +1,16 @@
-# Changelog
+# Changelog (fork)
 
-## Unreleased — dhtcrawler3 0.1.0
+Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 
-A complete rewrite of dhtcrawler2 in Rust. See `docs/` for the reasoning.
-
-- New: a BEP 5/32/42/43/51 DHT node that discovers torrents with `sample_infohashes`.
-- New: BEP 9/10 metadata fetching from peers, with SHA-1 and SHA-256 verification.
-- New: v2 and hybrid torrent support (BEP 52).
-- New: PostgreSQL storage with a leased work queue and least-privilege roles.
-- New: an embedded Tantivy search index with dictionary-free CJK bigrams.
-- New: a web front end with auto-escaped templates, no JavaScript and a strict CSP.
-- New: a denylist, CSAM term filter and takedown CLI.
-- Removed: the visitor report form, the CSAM auto-hide and the open-report queue (takedown CLI, denylist and audit log remain).
-- Removed: the precompiled Erlang `.beam` files, the Windows DLLs and `.bat` launchers, the MongoDB and Sphinx support, and every fetch from the third-party torrent caches (`torcache.net`, `torrage.com`, `bt.box.n0808.com`). The legacy source remains in git history and on the upstream `src` branch.
-- Security review (2026-09-17): five review lenses (web, DHT network, DHT protocol, parsers, database). 20 findings were reproduced with failing tests and fixed, including: a CSAM-filter bypass through padding files and hybrid v1 file lists; slowloris; IPv6 rate-limit exhaustion; per-/64 DHT limits; announce and sample key injection; routing-table squatting; an endless re-fetch loop; and the crawler role's ability to un-hide reported torrents. Seven low-severity items are deferred (docs/03-design.md §15).
+- Removed moderation stack: visitor report form/handlers/templates/tests, CSRF, `dc3-policy` crate, `policy/blocked-terms.txt`, denylist + `blocked.html`/`legal.html`/`report*.html`, takedown/admin paths, report/denylist DB tables (migrations `000006_drop_reports`, `000007_drop_denylist`), policy fuzz target, `SECURITY.md`.
+- Added BEP 33: `bloom.rs` + estimator (BEP 33 test vector), `scrape=1` wire fields, seed flag, scrape schema (`000004_scrape`, `000005_pending_seeders`), scrape worker with dedicated budget and conditional tombstones, liveness-ordered fetch queue, seeder estimates in web/API + `sort=seeders`, removal-memory cooldown (7→30→90d, `seed=1` refreshes clock), scrape metrics, `bep33.md`/README/docs updates.
+- DHT hardening: BEP 42 raw-IP forms, all-trusted chain attributed to socket peer, bad nodes only displaced by proven nodes, BEP 42-invalid senders parked in replacements, IPv6 `/48` inbound rate limits + vote limits, per-subnet candidate caps, cross-family `values` rejected, concatenated v4 `values` accepted, IPv6 peers string no longer misdecoded as IPv4, single max-send-wait budget, fail-closed wait/overflow handling, zero-duration tuning rejected.
+- Torrent parsing: single-file v1 name sanitised as path component, padding checked raw + sanitised, `.pad` no longer misclassified, empty v2 tree rejected, v1 `pieces` must be multiple of 20, empty pieces = zero-length, UTF-8 preferred fields required, visited-text budget documented.
+- Bencode: iterative decoder hardened — scalar `max_depth` gating, length-digit overflow → `string too long`, explicit overflow errors (no silent fallback), `max_items` covers dict keys, recursive `drop`/`to_owned_value` stack-overflow fixed.
+- Peer fetch (BEP 9/10): deadline on every phase-2 read/write, timed-out pieces retried, rate-limited peers retried later in same obtain, transient store errors record failure, unsolicited rejects ignored, out-of-range requests ignored, trailing bytes / pieceless unknown messages rejected, assembly piece cap + fallible reserve, unknown `ut_metadata` shapes ignored.
+- Search: global prefix-expansion budget, per-word token cap, empty prefix → no expansions, folded-char counting for prefix gate, trailing-ignored-word flip fixed, `per_page` validated on HTML like API, pagination uses index total, filtered-page next-link covered, `change_seq` only on content change, one shared clock per results page, one shared CJK definition, seeder sublinear boost / stale-hidden ranking.
+- Store/DB: leased queue fixes (gave-up excluded, zero-cooldown-base disables, repeat-deny skips re-tombstone, tombstone rollback explicit), admission holds removal cache + fail-closed + zero-capacity rejected loudly, seed short-circuit + removal memory gate, scrape-denial recheck once per batch, least-privilege single-role DB users, abort hung roles on shutdown timeout, keep admission panic cause.
+- Web/API: param validation before block gate (query hidden), matching-Origin on POSTs, `base_url` rejects default ports + shared origin policy, invalid configs rejected by router (not served), search total counts visible matches only, `per_page` links preserved, `fetch metadata alone refuses` on metadata-only fetch, secret keys/password URLs/fragments redacted.
+- Config/ops/docs: `scrape_*` + crawl keys, listen overlap only within same family (metrics/web addrs also checked), config text trimmed of controls, URL passwords refused, Rust image digest pinned, README trimmed to BEP 33 + rewrite note, design/ops docs updated, `audit.md` added.
+- Perf (~35 commits): no per-peer heap alloc for compact peers, `copy_from_slice` token prefix, two-copy peer IDs, branchless paths, single-peek decoder loop, counted key chars once, `format!`-free magnets, precomputed export sort keys, hoisted bucket/key lookups, per-subnet counting without scans, tiny-batch linear scan, zero-copy scrape filter union, owned-dict work-stack drains, constant-folded estimator, one-pass `Variants`/affix automaton, single `ParsedQuery`, one-shot path decode, borrowed `observe_chunk` keys, narrowed B-004 lock scope, partitioned refresh targets, batched evidence indexing, skipped lease renewal when untickable.
+- Tests: `cargo fmt`, opt-in live-network tests (bootstrap/lookup/peers/fetch, policy/search, hardened diagnostics), BEP 33 vectors, audit-gap regressions, e2e DB/DHT updates for scrape + removal flows.
