@@ -33,6 +33,22 @@ pub const MAX_TERMS: usize = 1_000_000;
 /// Character that starts a comment in a term list.
 const COMMENT_CHAR: char = '#';
 
+/// True when a raw term line exceeds [`MAX_TERM_LINE_CHARS`] characters.
+///
+/// Byte-length gates avoid walking every character of a long line: a UTF-8
+/// character is at least one byte, so `len <= MAX` always fits; it is at
+/// most four bytes, so `len > 4 * MAX` never fits. Only the middle range
+/// pays for the character walk, which stops at the first excess char.
+fn line_too_long(line: &str) -> bool {
+    if line.len() <= MAX_TERM_LINE_CHARS {
+        return false;
+    }
+    if line.len() > 4 * MAX_TERM_LINE_CHARS {
+        return true;
+    }
+    line.chars().nth(MAX_TERM_LINE_CHARS).is_some()
+}
+
 /// Error returned when loading a term list.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
@@ -74,7 +90,7 @@ impl TermMatcher {
             let line_no = i.saturating_add(1);
             // Bound the raw line: measuring after comment-stripping would
             // let a megabyte of comment text past the gate.
-            if line.chars().count() > MAX_TERM_LINE_CHARS {
+            if line_too_long(line) {
                 return Err(PolicyError::LineTooLong {
                     line: line_no,
                     max: MAX_TERM_LINE_CHARS,
@@ -260,4 +276,38 @@ pub fn seed() -> TermMatcher {
 /// matcher if it cannot be parsed.
 pub fn try_seed() -> Result<TermMatcher, PolicyError> {
     TermMatcher::load(SEED_TERMS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_gate_matches_full_count_at_every_boundary() {
+        // Mirror cases with a known-good oracle: the gate must agree with
+        // a full character count everywhere, including multibyte edges.
+        let cases = [
+            String::new(),
+            "a".repeat(MAX_TERM_LINE_CHARS - 1),
+            "a".repeat(MAX_TERM_LINE_CHARS),
+            "a".repeat(MAX_TERM_LINE_CHARS + 1),
+            "a".repeat(4 * MAX_TERM_LINE_CHARS),
+            "a".repeat(4 * MAX_TERM_LINE_CHARS + 1),
+            "é".repeat(MAX_TERM_LINE_CHARS),
+            "é".repeat(MAX_TERM_LINE_CHARS + 1),
+            "😀".repeat(MAX_TERM_LINE_CHARS),
+            "😀".repeat(MAX_TERM_LINE_CHARS + 1),
+            "😀".repeat(4 * MAX_TERM_LINE_CHARS + 1),
+            format!("{}#{}", "ab", "x".repeat(1_000_000)),
+        ];
+        for line in &cases {
+            assert_eq!(
+                line_too_long(line),
+                line.chars().count() > MAX_TERM_LINE_CHARS,
+                "gate disagrees with full count for len={} chars={}",
+                line.len(),
+                line.chars().count()
+            );
+        }
+    }
 }

@@ -137,6 +137,42 @@ fn regression_f07_raw_line_length_is_bounded() {
 }
 
 #[test]
+fn line_length_gate_handles_multibyte_boundaries() {
+    // ASCII fast accept: exactly MAX chars fits.
+    assert!(TermMatcher::load(&"a".repeat(MAX_TERM_LINE_CHARS)).is_ok());
+    // ASCII just over: rejected.
+    assert!(matches!(
+        TermMatcher::load(&"a".repeat(MAX_TERM_LINE_CHARS + 1)),
+        Err(PolicyError::LineTooLong { line: 1, .. })
+    ));
+    // Way over the 4-bytes-per-char ceiling: rejected without a char walk,
+    // and the reported line number still tracks the file.
+    let huge = format!("ok\n{}", "a".repeat(4 * MAX_TERM_LINE_CHARS + 1));
+    assert_eq!(
+        TermMatcher::load(&huge).unwrap_err(),
+        PolicyError::LineTooLong { line: 2, max: MAX_TERM_LINE_CHARS }
+    );
+    // Two-byte chars: 1025 of them exceed the gate.
+    assert!(matches!(
+        TermMatcher::load(&"é".repeat(MAX_TERM_LINE_CHARS + 1)),
+        Err(PolicyError::LineTooLong { .. })
+    ));
+    // Four-byte chars: exactly MAX passes the length gate (a later token
+    // gate may still reject the line, but never with LineTooLong).
+    assert!(!matches!(
+        TermMatcher::load(&"😀".repeat(MAX_TERM_LINE_CHARS)),
+        Err(PolicyError::LineTooLong { .. })
+    ));
+    // Four-byte chars over: rejected.
+    assert!(matches!(
+        TermMatcher::load(&"😀".repeat(MAX_TERM_LINE_CHARS + 1)),
+        Err(PolicyError::LineTooLong { .. })
+    ));
+    // Empty line is fine.
+    assert!(TermMatcher::load("\n").is_ok());
+}
+
+#[test]
 fn ordinary_names_not_blocked() {
     let m = seed();
     for name in [
