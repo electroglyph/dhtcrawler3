@@ -6,7 +6,7 @@
 //! A query that has not answered within `query_slow_after` no longer holds
 //! up its round, but its reply is still used if it arrives in time.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use tokio::time::Instant;
 
-use crate::compact::{AddrPolicy, CompactNode, Family, OwnAddrs, canonical_addr};
+use crate::compact::{AddrKey, AddrPolicy, CompactNode, Family, OwnAddrs, canonical_addr};
 use crate::krpc::{Method, Response};
 use crate::node::{Inner, QueryError, SocketNode};
 use crate::node_id::{Distance, NodeId};
@@ -118,6 +118,12 @@ struct Lookup {
     own: Arc<OwnAddrs>,
     /// Sorted by distance to `target`.
     cands: Vec<Candidate>,
+    /// Live per-subnet candidate counts backing the
+    /// `MAX_CANDIDATES_PER_SUBNET` cap, so `add` does one map lookup
+    /// instead of recomputing every candidate's subnet key per call.
+    /// Entries with a zero count are removed; the counts always sum to
+    /// `cands.len()`.
+    subnet_counts: HashMap<AddrKey, u8>,
     seen_addrs: HashSet<SocketAddr>,
     seen_ids: HashSet<NodeId>,
     peers: Vec<SocketAddr>,
@@ -152,6 +158,7 @@ impl Lookup {
             own_ids: Vec::new(),
             own,
             cands: Vec::new(),
+            subnet_counts: HashMap::new(),
             seen_addrs: HashSet::new(),
             seen_ids: HashSet::new(),
             peers: Vec::new(),
@@ -179,11 +186,7 @@ impl Lookup {
             return None;
         }
         let subnet = self.policy.subnet_key(&node.addr);
-        if self
-            .cands
-            .iter()
-            .filter(|c| self.policy.subnet_key(&c.node.addr) == subnet)
-            .count()
+        if self.subnet_counts.get(&subnet).copied().unwrap_or(0) as usize
             >= MAX_CANDIDATES_PER_SUBNET
         {
             return None;
@@ -195,6 +198,10 @@ impl Lookup {
         }
         self.seen_addrs.insert(node.addr);
         self.seen_ids.insert(node.id);
+        self.subnet_counts
+            .entry(subnet)
+            .and_modify(|c| *c = c.saturating_add(1))
+            .or_insert(1);
         self.cands.insert(
             pos,
             Candidate {
@@ -210,7 +217,14 @@ impl Lookup {
                 .iter()
                 .rposition(|c| matches!(c.state, CandState::Fresh | CandState::Failed))
         {
-            self.cands.remove(i);
+            let removed = self.cands.remove(i);
+            let key = self.policy.subnet_key(&removed.node.addr);
+            if let Some(count) = self.subnet_counts.get_mut(&key) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.subnet_counts.remove(&key);
+                }
+            }
         }
         Some(dist)
     }
@@ -668,6 +682,77 @@ mod tests {
                 addr: SocketAddr::from(([9, 9, 9, 9], 1000)),
             })
             .is_some()
+        );
+    }
+
+    #[test]
+    fn subnet_counts_track_admissions_and_evictions() {
+        let target = NodeId([0; 20]);
+        let mut l = lookup(target, Kind::FindNode, OwnAddrs::default());
+        let capped_subnet = PRODUCTION.subnet_key(&SocketAddr::from(([1, 2, 3, 4], 1)));
+        // Fill one subnet to its cap with the farthest nodes, so later
+        // overflow evicts them first.
+        for i in 0..MAX_CANDIDATES_PER_SUBNET as u8 {
+            let mut id = [0xff; 20];
+            id[19] = i;
+            assert!(
+                l.add(CompactNode {
+                    id: NodeId(id),
+                    addr: SocketAddr::from(([1, 2, 3, 4], 1000 + u16::from(i))),
+                })
+                .is_some()
+            );
+        }
+        // One more from the capped subnet is rejected.
+        let mut capped = [0xff; 20];
+        capped[19] = 0xff;
+        assert!(
+            l.add(CompactNode {
+                id: NodeId(capped),
+                addr: SocketAddr::from(([1, 2, 3, 4], 2000)),
+            })
+            .is_none()
+        );
+        // Overflow with closer nodes from other subnets evicts the far
+        // capped ones, reopening that subnet.
+        for i in 0..125u32 {
+            let mut id = [0x10; 20];
+            id[16..].copy_from_slice(&i.to_be_bytes());
+            l.add(CompactNode {
+                id: NodeId(id),
+                addr: SocketAddr::from(([9, (i % 32) as u8, (i / 32) as u8, 1], 1)),
+            });
+        }
+        assert_eq!(l.cands.len(), MAX_CANDIDATES);
+        assert_eq!(l.subnet_counts.get(&capped_subnet), Some(&3));
+        let mut reopened = [0x10; 20];
+        reopened[16..].copy_from_slice(&1000u32.to_be_bytes());
+        assert!(
+            l.add(CompactNode {
+                id: NodeId(reopened),
+                addr: SocketAddr::from(([1, 2, 3, 4], 2000)),
+            })
+            .is_some()
+        );
+        // The counters always mirror the candidate list exactly.
+        let mut recount: HashMap<AddrKey, u8> = HashMap::new();
+        for c in &l.cands {
+            *recount
+                .entry(l.policy.subnet_key(&c.node.addr))
+                .or_default() += 1;
+        }
+        assert_eq!(recount, l.subnet_counts);
+        assert_eq!(
+            l.subnet_counts
+                .values()
+                .map(|c| usize::from(*c))
+                .sum::<usize>(),
+            l.cands.len()
+        );
+        assert!(
+            l.subnet_counts
+                .values()
+                .all(|c| usize::from(*c) <= MAX_CANDIDATES_PER_SUBNET)
         );
     }
 
