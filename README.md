@@ -41,59 +41,6 @@ torrent names into pages without escaping, and ran MongoDB without authenticatio
 [docs/02-legacy-audit.md](docs/02-legacy-audit.md) has the full audit, including what was
 verified about the 2026 redirect incident on btdig.com.
 
-## How this was designed
-
-The design is derived step by step, starting from definitions:
-
-1. [**00 — Horismos**](docs/00-horismos.md): every term, defined by genus and differentia, down to stated primitives.
-2. [**01 — First principles**](docs/01-first-principles.md): the system's four causes, nine axioms, and requirements R1–R20 derived from them, with a measurable meaning of "better".
-3. [**02 — Legacy audit**](docs/02-legacy-audit.md): what dhtcrawler2 actually does, its verified defects, and what happened to btdig.
-4. [**03 — Design**](docs/03-design.md): architecture, crate interfaces, schema, and every hard limit.
-5. [**04 — Operations**](docs/04-operations.md): deployment, the pre-launch checklist, administration, and metrics.
-
-## What makes it better
-
-| | dhtcrawler2 | dhtcrawler3 |
-|---|---|---|
-| Discovery | 50 static node IDs listening passively (a Sybil fleet) | One BEP 42 node per address, BEP 51 sampling, full BEP 5 responder |
-| Metadata | Plain HTTP from dead third-party caches, unverified | BEP 9 from peers, SHA-1 / SHA-256 verified before parsing |
-| Protocols | IPv4, v1 torrents | IPv4 + IPv6 (BEP 32), v1 + v2 + hybrid (BEP 52) |
-| Parsing | Recursive, unbounded | Iterative, bounded, fuzzed; memory-safe language |
-| Web | Unescaped HTML (stored and reflected XSS) | Auto-escaped templates, no JavaScript, strict CSP |
-| Search | MongoDB 2.4 text command or Sphinx | Embedded Tantivy, BM25, CJK bigrams, prefix and file-name search |
-| Data | MongoDB without auth; visitor IPs logged with queries | PostgreSQL with least-privilege roles; no peer or visitor IPs stored |
-| Reliability | Queue deleted before processing | Leased queue, backoff, idempotent writes, rebuildable index |
-| Governance | None | Denylist, CSAM term filter, takedown CLI, audit log |
-| Supply chain | Precompiled binaries, dependencies at git `HEAD` | Source-only builds, lockfile, pinned images, cargo-deny/audit |
-
-## Quick start
-
-```sh
-scripts/gen-secrets.sh
-cd deploy && docker compose up -d --build
-# then open http://127.0.0.1:8080
-```
-
-Read [docs/04-operations.md](docs/04-operations.md) **before** exposing an instance to
-the internet.
-
-## Development
-
-The workspace is under `crates/`, and each crate has one job (see
-[docs/03-design.md §2](docs/03-design.md#2-workspace)).
-
-```sh
-cargo test --workspace --locked          # needs a working native toolchain
-scripts/cargo-docker.sh test --workspace # or run inside the pinned Rust image
-```
-
-Database tests need PostgreSQL. Set `DATABASE_URL` to a superuser connection; the tests
-create their own throwaway databases.
-
-## Security
-
-Report a vulnerability through the contact address in `/.well-known/security.txt`
-(served by the site, configured via `web.contact_email`).
 
 ## License
 
