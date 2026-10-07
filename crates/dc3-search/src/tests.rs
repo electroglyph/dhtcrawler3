@@ -253,6 +253,48 @@ fn parse_limits() {
 }
 
 #[test]
+fn query_length_gate_counts_characters_not_bytes() {
+    // Over the limit in characters: the error reports characters, even when
+    // the byte length is far larger.
+    assert_eq!(
+        parse_query(&"é".repeat(MAX_QUERY_CHARS + 1)),
+        Err(QueryError::TooLong {
+            chars: MAX_QUERY_CHARS + 1,
+            max: MAX_QUERY_CHARS,
+        })
+    );
+    assert_eq!(
+        parse_query(&"a".repeat(MAX_QUERY_CHARS + 1)),
+        Err(QueryError::TooLong {
+            chars: MAX_QUERY_CHARS + 1,
+            max: MAX_QUERY_CHARS,
+        })
+    );
+    // At the limit in characters but over it in bytes: still accepted.
+    // (The over-long second word yields no token and is ignored, as in
+    // `parse_limits`.)
+    let at_limit_multi = format!("{} {}", "a".repeat(60), "é".repeat(MAX_QUERY_CHARS - 61));
+    assert_eq!(at_limit_multi.chars().count(), MAX_QUERY_CHARS);
+    assert_eq!(parse_query(&at_limit_multi).unwrap().words.len(), 1);
+    // A 4-byte character straddling the boundary is counted, not measured.
+    let mut edge = format!("{} {}🦀", "a".repeat(60), "b".repeat(MAX_QUERY_CHARS - 62));
+    assert_eq!(edge.chars().count(), MAX_QUERY_CHARS);
+    assert_eq!(parse_query(&edge).unwrap().words.len(), 1);
+    edge.push('x');
+    assert_eq!(
+        parse_query(&edge),
+        Err(QueryError::TooLong {
+            chars: MAX_QUERY_CHARS + 1,
+            max: MAX_QUERY_CHARS,
+        })
+    );
+    // The trailing-character check reads from the end: a multibyte
+    // non-breaking space closes the query, a multibyte letter leaves it open.
+    assert!(!parse_query("foo\u{a0}").unwrap().words[0].prefix);
+    assert!(parse_query("fooé").unwrap().words[0].prefix);
+}
+
+#[test]
 fn hostile_query_strings_are_plain_words() {
     let q = parse_query("name:foo OR *").unwrap();
     let all: Vec<&str> = q

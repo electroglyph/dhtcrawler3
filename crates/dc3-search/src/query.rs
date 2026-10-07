@@ -182,15 +182,20 @@ struct RawWord {
 /// Parses and validates user query text. Never matches everything: a query
 /// without a positive word is [`QueryError::NoTerms`].
 pub fn parse_query(text: &str) -> Result<ParsedQuery, QueryError> {
-    let chars = text.chars().count();
-    if chars > MAX_QUERY_CHARS {
-        return Err(QueryError::TooLong {
-            chars,
-            max: MAX_QUERY_CHARS,
-        });
+    // Characters never outnumber bytes, so only a byte string longer than
+    // the limit can be over it in characters; shorter inputs skip the walk
+    // and keep the exact count for the error.
+    if text.len() > MAX_QUERY_CHARS {
+        let chars = text.chars().count();
+        if chars > MAX_QUERY_CHARS {
+            return Err(QueryError::TooLong {
+                chars,
+                max: MAX_QUERY_CHARS,
+            });
+        }
     }
     let raw = split_words(text);
-    let ends_open = text.chars().last().is_some_and(|c| !c.is_whitespace());
+    let ends_open = text.chars().next_back().is_some_and(|c| !c.is_whitespace());
 
     let mut tokenizer = Dc3Tokenizer::new();
     let mut words = Vec::with_capacity(raw.len());
