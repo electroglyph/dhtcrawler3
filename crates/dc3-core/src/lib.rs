@@ -240,24 +240,30 @@ pub fn magnet_link(
     }
     let mut out = String::from("magnet:?");
     let mut first = true;
-    let mut push = |out: &mut String, part: &str| {
+    // Emits the `&` separator between parameters without building
+    // intermediate strings for each part.
+    let mut sep = |out: &mut String| {
         if !first {
             out.push('&');
         }
         first = false;
-        out.push_str(part);
     };
     if let Some(k) = v1 {
-        push(&mut out, &format!("xt=urn:btih:{}", k.to_hex()));
+        sep(&mut out);
+        out.push_str("xt=urn:btih:");
+        out.push_str(&k.to_hex());
     }
     if let Some(k) = v2 {
-        push(&mut out, &format!("xt=urn:btmh:1220{}", k.to_hex()));
+        sep(&mut out);
+        out.push_str("xt=urn:btmh:1220");
+        out.push_str(&k.to_hex());
     }
     if let Some(name) = display_name {
         let clean = text::sanitize_display(name, MAGNET_DISPLAY_NAME_MAX_CHARS);
         if !clean.is_empty() {
-            let encoded = utf8_percent_encode(&clean, MAGNET_DN_ESCAPE).to_string();
-            push(&mut out, &format!("dn={encoded}"));
+            sep(&mut out);
+            out.push_str("dn=");
+            out.push_str(&utf8_percent_encode(&clean, MAGNET_DN_ESCAPE).to_string());
         }
     }
     Some(out)
@@ -397,6 +403,32 @@ mod tests {
             magnet_link(Some(&v1), None, None).unwrap(),
             format!("magnet:?xt=urn:btih:{}", v1.to_hex())
         );
+    }
+
+    #[test]
+    fn magnet_each_arm_and_separators() {
+        let v1: DhtKey = "0123456789abcdef0123456789abcdef01234567".parse().unwrap();
+        let v2 = InfoHashV2([0xab; 32]);
+        // v2-only and name-only shapes.
+        assert_eq!(
+            magnet_link(None, Some(&v2), None).unwrap(),
+            format!("magnet:?xt=urn:btmh:1220{}", "ab".repeat(32))
+        );
+        assert_eq!(
+            magnet_link(None, Some(&v2), Some("plain name")).unwrap(),
+            format!(
+                "magnet:?xt=urn:btmh:1220{}&dn=plain%20name",
+                "ab".repeat(32)
+            )
+        );
+        // A display name that sanitises to nothing adds no parameter
+        // and no trailing separator.
+        assert_eq!(
+            magnet_link(Some(&v1), None, Some("\u{202E}")).unwrap(),
+            format!("magnet:?xt=urn:btih:{}", v1.to_hex())
+        );
+        // No hashes at all yields nothing, even with a name.
+        assert_eq!(magnet_link(None, None, None), None);
     }
 
     #[test]
