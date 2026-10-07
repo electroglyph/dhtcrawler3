@@ -672,8 +672,16 @@ impl RoutingTable {
             .filter(|(_, b)| now.saturating_duration_since(b.last_changed) >= interval)
             .map(|(i, b)| (b.last_changed, i))
             .collect();
+        if due.len() > max {
+            if max == 0 {
+                return Vec::new();
+            }
+            // Only the `max` oldest buckets are returned, so partition them
+            // off instead of sorting the whole tail.
+            due.select_nth_unstable(max - 1);
+            due.truncate(max);
+        }
         due.sort_unstable();
-        due.truncate(max);
         let mut out = Vec::with_capacity(due.len());
         for (_, i) in due {
             if let Some(bucket) = self.buckets.get_mut(i) {
@@ -1308,6 +1316,66 @@ mod tests {
             assert_eq!(t.bucket_index(target), i);
         }
         assert!(t.refresh_targets(t0 + QA, QA, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn refresh_targets_truncate_to_oldest_without_full_sort() {
+        // Staggered inserts spread the buckets' last-changed stamps, so a
+        // capped call must return the oldest buckets first. Ties at the
+        // cutoff are arbitrary (as with a full sort), so the test asserts
+        // the tie-insensitive contract: length, oldest-first order, and no
+        // due bucket strictly older than a returned one left behind.
+        // Stamps are restored after each call because a refresh marks what
+        // it returns.
+        let t0 = Instant::now();
+        let mut t = table(t0);
+        let own = t.own_id();
+        for i in 0..30u32 {
+            t.on_response(
+                own.random_with_prefix((i % 6) as usize, true),
+                addr(i),
+                true,
+                t0 + Duration::from_secs(u64::from(i)),
+            );
+        }
+        let now = t0 + Duration::from_secs(30) + QA;
+        let due: Vec<(Instant, usize)> = t
+            .buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| now.saturating_duration_since(b.last_changed) >= QA)
+            .map(|(i, b)| (b.last_changed, i))
+            .collect();
+        let total = due.len();
+        assert!(total > 2);
+        for max in [0, 1, 2, total - 1, total, total + 5] {
+            let saved: Vec<Instant> = t.buckets.iter().map(|b| b.last_changed).collect();
+            let targets = t.refresh_targets(now, QA, max);
+            assert_eq!(targets.len(), total.min(max), "max {max}");
+            let got: Vec<usize> = targets.iter().map(|x| t.bucket_index(x)).collect();
+            // `refresh_targets` marks what it returns as refreshed; undo
+            // that so every `max` starts from the same table.
+            for (b, s) in t.buckets.iter_mut().zip(saved.iter()) {
+                b.last_changed = *s;
+            }
+            // Oldest first, by the pre-call stamps.
+            let mut ranked: Vec<(Instant, usize)> = got
+                .iter()
+                .map(|&i| (due.iter().find(|(_, j)| *j == i).unwrap().0, i))
+                .collect();
+            ranked.sort_unstable();
+            let ordered: Vec<usize> = ranked.iter().map(|(_, i)| *i).collect();
+            assert_eq!(got, ordered, "max {max}: not oldest first");
+            // Nothing strictly older than the newest returned bucket is left.
+            if let Some((newest, _)) = ranked.last() {
+                for (stamp, i) in &due {
+                    if stamp < newest {
+                        assert!(got.contains(i), "max {max}: bucket {i} left behind");
+                    }
+                }
+            }
+        }
+        check(&t);
     }
 
     #[test]
