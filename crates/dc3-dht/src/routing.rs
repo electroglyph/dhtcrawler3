@@ -215,7 +215,7 @@ impl RoutingTable {
         self.cfg.own = own;
         for id in ours {
             let idx = self.bucket_index(&id);
-            self.remove_member(&id);
+            self.remove_member(idx, &id);
             self.fill_from_replacements(idx, now);
         }
     }
@@ -308,8 +308,14 @@ impl RoutingTable {
         // BEP 42: a sender whose address is public but whose ID is not valid
         // for it never becomes a full member; it waits in the replacements
         // cache. Otherwise one IP could claim arbitrarily close IDs.
+        //
+        // `idx` is the candidate's bucket for this loop pass; only a split
+        // changes it, so it is recomputed after `split()` instead of per
+        // iteration. `cand_subnet` likewise stays put for the whole call.
+        let policy = self.cfg.policy;
+        let mut idx = self.bucket_index(&cand.id);
+        let cand_subnet = policy.subnet_key(&cand.addr);
         if !cand.bep42 && !is_bep42_exempt(cand.addr.ip()) {
-            let idx = self.bucket_index(&cand.id);
             self.add_replacement(idx, cand);
             return false;
         }
@@ -321,7 +327,6 @@ impl RoutingTable {
         let key = self.key(&cand.addr);
         let qa = self.questionable_after;
         loop {
-            let idx = self.bucket_index(&cand.id);
             if let Some(updated) = self.update_member(idx, &cand, key, proven, now) {
                 return updated;
             }
@@ -332,7 +337,7 @@ impl RoutingTable {
                 if !(proven && other_bad) {
                     return false;
                 }
-                self.remove_member(&other);
+                self.remove_member(idx, &other);
             }
             let Some(bucket) = self.buckets.get(idx) else {
                 return false;
@@ -340,13 +345,13 @@ impl RoutingTable {
             if let Some(conflict) = bucket
                 .nodes
                 .iter()
-                .find(|n| self.same_subnet(&n.addr, &cand.addr))
+                .find(|n| policy.subnet_key(&n.addr) == cand_subnet)
             {
                 if !(proven && status_of(conflict, now, qa) == Status::Bad) {
                     return false;
                 }
                 let conflict_id = conflict.id;
-                self.remove_member(&conflict_id);
+                self.remove_member(idx, &conflict_id);
             }
             let Some(bucket) = self.buckets.get(idx) else {
                 return false;
@@ -367,12 +372,13 @@ impl RoutingTable {
                     self.add_replacement(idx, cand);
                     return false;
                 }
-                self.remove_member(&bad_id);
+                self.remove_member(idx, &bad_id);
                 self.insert_member(idx, cand, now);
                 return true;
             }
             if idx == self.last_index() && self.buckets.len() < ID_BITS {
                 self.split(now);
+                idx = self.bucket_index(&cand.id);
                 continue;
             }
             if proven && cand.bep42 {
@@ -384,7 +390,7 @@ impl RoutingTable {
                     .min_by_key(|n| (status_of(n, now, qa) == Status::Good, n.last_active()))
                     .map(|n| n.id);
                 if let Some(victim) = victim
-                    && let Some(displaced) = self.remove_member(&victim)
+                    && let Some(displaced) = self.remove_member(idx, &victim)
                 {
                     self.insert_member(idx, cand, now);
                     self.add_replacement(idx, displaced);
@@ -407,7 +413,10 @@ impl RoutingTable {
     ) -> Option<bool> {
         let qa = self.questionable_after;
         let bucket = self.buckets.get(idx)?;
-        let entry = bucket.nodes.iter().find(|n| n.id == cand.id)?;
+        // The position is reused for the mutation below; only `by_addr`
+        // changes in between, so it still addresses the same entry.
+        let pos = bucket.nodes.iter().position(|n| n.id == cand.id)?;
+        let entry = &bucket.nodes[pos];
         if entry.addr != cand.addr {
             // The ID shows up at another endpoint: follow it only on proof, and
             // only if the old endpoint is not known to be working.
@@ -426,7 +435,7 @@ impl RoutingTable {
             self.by_addr.insert(key, cand.id);
         }
         let bucket = self.buckets.get_mut(idx)?;
-        let entry = bucket.nodes.iter_mut().find(|n| n.id == cand.id)?;
+        let entry = bucket.nodes.get_mut(pos)?;
         if entry.addr != cand.addr {
             entry.addr = cand.addr;
             entry.failures = 0;
@@ -453,8 +462,7 @@ impl RoutingTable {
         bucket.last_changed = now;
     }
 
-    fn remove_member(&mut self, id: &NodeId) -> Option<NodeEntry> {
-        let idx = self.bucket_index(id);
+    fn remove_member(&mut self, idx: usize, id: &NodeId) -> Option<NodeEntry> {
         let bucket = self.buckets.get_mut(idx)?;
         let pos = bucket.nodes.iter().position(|n| n.id == *id)?;
         let entry = bucket.nodes.remove(pos);
@@ -524,9 +532,15 @@ impl RoutingTable {
         if bucket.nodes.len() >= K {
             return false;
         }
-        let mut order: Vec<usize> = (0..bucket.replacements.len()).collect();
-        order.sort_by_key(|i| std::cmp::Reverse(bucket.replacements.get(*i).map(NodeEntry::rank)));
-        let chosen = order.into_iter().find(|i| {
+        // Ranks are precomputed so sorting does not re-rank per comparison.
+        let mut order: Vec<_> = bucket
+            .replacements
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.rank(), i))
+            .collect();
+        order.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+        let chosen = order.into_iter().map(|(_, i)| i).find(|i| {
             bucket.replacements.get(*i).is_some_and(|r| {
                 self.admissible(&r.addr)
                     && (r.bep42 || is_bep42_exempt(r.addr.ip()))
@@ -601,7 +615,7 @@ impl RoutingTable {
             .get(idx)
             .is_some_and(|b| !b.replacements.is_empty());
         if has_replacement || failures >= FORGET_AFTER_FAILURES {
-            self.remove_member(&id);
+            self.remove_member(idx, &id);
             self.fill_from_replacements(idx, now);
         }
     }
@@ -1252,6 +1266,22 @@ mod tests {
         assert_eq!(t.member(&id).unwrap().addr, addr(2));
         check(&t);
         assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn moving_address_releases_old_lookup_key() {
+        let now = Instant::now();
+        let mut t = table(now);
+        let own = t.own_id();
+        let id = own.random_with_prefix(0, true);
+        t.on_response(id, addr(1), true, now);
+        let later = now + QA;
+        assert!(t.on_response(id, addr(2), true, later));
+        // The old endpoint no longer resolves and the table did not grow.
+        assert_eq!(t.by_addr.get(&t.key(&addr(1))), None);
+        assert_eq!(t.by_addr.get(&t.key(&addr(2))), Some(&id));
+        assert_eq!(t.len(), 1);
+        check(&t);
     }
 
     #[test]
