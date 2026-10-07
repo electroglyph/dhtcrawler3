@@ -132,13 +132,6 @@ impl From<DenyReasonArg> for DenyReason {
     }
 }
 
-impl Cli {
-    /// Checks combinations clap cannot express.
-    pub fn validate(&self) -> Result<(), clap::Error> {
-        Ok(())
-    }
-}
-
 /// An error and its causes on one line. A cause whose text the message so
 /// far already ends with is skipped (many errors quote their source).
 pub fn describe_error(e: &anyhow::Error) -> String {
@@ -158,7 +151,7 @@ pub fn describe_error(e: &anyhow::Error) -> String {
 
 /// The program's entry point.
 pub fn main() -> ExitCode {
-    let cli = match Cli::try_parse().and_then(|cli| cli.validate().map(|()| cli)) {
+    let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
             // Printing can only fail if stderr is closed; the code still tells.
@@ -280,7 +273,6 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("dhtcrawler3").chain(args.iter().copied()))
-            .and_then(|cli| cli.validate().map(|()| cli))
     }
 
     #[test]
