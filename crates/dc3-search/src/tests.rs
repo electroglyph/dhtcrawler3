@@ -429,6 +429,47 @@ fn prefix_expansions_lists_what_a_trailing_word_matches() {
 }
 
 #[test]
+fn prefix_expansion_returns_globally_smallest_terms() {
+    // Terms split across two commits so segments can disagree about
+    // order: the second batch holds the smaller terms. Whichever way the
+    // segments merge, the answer is the 200 smallest of all 300.
+    let index = SearchIndex::create_in_ram().unwrap();
+    let mut w = index.writer(HEAP).unwrap();
+    for i in 150..300 {
+        w.upsert(&doc(i as i64, &format!("pre{i:03}"), "")).unwrap();
+    }
+    w.commit(1).unwrap();
+    for i in 0..150 {
+        w.upsert(&doc(i as i64, &format!("pre{i:03}"), "")).unwrap();
+    }
+    w.commit(1).unwrap();
+    let expected: Vec<String> = (0..200).map(|i| format!("pre{i:03}")).collect();
+    assert_eq!(index.prefix_expansions("pre").unwrap(), expected);
+    // The search path sees the same budget: only the 200 smallest terms
+    // match, so only their 200 documents hit.
+    assert_eq!(run(&index, SearchQuery::new("pre")).total, 200);
+}
+
+#[test]
+fn prefix_expansions_union_covers_both_fields_whole() {
+    // 250 name terms and 250 file terms under one prefix: each field
+    // contributes a full per-field budget, so the policy gate sees all
+    // 400 terms either field query could match.
+    let docs: Vec<IndexDoc> = (0..250)
+        .map(|i| doc(i as i64, &format!("zz{i:03}"), &format!("zzf{i:03}/x")))
+        .collect();
+    let index = index_with(&docs);
+    let got = index.prefix_expansions("zz").unwrap();
+    assert_eq!(got.len(), 2 * PREFIX_MAX_EXPANSIONS);
+    assert!(got.iter().all(|t| t.starts_with("zz")));
+    assert!(got.windows(2).all(|w| w[0] < w[1]));
+    for i in 0..200 {
+        assert!(got.contains(&format!("zz{i:03}")));
+        assert!(got.contains(&format!("zzf{i:03}")));
+    }
+}
+
+#[test]
 fn exclusion() {
     let index = index_with(&[
         doc(1, "linux iso", ""),

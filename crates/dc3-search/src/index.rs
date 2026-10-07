@@ -556,7 +556,11 @@ impl SearchIndex {
         for field in [self.fields.name, self.fields.files] {
             found.extend(expand_prefix(&searcher, field, prefix)?);
         }
-        Ok(found.into_iter().collect())
+        // The union budget is two per-field budgets: each field query can
+        // match a full [`PREFIX_MAX_EXPANSIONS`] terms, so the policy gate
+        // must see both fields whole. Truncating the union to one budget
+        // could hide a blocked term the query still matches.
+        Ok(found.into_iter().take(2 * PREFIX_MAX_EXPANSIONS).collect())
     }
 
     fn field_query(
@@ -636,7 +640,8 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Up to [`PREFIX_MAX_EXPANSIONS`] indexed terms of `field` that start with
-/// `prefix`, in lexicographic order across all segments.
+/// `prefix`: the globally smallest terms across all segments, in
+/// lexicographic order.
 fn expand_prefix(searcher: &Searcher, field: Field, prefix: &str) -> Result<Vec<String>> {
     let upper = prefix_upper_bound(prefix.as_bytes());
     let mut found: BTreeSet<String> = BTreeSet::new();
@@ -647,11 +652,21 @@ fn expand_prefix(searcher: &Searcher, field: Field, prefix: &str) -> Result<Vec<
             range = range.lt(upper);
         }
         let mut stream = range.into_stream()?;
-        let mut taken = 0usize;
-        while taken < PREFIX_MAX_EXPANSIONS && stream.advance() {
+        while stream.advance() {
+            // Segment streams are lexicographically ordered: once the set
+            // holds a full budget and the cursor has passed its largest
+            // term, nothing later in this segment can displace anything,
+            // so stop scanning it. The budget is global, not per segment:
+            // later segments may still hold smaller terms.
+            if found.len() >= PREFIX_MAX_EXPANSIONS
+                && found
+                    .last()
+                    .is_some_and(|max| stream.key() > max.as_bytes())
+            {
+                break;
+            }
             if let Ok(term) = std::str::from_utf8(stream.key()) {
                 found.insert(term.to_owned());
-                taken = taken.saturating_add(1);
             }
         }
     }
