@@ -442,6 +442,44 @@ fn cleanup_keeps_live_recent_excepted_and_locked_generations() {
 }
 
 #[test]
+fn cleanup_survives_concurrent_generation_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = IndexRoot::open(dir.path()).unwrap();
+    // A crowd of stale generations widens the sweep loop so a concurrent
+    // deleter reliably lands inside it.
+    for _ in 0..30 {
+        let _ = root.create_next().unwrap();
+    }
+    let hour = Duration::from_secs(3600);
+    assert!(root.cleanup(&[], hour).unwrap().is_empty());
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let remover = {
+        let probe = root.clone();
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                for generation in 2..=31 {
+                    let path = probe.generation_dir(generation);
+                    let _ = fs::remove_dir_all(&path);
+                    let _ = fs::create_dir(&path);
+                }
+            }
+        })
+    };
+    // Every sweep must succeed: a generation that vanishes mid-sweep is
+    // skipped, never an error. Nothing is old enough to remove.
+    for _ in 0..100 {
+        assert!(root.cleanup(&[], hour).unwrap().is_empty());
+    }
+    stop.store(true, Ordering::Relaxed);
+    remover.join().unwrap();
+    // The live generation and its pointer survived the whole thing.
+    assert_eq!(root.current().unwrap().0, 1);
+    assert!(root.generation_dir(1).is_dir());
+}
+
+#[test]
 fn promote_restarts_the_age_of_the_retired_generation() {
     let dir = tempfile::tempdir().unwrap();
     let root = IndexRoot::open(dir.path()).unwrap();

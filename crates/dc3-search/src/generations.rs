@@ -265,6 +265,7 @@ impl IndexRoot {
     /// at least `older_than` old (by mtime), and not held by a writer.
     /// Returns the removed generations. An unreadable `CURRENT`, or one that
     /// names a missing generation, is an error and nothing is removed.
+    /// A generation deleted concurrently mid-sweep is skipped instead.
     pub fn cleanup(&self, except: &[u64], older_than: Duration) -> Result<Vec<u64>> {
         let mut doomed: Vec<(u64, PathBuf)> = Vec::new();
         {
@@ -279,7 +280,16 @@ impl IndexRoot {
                     continue;
                 }
                 let dir = self.generation_dir(generation);
-                let modified = fs::symlink_metadata(&dir)?.modified()?;
+                // A concurrent deleter may remove the directory after it
+                // was listed: skip it instead of aborting the sweep.
+                let metadata = match fs::symlink_metadata(&dir) {
+                    Err(e) if is_not_found(&e) => continue,
+                    metadata => metadata?,
+                };
+                let modified = match metadata.modified() {
+                    Err(e) if is_not_found(&e) => continue,
+                    modified => modified?,
+                };
                 let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
                 if age < older_than {
                     continue;
@@ -385,7 +395,12 @@ impl IndexRoot {
     fn scan(&self) -> Result<Vec<(u64, bool)>> {
         let mut found = Vec::new();
         for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
+            // Entries deleted concurrently are simply gone: skip them
+            // instead of aborting the caller.
+            let entry = match entry {
+                Err(e) if is_not_found(&e) => continue,
+                entry => entry?,
+            };
             let Some(generation) = entry
                 .file_name()
                 .to_str()
@@ -393,7 +408,12 @@ impl IndexRoot {
             else {
                 continue;
             };
-            found.push((generation, entry.file_type()?.is_dir()));
+            let is_dir = match entry.file_type() {
+                Err(e) if is_not_found(&e) => continue,
+                file_type => file_type?,
+            }
+            .is_dir();
+            found.push((generation, is_dir));
         }
         found.sort_unstable();
         Ok(found)
