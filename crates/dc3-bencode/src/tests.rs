@@ -205,6 +205,8 @@ fn item_limit() {
 fn regression_f01_to_owned_value_is_iterative() {
     // F-01: to_owned_value on a deep value must not overflow the stack.
     // Build depth-5000 iteratively via decode, convert on a small stack.
+    // The source is torn down with drop_deep so the test measures only the
+    // fixed conversion, not the (still recursive) plain Drop.
     let depth = 5000;
     let mut raw = vec![b'l'; depth];
     raw.extend(std::iter::repeat_n(b'e', depth));
@@ -217,7 +219,11 @@ fn regression_f01_to_owned_value_is_iterative() {
     let v = decode(raw, &limits).unwrap();
     let owned = std::thread::Builder::new()
         .stack_size(512 * 1024)
-        .spawn(move || v.to_owned_value())
+        .spawn(move || {
+            let owned = v.to_owned_value();
+            Value::drop_deep(v);
+            owned
+        })
         .unwrap()
         .join()
         .unwrap();
