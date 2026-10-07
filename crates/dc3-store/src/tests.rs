@@ -961,6 +961,69 @@ async fn complete_is_idempotent_and_carries_seen_count(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn complete_moves_change_seq_only_on_content_change(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(9);
+    let t = torrent(k, "Stable");
+    let id = s.complete(&k, &t).await.unwrap();
+    let seq_insert = change_seq_of(&pool, id).await;
+    assert!(seq_insert > 0);
+
+    // A byte-identical duplicate is liveness only: no sequence churn,
+    // even when it carries fresh pending sightings.
+    sqlx::query("INSERT INTO pending (dht_key, seen_count) VALUES ($1, 5)")
+        .bind(k.0.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(s.complete(&k, &t).await.unwrap(), id);
+    let r = raw_torrent(&pool, id).await;
+    assert_eq!(r.seen_count, 6);
+    assert_eq!(r.change_seq, seq_insert);
+
+    // Still identical: still no bump.
+    assert_eq!(s.complete(&k, &t).await.unwrap(), id);
+    assert_eq!(change_seq_of(&pool, id).await, seq_insert);
+
+    // A new name is a content change: exactly one bump...
+    let renamed = NewTorrent {
+        name: "Stable v2".into(),
+        ..t.clone()
+    };
+    assert_eq!(s.complete(&k, &renamed).await.unwrap(), id);
+    let seq_renamed = change_seq_of(&pool, id).await;
+    assert_eq!(seq_renamed, seq_insert + 1);
+
+    // ...and the new content is itself a stable fixed point.
+    assert_eq!(s.complete(&k, &renamed).await.unwrap(), id);
+    assert_eq!(change_seq_of(&pool, id).await, seq_renamed);
+
+    // Nullable content columns participate: NULL piece_length differs
+    // from 16384 under IS DISTINCT FROM.
+    let no_pl = NewTorrent {
+        piece_length: None,
+        ..renamed.clone()
+    };
+    assert_eq!(s.complete(&k, &no_pl).await.unwrap(), id);
+    let seq_no_pl = change_seq_of(&pool, id).await;
+    assert_eq!(seq_no_pl, seq_renamed + 1);
+    assert_eq!(raw_torrent(&pool, id).await.piece_length, None);
+
+    // A changed file list bumps too.
+    let fatter = NewTorrent {
+        files: vec![FileRow {
+            path: "a/one.txt".into(),
+            size: 9999,
+        }],
+        total_size: 9999,
+        file_count: 1,
+        ..no_pl.clone()
+    };
+    assert_eq!(s.complete(&k, &fatter).await.unwrap(), id);
+    assert_eq!(change_seq_of(&pool, id).await, seq_no_pl + 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn deny_tombstones_by_each_key_type(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
 

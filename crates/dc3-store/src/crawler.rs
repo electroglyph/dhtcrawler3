@@ -123,7 +123,16 @@ UPDATE torrents
        seen_count = seen_count + $12,
        last_seen_at = now(),
        deleted_at = NULL,
-       change_seq = nextval('change_seq')
+       -- A duplicate completion (same content columns) is liveness only:
+       -- keep change_seq so the indexer is not churned. All expressions
+       -- below read the pre-update row, so this compares old vs new content.
+       change_seq = CASE WHEN (info_hash_v1, info_hash_v2, name, total_size,
+                               file_count, files, files_truncated, piece_length)
+                              IS DISTINCT FROM
+                              (CASE WHEN $2 THEN info_hash_v1 ELSE $3 END,
+                               CASE WHEN $4 THEN info_hash_v2 ELSE $5 END,
+                               $6, $7, $8, $9, $10, $11)
+                         THEN nextval('change_seq') ELSE change_seq END
  WHERE id = $1";
 
 const TORRENT_INSERT_SQL: &str = "\
