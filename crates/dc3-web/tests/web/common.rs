@@ -13,7 +13,6 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
 use dc3_core::{AnyKey, DhtKey, InfoHashV2};
-use dc3_policy::TermMatcher;
 use dc3_search::{IndexDoc, IndexRoot, SearchHandle};
 use dc3_store::{FileRow, PublicStats, TorrentRecord};
 use dc3_web::{Backend, BackendError, WebConfig, WebDeps, router};
@@ -27,8 +26,6 @@ use tower::ServiceExt;
 pub const BASE_URL: &str = "https://search.example.org";
 pub const SITE_NAME: &str = "Test <Search> & Co";
 pub const CLIENT: &str = "198.51.100.23:50000";
-/// A synthetic blocked term (and a phrase) for the tests.
-pub const BLOCKED_TERMS: &str = "zzforbiddenzz\nbad phrase\n";
 pub const CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; \
 form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 const WRITER_HEAP: usize = 20 * 1024 * 1024;
@@ -168,7 +165,7 @@ impl FakeBackend {
         self.0.get_by_key_calls.load(Ordering::SeqCst)
     }
 
-    /// Hides the torrent with this id, as a denial would.
+    /// Hides the torrent with this id, as if its row had been deleted.
     pub fn hide(&self, id: i64) {
         for t in self.0.torrents.lock().unwrap().iter_mut() {
             if t.id == id {
@@ -324,16 +321,10 @@ pub fn config() -> WebConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         base_url: BASE_URL.into(),
         site_name: SITE_NAME.into(),
-        contact_email: "abuse@example.org".into(),
-        dmca_agent: "Example DMCA Agent\n1 Example Street".into(),
         hsts: true,
         trusted_proxies: Vec::new(),
         seeder_freshness: Duration::from_secs(7 * 24 * 60 * 60),
     }
-}
-
-pub fn policy() -> Arc<TermMatcher> {
-    Arc::new(TermMatcher::load(BLOCKED_TERMS).unwrap())
 }
 
 pub struct TestApp {
@@ -356,7 +347,6 @@ pub fn app_with(torrents: Vec<TorrentRecord>, cfg: WebConfig) -> TestApp {
         WebDeps {
             backend: backend.clone(),
             search: index.search.clone(),
-            policy: policy(),
         },
     );
     TestApp {

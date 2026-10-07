@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dc3_policy::TermMatcher;
 use dc3_search::{SearchError, SearchHandle};
 use dc3_store::Store;
 use dc3_web::{WebConfig, WebDeps};
@@ -38,8 +37,6 @@ pub fn web_config(cfg: &Config) -> Result<WebConfig, ConfigError> {
         listen: w.listen,
         base_url: w.base_url.clone(),
         site_name: w.site_name.clone(),
-        contact_email: w.contact_email.clone(),
-        dmca_agent: w.dmca_agent.clone(),
         hsts: w.hsts,
         trusted_proxies: cfg.trusted_proxies()?,
         seeder_freshness: Duration::from_secs(cfg.crawl.scrape_interval_secs),
@@ -62,7 +59,6 @@ pub async fn run(
     cfg: WebConfig,
     store: Store,
     search: SearchHandle,
-    policy: Arc<TermMatcher>,
     ready: Arc<AtomicBool>,
     cancel: CancellationToken,
 ) -> Result<(), WebRoleError> {
@@ -75,7 +71,6 @@ pub async fn run(
     let deps = WebDeps {
         backend: store,
         search,
-        policy,
     };
     let result = dc3_web::serve(cfg, deps, cancel.cancelled_owned()).await;
     stop.cancel();
@@ -111,13 +106,10 @@ mod tests {
         let mut cfg = Config::default();
         cfg.web.trusted_proxies = vec!["172.30.80.0/24".into()];
         cfg.web.hsts = true;
-        cfg.web.dmca_agent = "Agent\nStreet 1".into();
         let w = web_config(&cfg).unwrap();
         assert_eq!(w.listen, cfg.web.listen);
         assert_eq!(w.base_url, "http://127.0.0.1:8080");
         assert_eq!(w.site_name, "dhtcrawler3");
-        assert_eq!(w.contact_email, "");
-        assert_eq!(w.dmca_agent, "Agent\nStreet 1");
         assert!(w.hsts);
         assert_eq!(
             w.trusted_proxies,

@@ -14,13 +14,11 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use dc3_bencode::OwnedValue;
 use dc3_core::DhtKey;
 use dc3_dht::{Dht, DhtConfig, DhtTuning, Discovered};
-use dc3_policy::TermMatcher;
 use dhtcrawler3::admission::AdmissionTuning;
 use dhtcrawler3::crawl::CrawlOptions;
 use dhtcrawler3::fetch::{DestLimits, FetchLimitsConfig, FetchTuning};
@@ -276,11 +274,6 @@ pub fn crawl_options(bootstrap: SocketAddr) -> CrawlOptions {
     opts.min_good_nodes = 4;
     opts.shutdown_wait = Duration::from_secs(5);
     opts
-}
-
-/// The seed blocked-term list.
-pub fn seed_policy() -> Arc<TermMatcher> {
-    Arc::new(dhtcrawler3::policy::load(std::path::Path::new("")).unwrap())
 }
 
 /// A parsed HTTP response.

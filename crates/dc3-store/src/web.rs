@@ -1,5 +1,5 @@
 //! Web operations: lookups and public statistics. Every method here
-//! works for the `dc3_web` user, which can read `torrents`, `denylist` and
+//! works for the `dc3_web` user, which can read `torrents` and
 //! `stats_daily`, and nothing else.
 
 use dc3_core::AnyKey;
@@ -148,7 +148,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT day, discovered, fetched, fetch_failed, blocked FROM stats_daily \
+            "SELECT day, discovered, fetched, fetch_failed FROM stats_daily \
              WHERE day > (now() AT TIME ZONE 'UTC')::date - $1 ORDER BY day",
         )
         .bind(days)

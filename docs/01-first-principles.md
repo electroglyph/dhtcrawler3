@@ -60,12 +60,11 @@ third-party web service at runtime. The only outside dependencies are the DHT it
 (including several independent bootstrap nodes, used only while the routing table is
 under-filled) and DNS to resolve them.
 
-Two capabilities are not part of the final cause but are required by other axioms:
+One capability is not part of the final cause but is required by other axioms:
 
 | # | Capability | Required by |
 |---|---|---|
-| F8 | **Govern**: refuse denied keys and terms, process takedowns | A7 |
-| F9 | **Observe**: expose metrics and health | A8, A9 |
+| F8 | **Observe**: expose metrics and health | A8, A9 |
 
 ## 4. Derived requirements
 
@@ -90,7 +89,6 @@ Two capabilities are not part of the final cause but are required by other axiom
 | **R15** | **Durable, resumable processing.** Use a database queue with leases and exponential backoff, idempotent upserts keyed by infohash, and a search index checkpoint committed atomically with the index. | A8 | Delete-before-process queue; lost hashes; Sphinx checkpoint not aligned with flushes. |
 | **R16** | **The index is a derived projection** of PostgreSQL. It can always be deleted and rebuilt. | A8, A5 | Sphinx doc IDs were a separate counter, so the index could not be reliably rebuilt. |
 | **R17** | **Multilingual search**: CJK without dictionaries (bigrams), file-name search, prefix matching, BM25 ranking, bounded queries (length, terms, page depth, time). | A1, A6 | Mongo `text` command (removed in later MongoDB versions), or an "all substrings" split that grows as the cube of name length. |
-| **R18** | **Governance.** Enforce a denylist of keys at ingest, at indexing and at query time. Filter CSAM terms at ingest (name and every path), at indexing, and at query time, matching whole tokens after NFKC, case folding and confusable folding. Do not index private torrents. Provide a takedown CLI, and keep an audit trail. | A7 | None. |
 | **R19** | **Observability.** Expose Prometheus metrics per pipeline stage, liveness and readiness endpoints for every role, and structured logs without personal data. | A8, A9 | Text stats files, with rates in the wrong units. |
 | **R20** | **Operable.** One self-contained binary (dynamically linked only against glibc) with subcommands, one config file with environment overrides, `docker compose up`, automatic migrations, and documented limits. | A1, A8 | Windows `.bat` launchers and hand-edited Erlang term files. |
 
@@ -128,7 +126,6 @@ defined in [04-operations §6](04-operations.md#6-metrics).
 | Pages cannot carry XSS: output is auto-escaped, there is no JavaScript, and a strict CSP backs this up. | `dc3-web` hostile-name rendering tests; header tests. |
 | No peer IP is ever written to disk. The only persisted IP addresses are at most 300 DHT routing contacts, which carry no timestamps and no link to any key; BEP 5 asks nodes to keep them. No visitor IP is stored with a query, either by the application or by the shipped reverse-proxy configuration. | Schema review; `deploy/Caddyfile`; log-format tests. |
 | The node is a compliant DHT citizen: one BEP 42 identity per address, real tokens, rate limits, and respect for `interval`. | `dc3-dht` tests; `dc3_dht_sampler_early_total` stays 0. |
-| Denied keys are refused at three points (ingest, indexing, query). CSAM terms are refused at ingest (name and every path), at indexing, and at query time. Extending the term list and running `policy rescan` removes existing matches. | `dc3-store`, `dc3-policy` and end-to-end tests. |
 | Pages load no third-party code, so a compromised CDN or ad network cannot inject into them. | CSP header test (`default-src 'none'`). |
 | Nothing in the repository is a binary that users must trust without being able to check it. Releases carry build attestations. | Repository contents; `gh attestation verify` (04 §7). |
 

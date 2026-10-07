@@ -1,6 +1,6 @@
 //! End to end without a database or the internet (design §13): a private
 //! DHT of 16 nodes on 127.0.0.1, test seeders, and the crawler's
-//! discovery → admission → fetch → verify → parse → policy path writing to
+//! discovery → admission → fetch → verify → parse path writing to
 //! an in-memory store.
 // Helpers outside #[test] functions are not covered by clippy.toml.
 #![allow(
@@ -17,13 +17,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common::{
-    NETWORK_NODES, Network, Seeder, announce, crawl_options, info_dict, note, seed_policy,
-    wait_for_tables, wait_until,
+    NETWORK_NODES, Network, Seeder, announce, crawl_options, info_dict, note, wait_for_tables,
+    wait_until,
 };
 use dc3_dht::Dht;
-use dc3_store::DenyReason;
 use dhtcrawler3::crawl::Crawler;
-use dhtcrawler3::fetch::{BLOCKED_TERM_NOTE, DENY_ACTOR};
 use dhtcrawler3::memstore::MemoryStore;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +32,7 @@ const TEST_LIMIT: Duration = Duration::from_secs(90);
 const CRAWL_LIMIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn crawler_discovers_fetches_and_filters() {
+async fn crawler_discovers_and_fetches() {
     tokio::time::timeout(TEST_LIMIT, scenario())
         .await
         .expect("the end-to-end test timed out");
@@ -56,19 +54,19 @@ async fn scenario() {
         ],
     ))
     .await;
-    let blocked_name = Seeder::start(info_dict(
-        "e2e PTHC collection",
+    let second = Seeder::start(info_dict(
+        "e2e second collection",
         &[("a.txt", 10), ("b.txt", 20)],
     ))
     .await;
-    let blocked_path = Seeder::start(info_dict(
+    let third = Seeder::start(info_dict(
         "e2e holiday photos",
-        &[("day1/beach.jpg", 10), ("day2/hussyfan/x.jpg", 20)],
+        &[("day1/beach.jpg", 10), ("day2/sunset/x.jpg", 20)],
     ))
     .await;
     // Announced before the crawler joins, so the crawler can only learn the
     // keys through BEP 51 samples.
-    for seeder in [&clean, &blocked_name, &blocked_path] {
+    for seeder in [&clean, &second, &third] {
         announce(nodes[1], nodes[2], seeder).await;
     }
     note(started, "torrents announced");
@@ -79,7 +77,6 @@ async fn scenario() {
     let crawler = Crawler::start(
         crawl_options(network.seed()),
         store.clone(),
-        seed_policy(),
         Arc::clone(&ready),
         cancel.clone(),
     )
@@ -87,19 +84,11 @@ async fn scenario() {
     .unwrap();
     let joined = Instant::now();
 
-    wait_until(
-        "the crawler to store and deny the torrents",
-        CRAWL_LIMIT,
-        || {
-            let store = store.clone();
-            let keys = [clean.key, blocked_name.key, blocked_path.key];
-            async move {
-                store.torrent(&keys[0]).is_some()
-                    && store.denial(keys[1].as_bytes()).is_some()
-                    && store.denial(keys[2].as_bytes()).is_some()
-            }
-        },
-    )
+    wait_until("the crawler to store the torrents", CRAWL_LIMIT, || {
+        let store = store.clone();
+        let keys = [clean.key, second.key, third.key];
+        async move { keys.iter().all(|key| store.torrent(key).is_some()) }
+    })
     .await;
     note(
         started,
@@ -122,23 +111,21 @@ async fn scenario() {
     assert!(!stored.files_truncated);
     assert_eq!(stored.piece_length, Some(262_144));
 
-    // Blocked terms in the name or in any path deny the key as csam-auto.
-    for (seeder, what) in [(&blocked_name, "name"), (&blocked_path, "path")] {
-        let denial = store.denial(seeder.key.as_bytes()).unwrap();
-        assert_eq!(denial.reason, DenyReason::CsamAuto, "blocked {what}");
-        assert_eq!(denial.actor, DENY_ACTOR);
-        assert_eq!(denial.note.as_deref(), Some(BLOCKED_TERM_NOTE));
+    // Every announced torrent was fetched from its seeder, verified and
+    // parsed.
+    for seeder in [&clean, &second, &third] {
         assert!(
-            store.torrent(&seeder.key).is_none(),
-            "blocked {what} stored"
+            store.torrent(&seeder.key).is_some(),
+            "missing torrent for {}",
+            seeder.key.to_hex()
         );
     }
-    assert_eq!(store.torrent_count(), 1);
+    assert_eq!(store.torrent_count(), 3);
     assert!(store.pending_keys().is_empty());
 
     // The keys reached the queue as priority keys, found by BEP 51.
     let observed = store.observed();
-    for key in [clean.key, blocked_name.key, blocked_path.key] {
+    for key in [clean.key, second.key, third.key] {
         assert!(
             observed.iter().any(|o| o.key == key && o.priority),
             "{key} was not observed as a priority key"

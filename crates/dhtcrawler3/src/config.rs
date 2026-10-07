@@ -66,10 +66,6 @@ pub const MAX_INDEX_BATCH: i64 = dc3_store::MAX_FEED_PAGE;
 pub const MAX_POLL_INTERVAL_MS: u64 = 3_600_000;
 /// Largest `web.site_name`, in characters.
 pub const MAX_SITE_NAME_CHARS: usize = 200;
-/// Largest `web.contact_email`, in characters.
-pub const MAX_CONTACT_EMAIL_CHARS: usize = 320;
-/// Largest `web.dmca_agent`, in characters.
-pub const MAX_DMCA_AGENT_CHARS: usize = 2000;
 /// Largest `web.base_url`, in characters.
 pub use dc3_core::MAX_BASE_URL_CHARS;
 /// Most entries in `web.trusted_proxies`.
@@ -111,7 +107,6 @@ pub struct Config {
     pub index: IndexConfig,
     pub web: WebSettings,
     pub metrics: MetricsConfig,
-    pub policy: PolicyConfig,
     pub log: LogConfig,
 }
 
@@ -290,8 +285,6 @@ pub struct WebSettings {
     /// Public origin, without a trailing slash.
     pub base_url: String,
     pub site_name: String,
-    pub contact_email: String,
-    pub dmca_agent: String,
     pub hsts: bool,
     /// CIDR networks (or single addresses) whose `X-Forwarded-For` is trusted.
     pub trusted_proxies: Vec<String>,
@@ -303,8 +296,6 @@ impl Default for WebSettings {
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)),
             base_url: "http://127.0.0.1:8080".into(),
             site_name: "dhtcrawler3".into(),
-            contact_email: String::new(),
-            dmca_agent: String::new(),
             hsts: false,
             trusted_proxies: Vec::new(),
         }
@@ -324,14 +315,6 @@ impl Default for MetricsConfig {
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 9100)),
         }
     }
-}
-
-/// `[policy]`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct PolicyConfig {
-    /// Extra blocked terms appended to the seed list; empty means none.
-    pub terms_file: PathBuf,
 }
 
 /// `[log]`.
@@ -887,23 +870,6 @@ impl Config {
                 "web.site_name must be 1 to {MAX_SITE_NAME_CHARS} printable characters"
             )));
         }
-        if w.contact_email.chars().count() > MAX_CONTACT_EMAIL_CHARS
-            || w.contact_email.chars().any(char::is_whitespace)
-            || has_control(&w.contact_email)
-        {
-            return Err(invalid(format!(
-                "web.contact_email must be at most {MAX_CONTACT_EMAIL_CHARS} characters without spaces"
-            )));
-        }
-        if w.dmca_agent.chars().count() > MAX_DMCA_AGENT_CHARS
-            || w.dmca_agent
-                .chars()
-                .any(|c| c.is_control() && c != '\n' && c != '\t')
-        {
-            return Err(invalid(format!(
-                "web.dmca_agent must be at most {MAX_DMCA_AGENT_CHARS} printable characters"
-            )));
-        }
         if w.trusted_proxies.len() > MAX_TRUSTED_PROXIES {
             return Err(invalid(format!(
                 "web.trusted_proxies has more than {MAX_TRUSTED_PROXIES} entries"
@@ -926,13 +892,6 @@ impl Config {
         }
         if w.hsts && w.base_url.starts_with("http://") {
             out.push("web.hsts is true but web.base_url is not an https:// origin".to_owned());
-        }
-        if w.contact_email.is_empty() {
-            out.push(
-                "web.contact_email is empty: set it before going public (shown on /legal \
-                 and /.well-known/security.txt)"
-                    .to_owned(),
-            );
         }
         if !w.listen.ip().is_loopback() && w.trusted_proxies.is_empty() {
             out.push(
@@ -1319,7 +1278,6 @@ mod tests {
             ("DC3_CRAWL__BIND_V6", ""),
             ("DC3_DATABASE__CRAWLER__USER", "crawler2"),
             ("DC3_DATABASE__URL", "postgres://h:5433/other"),
-            ("DC3_POLICY__TERMS_FILE", "/etc/terms.txt"),
             // Ignored: no double underscore.
             ("DC3_TARGET", "x"),
             ("DC3_TEST_DATABASE_URL", "x"),
@@ -1346,7 +1304,6 @@ mod tests {
         assert_eq!(c.credentials(DbRole::Crawler).0, "crawler2");
         assert_eq!(c.credentials(DbRole::Indexer).0, "dc3_web");
         assert_eq!(c.database.url.as_deref(), Some("postgres://h:5433/other"));
-        assert_eq!(c.policy.terms_file, PathBuf::from("/etc/terms.txt"));
         // An empty list override clears the list.
         let c = with_env(&[("DC3_CRAWL__BOOTSTRAP", "")]).unwrap();
         assert!(c.crawl.bootstrap.is_empty());
@@ -1463,7 +1420,6 @@ mod tests {
             ("DC3_WEB__BASE_URL", "https://[::1"),
             ("DC3_WEB__BASE_URL", "https://exa mple.com"),
             ("DC3_WEB__SITE_NAME", ""),
-            ("DC3_WEB__CONTACT_EMAIL", "a b@c"),
             ("DC3_WEB__TRUSTED_PROXIES", "not-a-net"),
             ("DC3_METRICS__LISTEN", "127.0.0.1:8080"),
             ("DC3_DATABASE__URL", "mysql://h/db"),
@@ -1555,9 +1511,8 @@ mod tests {
     fn warnings() {
         let c = Config::default();
         let w = c.warnings();
-        assert_eq!(w.len(), 2, "{w:?}");
+        assert_eq!(w.len(), 1, "{w:?}");
         assert!(w[0].contains("trusted_proxies"));
-        assert!(w[1].contains("contact_email"));
 
         let c = with_env(&[
             ("DC3_WEB__HSTS", "true"),
@@ -1565,14 +1520,13 @@ mod tests {
         ])
         .unwrap();
         let w = c.warnings();
-        assert_eq!(w.len(), 4, "{w:?}");
+        assert_eq!(w.len(), 3, "{w:?}");
         assert!(w[1].contains("hsts"));
-        assert!(w[3].contains("loopback"));
+        assert!(w[2].contains("loopback"));
 
         let c = with_env(&[
             ("DC3_WEB__HSTS", "true"),
             ("DC3_WEB__BASE_URL", "https://example.org"),
-            ("DC3_WEB__CONTACT_EMAIL", "abuse@example.org"),
             ("DC3_WEB__TRUSTED_PROXIES", "172.30.80.0/24"),
             ("DC3_WEB__LISTEN", "0.0.0.0:8080"),
         ])

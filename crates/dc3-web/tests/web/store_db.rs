@@ -143,7 +143,6 @@ async fn exercise(options: PgConnectOptions) {
         WebDeps {
             backend: store.clone(),
             search,
-            policy: policy(),
         },
     );
     let hex = key.to_hex();

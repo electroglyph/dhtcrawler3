@@ -8,11 +8,9 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
 use chrono::{DateTime, TimeDelta, Utc};
-use dc3_policy::TermMatcher;
 use dc3_search::{MAX_QUERY_CHARS, SearchHandle};
 use dc3_store::PublicStats;
 use ipnet::IpNet;
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::sync::Semaphore;
 
 use crate::handlers::{api, health, pages, search, torrent};
@@ -32,7 +30,6 @@ pub(crate) mod routes {
     pub const API_SEARCH: &str = "/api/v1/search";
     pub const API_TORRENT: &str = "/api/v1/torrents/{key}";
     pub const ABOUT: &str = "/about";
-    pub const LEGAL: &str = "/legal";
     pub const PRIVACY: &str = "/privacy";
     pub const ROBOTS: &str = "/robots.txt";
     pub const SECURITY_TXT: &str = "/.well-known/security.txt";
@@ -45,14 +42,13 @@ pub(crate) mod routes {
     pub const UNMATCHED: &str = "unmatched";
 
     /// Every fixed route template.
-    pub const ALL: [&str; 13] = [
+    pub const ALL: [&str; 12] = [
         HOME,
         SEARCH,
         TORRENT,
         API_SEARCH,
         API_TORRENT,
         ABOUT,
-        LEGAL,
         PRIVACY,
         ROBOTS,
         SECURITY_TXT,
@@ -67,23 +63,12 @@ pub(crate) mod routes {
     pub const API_PREFIX: &str = "/api/";
 }
 
-/// Characters left as they are in a `mailto:` address.
-const MAILTO_KEEP: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'@')
-    .remove(b'.')
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'+')
-    .remove(b'~');
-
 /// Site name used when the configured one is blank.
 const DEFAULT_SITE_NAME: &str = "dhtcrawler3";
 
 /// The configuration, cleaned up for use in pages and headers.
 pub(crate) struct Site {
     pub site_name: String,
-    pub contact_email: String,
-    pub dmca_agent: String,
     pub hsts: bool,
     pub trusted_proxies: Vec<IpNet>,
     /// The body of `/.well-known/security.txt`.
@@ -97,19 +82,9 @@ impl Site {
             name if name.is_empty() => DEFAULT_SITE_NAME.to_owned(),
             name => name,
         };
-        let contact_email = single_line(&cfg.contact_email);
-        let dmca_agent = cfg
-            .dmca_agent
-            .chars()
-            .filter(|c| *c == '\n' || !c.is_control())
-            .collect::<String>()
-            .trim()
-            .to_owned();
-        let security_txt = security_txt(&base_url, &contact_email, started);
+        let security_txt = security_txt(&base_url, started);
         Site {
             site_name,
-            contact_email,
-            dmca_agent,
             hsts: cfg.hsts,
             trusted_proxies: cfg.trusted_proxies,
             security_txt,
@@ -133,17 +108,6 @@ impl Site {
             max_query_chars: MAX_QUERY_CHARS,
         }
     }
-
-    /// The contact address as a `mailto:` URI, if one is configured.
-    pub(crate) fn mailto(&self) -> Option<String> {
-        if self.contact_email.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "mailto:{}",
-            utf8_percent_encode(&self.contact_email, MAILTO_KEEP)
-        ))
-    }
 }
 
 /// Shared state of every request.
@@ -151,7 +115,6 @@ pub(crate) struct AppState<B> {
     pub site: Site,
     pub backend: B,
     pub search: SearchHandle,
-    pub policy: Arc<TermMatcher>,
     /// Home-page totals; `None` until the first successful load.
     stats: RwLock<Option<PublicStats>>,
     pub limiter: RateLimiter,
@@ -207,7 +170,6 @@ pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Ar
         site: Site::new(cfg, Utc::now()),
         backend: deps.backend,
         search: deps.search,
-        policy: deps.policy,
         stats: RwLock::new(None),
         limiter: RateLimiter::new(RATE_LIMIT_MAX_KEYS, RATE_LIMIT_IDLE_EXPIRY),
         requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
@@ -223,7 +185,6 @@ pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Ar
         .route(routes::API_SEARCH, get(api::search::<B>))
         .route(routes::API_TORRENT, get(api::torrent::<B>))
         .route(routes::ABOUT, get(pages::about::<B>))
-        .route(routes::LEGAL, get(pages::legal::<B>))
         .route(routes::PRIVACY, get(pages::privacy::<B>))
         .route(routes::ROBOTS, get(pages::robots))
         .route(routes::SECURITY_TXT, get(pages::security_txt::<B>))
@@ -244,7 +205,7 @@ pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Ar
 
 /// Checks that `url` is an `http://` or `https://` origin.
 ///
-/// The policy itself is shared with the binary config validator (see
+/// The check itself is shared with the binary config validator (see
 /// `dc3_core::validate_base_url`); this only prefixes the field name so the
 /// same value cannot pass here and fail there.
 pub(crate) fn validate_base_url(url: &str) -> Result<(), String> {
@@ -263,16 +224,11 @@ fn single_line(s: &str) -> String {
 }
 
 /// The RFC 9116 security.txt body.
-fn security_txt(base_url: &str, contact_email: &str, started: DateTime<Utc>) -> String {
-    let contact = if contact_email.is_empty() {
-        format!("{base_url}{}", routes::LEGAL)
-    } else {
-        format!("mailto:{}", utf8_percent_encode(contact_email, MAILTO_KEEP))
-    };
+fn security_txt(base_url: &str, started: DateTime<Utc>) -> String {
     let validity = TimeDelta::from_std(SECURITY_TXT_VALIDITY).unwrap_or(TimeDelta::zero());
     let expires = started.checked_add_signed(validity).unwrap_or(started);
     format!(
-        "Contact: {contact}\nExpires: {}\nCanonical: {base_url}{}\nPreferred-Languages: en\n",
+        "Contact: {base_url}/\nExpires: {}\nCanonical: {base_url}{}\nPreferred-Languages: en\n",
         format::rfc3339(expires),
         routes::SECURITY_TXT
     )
@@ -319,18 +275,16 @@ mod tests {
     }
 
     #[test]
-    fn security_txt_with_and_without_contact() {
+    fn security_txt_body() {
         let started = Utc.with_ymd_and_hms(2026, 9, 17, 10, 0, 0).unwrap();
-        let with = security_txt("https://s.example", "sec+web@s.example", started);
+        let txt = security_txt("https://s.example", started);
         assert_eq!(
-            with,
-            "Contact: mailto:sec+web@s.example\n\
+            txt,
+            "Contact: https://s.example/\n\
              Expires: 2027-09-17T10:00:00Z\n\
              Canonical: https://s.example/.well-known/security.txt\n\
              Preferred-Languages: en\n"
         );
-        let without = security_txt("https://s.example", "", started);
-        assert!(without.starts_with("Contact: https://s.example/legal\n"));
     }
 
     #[test]
@@ -347,8 +301,6 @@ mod tests {
                 listen: "127.0.0.1:0".parse().unwrap(),
                 base_url: "https://s.example/".into(),
                 site_name: "  ".into(),
-                contact_email: "a b@c".into(),
-                dmca_agent: " Agent\nStreet 1\u{1b}[31m ".into(),
                 hsts: false,
                 trusted_proxies: Vec::new(),
                 seeder_freshness: Duration::from_secs(604800),
@@ -357,8 +309,6 @@ mod tests {
         );
         assert!(site.security_txt.contains("Canonical: https://s.example/"));
         assert_eq!(site.site_name, DEFAULT_SITE_NAME);
-        assert_eq!(site.dmca_agent, "Agent\nStreet 1[31m");
-        assert_eq!(site.mailto().as_deref(), Some("mailto:a%20b@c"));
-        assert_eq!(routes::ALL.len(), 13);
+        assert_eq!(routes::ALL.len(), 12);
     }
 }

@@ -73,7 +73,6 @@ async fn serve_loads_statistics_serves_and_shuts_down() {
     let deps = WebDeps {
         backend: backend.clone(),
         search: index.search.clone(),
-        policy: policy(),
     };
     let server = tokio::spawn(serve(cfg, deps, async move {
         let _ = stop_rx.await;
@@ -131,7 +130,6 @@ async fn serve_keeps_running_without_statistics() {
     let deps = WebDeps {
         backend,
         search: index.search.clone(),
-        policy: policy(),
     };
     let server = tokio::spawn(serve(cfg, deps, async move {
         let _ = stop_rx.await;
@@ -159,7 +157,6 @@ async fn serve_configuration_and_bind_errors() {
     let deps = || WebDeps {
         backend: FakeBackend::default(),
         search: index.search.clone(),
-        policy: policy(),
     };
 
     let mut bad = config();

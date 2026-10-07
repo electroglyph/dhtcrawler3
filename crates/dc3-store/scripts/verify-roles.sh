@@ -89,11 +89,9 @@ DECLARE
 BEGIN
     FOR r IN
         SELECT * FROM (VALUES
-            -- web: SELECT on three tables, nothing else.
+            -- web: SELECT on two tables, nothing else.
             ('web may select torrents',
              has_table_privilege('dc3_web', 'public.torrents', 'SELECT'), true),
-            ('web may select denylist',
-             has_table_privilege('dc3_web', 'public.denylist', 'SELECT'), true),
             ('web may select stats_daily',
              has_table_privilege('dc3_web', 'public.stats_daily', 'SELECT'), true),
             ('web may update torrents',
@@ -145,10 +143,7 @@ BEGIN
             ('indexer may read change_seq',
              has_sequence_privilege('dc3_indexer', 'public.change_seq', 'SELECT'), true),
             ('indexer may use change_seq',
-             has_sequence_privilege('dc3_indexer', 'public.change_seq', 'USAGE'), false),
-            -- Functions.
-            ('PUBLIC may execute dc3_key_denied',
-             has_function_privilege('public', 'public.dc3_key_denied(bytea, bytea, bytea)', 'EXECUTE'), false)
+             has_sequence_privilege('dc3_indexer', 'public.change_seq', 'USAGE'), false)
         ) AS v(what, actual, expected)
     LOOP
         IF r.actual IS DISTINCT FROM r.expected THEN

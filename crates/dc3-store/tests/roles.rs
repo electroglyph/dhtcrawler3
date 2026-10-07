@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use dc3_core::{AnyKey, DhtKey};
-use dc3_store::{DenyReason, FileRow, NewTorrent, Observation, Store, StoreError};
+use dc3_store::{FileRow, NewTorrent, Observation, Store, StoreError};
 
 struct Urls {
     owner: String,
@@ -150,36 +150,23 @@ async fn roles_have_least_privilege() {
     let id = crawler.complete(&k, &t).await.unwrap();
     crawler.fail(&bad).await.unwrap();
     assert!(crawler.give_up(&bad).await.unwrap());
-    assert!(!crawler.is_denied(&[k.as_bytes()]).await.unwrap());
-    crawler
-        .deny(bad.as_bytes(), DenyReason::CsamAuto, None, "crawler")
-        .await
-        .unwrap();
     crawler.purge_gave_up(Duration::from_secs(1)).await.unwrap();
     crawler.observe(&[obs(k, 1, false)], 1_000).await.unwrap();
-    let live = crawler.scan_live(0, 100).await.unwrap();
-    assert_eq!(live.len(), 1);
-    assert_eq!(
-        (live[0].id, live[0].paths.clone()),
-        (id, vec!["f".to_owned()])
-    );
     must_deny(&crawler, "DELETE FROM torrents").await;
     must_allow(
         &crawler,
         "UPDATE torrents SET seen_count = seen_count WHERE false",
     )
     .await;
-    must_deny(&crawler, "DELETE FROM denylist").await;
     must_deny(&crawler, "SELECT * FROM audit_log").await;
     must_deny(&crawler, "SELECT * FROM settings").await;
     must_deny(&crawler, "CREATE TABLE evil (x int)").await;
-    // stats() reads only pending/denylist/torrents, which the crawler can
-    // already SELECT individually for the pipeline (it was denied before
-    // only via the reports table, now removed).
+    // stats() reads only pending/torrents, which the crawler can
+    // already SELECT individually for the pipeline.
     let stats = crawler.stats().await.unwrap();
-    assert_eq!((stats.torrents, stats.denylisted), (1, 1));
+    assert_eq!(stats.torrents, 1);
 
-    // --- indexer: read-only, torrents and denylist only.
+    // --- indexer: read-only, torrents only.
     let mark = indexer.high_water_mark().await.unwrap().unwrap();
     assert!(mark > 0);
     let rows = indexer.changes_since(0, mark, 100).await.unwrap();
@@ -188,12 +175,10 @@ async fn roles_have_least_privilege() {
             .any(|r| r.id == id && r.visible && r.files_text == "f")
     );
     must_deny(&indexer, "UPDATE torrents SET name = 'x'").await;
-    must_deny(&indexer, "INSERT INTO denylist (key, reason, created_by) VALUES (decode(repeat('00', 20), 'hex'), 'other', 'x')").await;
     must_deny(&indexer, "SELECT nextval('change_seq')").await;
     must_deny(&indexer, "SELECT count(*) FROM pending").await;
     must_deny(&indexer, "SELECT * FROM stats_daily").await;
     must_deny(&indexer, "SELECT * FROM settings").await;
-    must_allow(&indexer, "SELECT count(*) FROM denylist").await;
     assert_denied("indexer pending_depth", indexer.pending_depth().await);
 
     // --- web: reads only.
@@ -210,7 +195,6 @@ async fn roles_have_least_privilege() {
     must_deny(&web, "SELECT gave_up FROM pending").await;
     must_deny(&web, "SELECT count(*) FROM pending").await;
     must_deny(&web, "SELECT nextval('change_seq')").await;
-    must_deny(&web, "INSERT INTO denylist (key, reason, created_by) VALUES (decode(repeat('00', 20), 'hex'), 'other', 'x')").await;
     must_deny(
         &web,
         "INSERT INTO audit_log (actor, action, subject) VALUES ('a', 'b', 'c')",
@@ -234,19 +218,14 @@ async fn roles_have_least_privilege() {
     )
     .await;
     must_deny(&web, "CREATE TEMP TABLE scratch (x int)").await;
-    assert_denied(
-        "web deny",
-        web.deny(k.as_bytes(), DenyReason::Other, None, "web").await,
-    );
     assert_denied("web set_setting", web.set_setting("banner", "hello").await);
     assert_denied("web pending_depth", web.pending_depth().await);
 
-    // --- owner: admin flows (settings, stats, undeny).
+    // --- owner: admin flows (settings, stats).
     assert!(owner.set_setting("banner", "hello").await.unwrap());
     assert_eq!(
         owner.get_setting("banner").await.unwrap().as_deref(),
         Some("hello")
     );
     assert_eq!(owner.stats().await.unwrap().torrents, 1);
-    assert!(owner.undeny(bad.as_bytes(), "admin").await.unwrap());
 }

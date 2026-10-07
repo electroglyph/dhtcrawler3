@@ -1,82 +1,13 @@
 //! Data types passed to and returned from [`crate::Store`].
 
-use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use dc3_core::{AnyKey, DhtKey, InfoHashV2};
+use dc3_core::{DhtKey, InfoHashV2};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 
 use crate::{Result, StoreError, get, to_u64};
-
-/// Error from parsing one of the enums in this module.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown {kind}: {value:?}")]
-pub struct ParseEnumError {
-    pub kind: &'static str,
-    pub value: String,
-}
-
-macro_rules! text_enum {
-    ($(#[$meta:meta])* $name:ident, $kind:literal, { $($(#[$vmeta:meta])* $variant:ident => $text:literal),+ $(,)? }) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[serde(rename_all = "kebab-case")]
-        pub enum $name {
-            $($(#[$vmeta])* $variant),+
-        }
-
-        impl $name {
-            /// Every variant.
-            pub const ALL: &'static [$name] = &[$($name::$variant),+];
-
-            /// The text stored in the database.
-            pub fn as_str(&self) -> &'static str {
-                match self {
-                    $($name::$variant => $text),+
-                }
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl FromStr for $name {
-            type Err = ParseEnumError;
-
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                match s {
-                    $($text => Ok($name::$variant),)+
-                    _ => Err(ParseEnumError { kind: $kind, value: s.to_owned() }),
-                }
-            }
-        }
-    };
-}
-
-text_enum!(
-    /// Why a key is on the denylist.
-    DenyReason, "deny reason", {
-        Dmca => "dmca",
-        Csam => "csam",
-        /// Set by the crawler when a name or path matches the blocked terms.
-        CsamAuto => "csam-auto",
-        Abuse => "abuse",
-        /// Set by the crawler for BEP 27 private torrents.
-        Private => "private",
-        Other => "other",
-    }
-);
-
-fn parse_enum<T: FromStr<Err = ParseEnumError>>(s: &str) -> Result<T> {
-    s.parse()
-        .map_err(|e: ParseEnumError| StoreError::Corrupt(e.to_string()))
-}
 
 /// One stored file entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +91,7 @@ pub struct TorrentRecord {
     /// Displayed only while fresh (see the web role); never indexed.
     pub seeders_est: Option<u64>,
     pub change_seq: i64,
-    /// Tombstoned by a denial.
+    /// Tombstoned.
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
@@ -179,8 +110,7 @@ pub(crate) use torrent_columns_base;
 /// SQL expression: the row (alias `t`) may be shown and indexed.
 macro_rules! visible_sql {
     () => {
-        "(t.deleted_at IS NULL \
-          AND NOT dc3_key_denied(t.dht_key, t.info_hash_v1, t.info_hash_v2))"
+        "(t.deleted_at IS NULL)"
     };
 }
 pub(crate) use visible_sql;
@@ -200,19 +130,6 @@ pub(crate) fn opt_v2_col(row: &PgRow, col: &str) -> Result<Option<InfoHashV2>> {
     let b: Option<Vec<u8>> = get(row, col)?;
     b.map(|b| InfoHashV2::from_slice(&b).map_err(|e| StoreError::Corrupt(format!("{col}: {e}"))))
         .transpose()
-}
-
-pub(crate) fn any_key_col(row: &PgRow, col: &str) -> Result<AnyKey> {
-    let b: Vec<u8> = get(row, col)?;
-    any_key_from_bytes(&b).map_err(|_| StoreError::Corrupt(format!("{col}: {} bytes", b.len())))
-}
-
-/// Interprets 20 bytes as a DHT/v1 key and 32 bytes as a v2 infohash.
-pub(crate) fn any_key_from_bytes(b: &[u8]) -> Result<AnyKey, ()> {
-    if let Ok(k) = DhtKey::from_slice(b) {
-        return Ok(AnyKey::V1OrDht(k));
-    }
-    InfoHashV2::from_slice(b).map(AnyKey::V2).map_err(|_| ())
 }
 
 fn opt_u64(what: &str, v: Option<i64>) -> Result<Option<u64>> {
@@ -246,9 +163,7 @@ impl TorrentRecord {
         })
     }
 
-    /// True when the row is not tombstoned. (Rows returned by
-    /// [`crate::Store::get_by_key`] and [`crate::Store::get_many`] are also
-    /// checked against the denylist.)
+    /// True when the row is not tombstoned.
     pub fn is_live(&self) -> bool {
         self.deleted_at.is_none()
     }
@@ -335,43 +250,9 @@ pub struct ObserveOutcome {
     /// Keys newly inserted into `pending`. Keys already pending are counted in
     /// none of the fields.
     pub queued: u64,
-    /// Keys skipped because they are denylisted.
-    pub denied: u64,
     /// New keys not queued because the queue was full and they were not
     /// priority keys.
     pub dropped: u64,
-}
-
-/// Result of [`crate::Store::deny`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DenyOutcome {
-    /// False when the key was already on the denylist.
-    pub newly_denied: bool,
-    /// Number of torrent rows tombstoned by this call.
-    pub tombstoned: u64,
-}
-
-/// One denylist row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DenyEntry {
-    pub key: AnyKey,
-    pub reason: DenyReason,
-    pub note: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub created_by: String,
-}
-
-impl DenyEntry {
-    pub(crate) fn from_row(row: &PgRow) -> Result<DenyEntry> {
-        let reason: String = get(row, "reason")?;
-        Ok(DenyEntry {
-            key: any_key_col(row, "key")?,
-            reason: parse_enum(&reason)?,
-            note: get(row, "note")?,
-            created_at: get(row, "created_at")?,
-            created_by: get(row, "created_by")?,
-        })
-    }
 }
 
 /// Pipeline counters for one UTC day.
@@ -381,7 +262,6 @@ pub struct DailyStats {
     pub discovered: u64,
     pub fetched: u64,
     pub fetch_failed: u64,
-    pub blocked: u64,
 }
 
 impl DailyStats {
@@ -391,7 +271,6 @@ impl DailyStats {
             discovered: to_u64("discovered", get(row, "discovered")?)?,
             fetched: to_u64("fetched", get(row, "fetched")?)?,
             fetch_failed: to_u64("fetch_failed", get(row, "fetch_failed")?)?,
-            blocked: to_u64("blocked", get(row, "blocked")?)?,
         })
     }
 }
@@ -406,7 +285,6 @@ pub struct StoreStats {
     /// Queue rows that have not given up.
     pub pending: u64,
     pub gave_up: u64,
-    pub denylisted: u64,
 }
 
 /// Totals for the public home page, readable by the web user.
@@ -418,27 +296,6 @@ pub struct PublicStats {
     pub added_today: i64,
     /// `stats_daily.fetched` for yesterday (UTC).
     pub added_yesterday: i64,
-}
-
-/// A stored torrent for the policy rescan ([`crate::Store::scan_live`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveRow {
-    pub id: i64,
-    pub dht_key: DhtKey,
-    pub name: String,
-    /// Every stored file path, in stored order.
-    pub paths: Vec<String>,
-}
-
-impl LiveRow {
-    pub(crate) fn from_row(row: &PgRow) -> Result<LiveRow> {
-        Ok(LiveRow {
-            id: get(row, "id")?,
-            dht_key: dht_key_col(row, "dht_key")?,
-            name: get(row, "name")?,
-            paths: get(row, "paths")?,
-        })
-    }
 }
 
 /// One row of the change feed for the indexer.
@@ -462,8 +319,8 @@ pub struct IndexRow {
     pub last_scraped_at: Option<DateTime<Utc>>,
     /// Estimated seeders from the last aware scrape, if any. Same caveat.
     pub seeders_est: Option<u64>,
-    /// False when the row is hidden, tombstoned or any of its keys is
-    /// denylisted; the indexer must then delete the document.
+    /// False when the row is tombstoned; the indexer must then delete the
+    /// document.
     pub visible: bool,
 }
 

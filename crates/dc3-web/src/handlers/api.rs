@@ -1,7 +1,7 @@
 //! The JSON API: `GET /api/v1/search` and `GET /api/v1/torrents/{key}`.
 //!
 //! Responses are built from the types below, never by serialising
-//! [`TorrentRecord`], so moderation fields never leak. Errors are
+//! [`TorrentRecord`], so only the documented fields are exposed. Errors are
 //! `{"error": "..."}`. No CORS headers are sent.
 
 use std::sync::Arc;
@@ -17,8 +17,8 @@ use serde::Serialize;
 use dc3_search::parse_query;
 
 use super::search::{
-    Failure, SearchParams, execute, expansion_blocked, is_blocked, parse_page, parse_per_page,
-    parse_sort, too_long, too_long_message,
+    Failure, SearchParams, execute, parse_page, parse_per_page, parse_sort, too_long,
+    too_long_message,
 };
 use super::{Lookup, Shown, fresh_seeders, lookup, parse_key};
 use crate::Backend;
@@ -87,13 +87,7 @@ struct ApiSearch<'a> {
     page: u32,
     per_page: u32,
     total: u64,
-    #[serde(skip_serializing_if = "is_false")]
-    blocked: bool,
     results: Vec<ApiTorrent>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 /// `GET /api/v1/search?q=&p=&sort=&per_page=`.
@@ -111,12 +105,10 @@ pub(crate) async fn search<B: Backend>(
     if q.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "the q parameter is required");
     }
-    // Checked first, so the term matcher never sees more than the limit.
+    // Checked first, so over-long queries are refused before parsing.
     if too_long(q) {
         return json_error(StatusCode::BAD_REQUEST, &too_long_message());
     }
-    // Validated first, so blocked and clean queries answer bad parameters
-    // alike: no status oracle for the blocklist.
     let parsed = parse_page(params.p.as_deref()).and_then(|page| {
         let per_page = parse_per_page(params.per_page.as_deref())?;
         let sort = parse_sort(params.sort.as_deref())?;
@@ -126,19 +118,7 @@ pub(crate) async fn search<B: Backend>(
         Ok(v) => v,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.message()),
     };
-    if is_blocked(&st, q) {
-        // The refused query is not echoed back.
-        let body = ApiSearch {
-            query: "",
-            page,
-            per_page,
-            total: 0,
-            blocked: true,
-            results: Vec::new(),
-        };
-        return json(StatusCode::OK, &body);
-    }
-    // Parsed once and shared by the prefix gate and the search (B-005).
+    // Parsed once and shared with the search (B-005).
     let parsed = match parse_query(q) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -146,18 +126,6 @@ pub(crate) async fn search<B: Backend>(
             return json_error(failure.status(), &failure.message());
         }
     };
-    if expansion_blocked(&st, &parsed).await {
-        // A prefix of a blocked term is blocked like the term itself.
-        let body = ApiSearch {
-            query: "",
-            page,
-            per_page,
-            total: 0,
-            blocked: true,
-            results: Vec::new(),
-        };
-        return json(StatusCode::OK, &body);
-    }
     match execute(&st, q, &parsed, page, per_page, sort).await {
         Ok(found) => {
             let body = ApiSearch {
@@ -165,7 +133,6 @@ pub(crate) async fn search<B: Backend>(
                 page,
                 per_page,
                 total: found.total,
-                blocked: false,
                 results: found
                     .torrents
                     .iter()

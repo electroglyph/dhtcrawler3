@@ -603,7 +603,7 @@ vocabulary (cause, function, axiom) is defined here too.
 |---|---|---|---|
 | **cause (*aitia*)** | answer to "why is it so?" | one of four: **material** (what a thing is made of), **formal** (its structure), **efficient** (what brings it about), **final** (what it is for, its *telos*) | Aristotle, *Physics* II.3. 01 §1 applies them. |
 | **function (*ergon*)** | characteristic activity of an artifact | the activity whose performance makes the artifact the kind of thing it is | The end that this activity serves (*telos*) is the artifact's final cause. Defined for this system in [01-first-principles](01-first-principles.md). |
-| **capability** | activity of a part of a system | one that the system must perform in order to perform its function | 01 §3 calls its F1–F9 "functions"; they are capabilities in this sense. |
+| **capability** | activity of a part of a system | one that the system must perform in order to perform its function | 01 §3 calls its F1–F8 "functions"; they are capabilities in this sense. |
 | **build** (sense 1) | act of making | produces a software artifact by writing its source code | |
 | **build** (sense 2) | automated procedure | turns source code into binaries or other files ready to run, called **build artifacts** | A **reproducible build** gives bit-identical artifacts from the same source, so anyone can check a published binary. |
 | **release** | build artifact set | published under a number (Rust 1.98.1, PostgreSQL 18.6) | This project's first release is 0.1. |
@@ -676,14 +676,6 @@ vocabulary (cause, function, axiom) is defined here too.
 | **data minimisation** | principle (GDPR Art. 5) | collect and keep only what the purpose needs | |
 | **communication to the public** | act under EU copyright law | making protected works available to a new public | The CJEU held that operating a torrent index can itself be one (C-610/15, *Stichting Brein v Ziggo*, 2017). |
 | **DSA / Online Safety Act** | laws | the EU Digital Services Act and the UK Online Safety Act, which impose duties on online services | 04 §2 advises legal advice on both. |
-| **CSAM (child sexual abuse material)** | illegal material | depicts the sexual abuse or sexual exploitation of a minor | A public index must block it from day one. |
-| **NCMEC / CyberTipline** | organisation / reporting system | the US National Center for Missing & Exploited Children runs the CyberTipline; US providers must report apparent CSAM to it (18 U.S.C. §2258A) | |
-| **IWF** | organisation | the Internet Watch Foundation, a UK charity; it gives its members lists of CSAM URLs and keywords | |
-| **denylist** | list | names torrents that must be refused, by DHT key, v1 infohash or v2 infohash (20 or 32 bytes) | 03 §10 compares 20-byte prefixes, so a v2 entry also blocks its truncated key. |
-| **blocked-term list** | list | words or phrases (here, CSAM indicators) whose presence as whole tokens in a name, a path or a query causes refusal | |
-| **takedown** | action | removes an item from a service after a valid notice | |
-| **safe harbour** | legal immunity | shields a service provider from liability for its users' infringement while it meets conditions set by law | |
-| **DMCA notice** | legal notice (US, 17 U.S.C. §512) | sent by a copyright holder to a service provider to identify allegedly infringing material or links | Search tools (§512(d)) keep safe-harbour protection only if they meet all of its conditions: no actual or "red flag" knowledge of infringement; no financial benefit directly attributable to infringement they can control; prompt removal after a valid notice sent to a **designated agent** registered with the US Copyright Office (the registration expires after 3 years); and a repeat-infringer policy (§512(i)). |
 
 ---
 

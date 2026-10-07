@@ -6,14 +6,12 @@ pub(crate) mod pages;
 pub(crate) mod search;
 pub(crate) mod torrent;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::Path;
 use axum::extract::rejection::PathRejection;
 use chrono::{DateTime, Utc};
 use dc3_core::{AnyKey, magnet_link, text};
-use dc3_policy::TermMatcher;
 use dc3_store::{FileRow, MAX_NAME_CHARS, MAX_PATH_CHARS, TorrentRecord};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::sync::SemaphorePermit;
@@ -72,8 +70,7 @@ pub(crate) fn fresh_seeders_at(
     (age <= chrono::Duration::from_std(freshness).unwrap_or(chrono::Duration::MAX)).then_some(est)
 }
 
-/// A stored torrent's text, cleaned for display and checked against the
-/// blocked terms.
+/// A stored torrent's text, cleaned for display.
 pub(crate) struct Shown {
     pub name: String,
     /// The file rows within [`MAX_LISTED_PATH_CHARS`], with cleaned paths
@@ -95,29 +92,21 @@ pub(crate) enum Detail {
 
 /// Cleans a stored torrent's name (and, for [`Detail::WithFiles`], its
 /// listed paths) again before display, because they come from strangers
-/// (R8). Returns `None` if any displayed text contains a blocked term (R18);
-/// the torrent is then not shown at all.
+/// (R8).
 ///
-/// Every listed path is matched (match-then-truncate): result lists screen
-/// the same file paths within the same [`MAX_LISTED_PATH_CHARS`] budget
-/// they would list, so nothing displayed is unchecked. The indexer checked
-/// every stored path, and deletes matches after a policy change.
-pub(crate) fn show(record: &TorrentRecord, policy: &TermMatcher, detail: Detail) -> Option<Shown> {
+/// Every listed path is prepared within the same [`MAX_LISTED_PATH_CHARS`]
+/// budget it would be listed with. Result lists prepare the same file
+/// paths they would list, so nothing displayed is unchecked.
+pub(crate) fn show(record: &TorrentRecord, detail: Detail) -> Shown {
     let mut name = text::sanitize_display(&record.name, MAX_NAME_CHARS);
     if name.is_empty() {
         name = record.dht_key.to_hex();
-    }
-    if policy.matches_affixed(&name) {
-        return None;
     }
     let mut files = Vec::new();
     let mut files_cut = false;
     let mut budget = MAX_LISTED_PATH_CHARS;
     for file in &record.files {
         let path = text::sanitize_display(&file.path, MAX_PATH_CHARS);
-        if policy.matches_affixed(&path) {
-            return None;
-        }
         let Some(rest) = budget.checked_sub(path.chars().count()) else {
             // Past the budget paths are neither listed nor shown: on detail
             // pages the list is marked truncated, on result lists there is
@@ -138,27 +127,28 @@ pub(crate) fn show(record: &TorrentRecord, policy: &TermMatcher, detail: Detail)
         record.info_hash_v2.as_ref(),
         Some(&name),
     );
-    Some(Shown {
+    Shown {
         name,
         files,
         files_cut,
         magnet,
-    })
+    }
 }
 
 /// Runs [`show`] for each record on the blocking pool, keeping the order
-/// and dropping records that must not be shown. `None` if the task failed.
+/// and dropping records that are no longer live. `None` if the task failed.
 pub(crate) async fn show_all(
     records: Vec<TorrentRecord>,
-    policy: &Arc<TermMatcher>,
     detail: Detail,
 ) -> Option<Vec<(TorrentRecord, Shown)>> {
-    let policy = Arc::clone(policy);
     let task = tokio::task::spawn_blocking(move || {
         records
             .into_iter()
             .filter(TorrentRecord::is_live)
-            .filter_map(|record| show(&record, &policy, detail).map(|shown| (record, shown)))
+            .map(|record| {
+                let shown = show(&record, detail);
+                (record, shown)
+            })
             .collect()
     });
     task.await.ok()
@@ -191,7 +181,7 @@ pub(crate) async fn lookup<B: Backend>(st: &AppState<B>, key: AnyKey) -> Lookup<
             return Lookup::Unavailable;
         }
     };
-    match show_all(vec![record], &st.policy, Detail::WithFiles).await {
+    match show_all(vec![record], Detail::WithFiles).await {
         Some(mut shown) => match shown.pop() {
             Some((record, shown)) => Lookup::Found {
                 record: Box::new(record),
@@ -246,50 +236,35 @@ mod tests {
     }
 
     #[test]
-    fn show_cleans_text_and_applies_the_policy() {
-        let policy = TermMatcher::load("forbiddenword\n").unwrap();
+    fn show_cleans_text() {
         let shown = show(
             &record("evil\u{202E}gpj.exe", &["a\u{0}b.txt"]),
-            &policy,
             Detail::WithFiles,
-        )
-        .unwrap();
+        );
         assert_eq!(shown.name, "evilgpj.exe");
         assert_eq!(shown.files[0].path, "ab.txt");
         assert!(shown.magnet.unwrap().starts_with("magnet:?xt=urn:btih:"));
-        assert!(
-            show(
-                &record("A ForbiddenWord here", &[]),
-                &policy,
-                Detail::NameOnly
-            )
-            .is_none()
+        // Every name is shown, whatever it contains.
+        let shown = show(&record("A ForbiddenWord here", &[]), Detail::NameOnly);
+        assert_eq!(shown.name, "A ForbiddenWord here");
+        let shown = show(
+            &record("fine", &["dir/forbiddenword.txt"]),
+            Detail::WithFiles,
         );
-        assert!(
-            show(
-                &record("fine", &["dir/forbiddenword.txt"]),
-                &policy,
-                Detail::WithFiles
-            )
-            .is_none()
-        );
-        let unnamed = show(&record("\u{202E}", &[]), &policy, Detail::NameOnly).unwrap();
+        assert_eq!(shown.files[0].path, "dir/forbiddenword.txt");
+        let unnamed = show(&record("\u{202E}", &[]), Detail::NameOnly);
         assert_eq!(unnamed.name, DhtKey([7; 20]).to_hex());
-        // Result lists screen file paths too: a file-blocked torrent is
-        // hidden, not just unlisted.
-        assert!(
-            show(
-                &record("fine", &["dir/forbiddenword.txt"]),
-                &policy,
-                Detail::NameOnly
-            )
-            .is_none()
+        // Result lists prepare file paths too, within the same budget.
+        let shown = show(
+            &record("fine", &["dir/forbiddenword.txt"]),
+            Detail::NameOnly,
         );
+        assert!(shown.files.is_empty());
+        assert!(!shown.files_cut);
     }
 
     #[tokio::test]
-    async fn show_all_keeps_order_and_drops_dead_and_blocked() {
-        let policy = Arc::new(TermMatcher::load("forbiddenword\n").unwrap());
+    async fn show_all_keeps_order_and_drops_dead() {
         let mut dead = record("tombstoned", &[]);
         dead.deleted_at = Some(Utc::now());
         let records = vec![
@@ -298,9 +273,9 @@ mod tests {
             record("forbiddenword", &[]),
             record("a last", &[]),
         ];
-        let shown = show_all(records, &policy, Detail::NameOnly).await.unwrap();
+        let shown = show_all(records, Detail::NameOnly).await.unwrap();
         let names: Vec<&str> = shown.iter().map(|(_, s)| s.name.as_str()).collect();
-        assert_eq!(names, ["b first", "a last"]);
+        assert_eq!(names, ["b first", "forbiddenword", "a last"]);
     }
 
     #[test]
@@ -308,71 +283,51 @@ mod tests {
         // Stored paths are at most MAX_PATH_CHARS long.
         let long = "x".repeat(MAX_PATH_CHARS);
         let paths = vec![long.as_str(); 40];
-        let shown = show(
-            &record("n", &paths),
-            &TermMatcher::empty(),
-            Detail::WithFiles,
-        )
-        .unwrap();
+        let shown = show(&record("n", &paths), Detail::WithFiles);
         assert_eq!(shown.files.len(), MAX_LISTED_PATH_CHARS / MAX_PATH_CHARS);
         assert!(shown.files_cut);
-        let few = show(
-            &record("n", &paths[..3]),
-            &TermMatcher::empty(),
-            Detail::WithFiles,
-        )
-        .unwrap();
+        let few = show(&record("n", &paths[..3]), Detail::WithFiles);
         assert_eq!(few.files.len(), 3);
         assert!(!few.files_cut);
     }
 
     #[test]
-    fn detail_pages_match_every_listed_path() {
-        let policy = TermMatcher::load("forbiddenword\n").unwrap();
-        // 3000 bytes of a character the matcher is slow on.
-        let filler = "\u{FDFA}".repeat(1000);
-        let late = "dir/forbiddenword.txt";
-        // A blocked path past the listing budget is still denied: every
-        // listed path is matched before anything is shown.
-        let paths = [filler.as_str(), filler.as_str(), filler.as_str(), late];
-        assert!(show(&record("fine", &paths), &policy, Detail::WithFiles).is_none());
-        assert!(show(&record("fine", &paths), &policy, Detail::NameOnly).is_none());
-        // Within the budget a path is still matched.
-        let early = [filler.as_str(), late];
-        assert!(show(&record("fine", &early), &policy, Detail::WithFiles).is_none());
-        // The name is always matched.
-        assert!(show(&record("forbiddenword", &paths), &policy, Detail::WithFiles).is_none());
-        // Clean pages still list.
-        let shown = show(
-            &record("fine", &[filler.as_str(), "ok.txt"]),
-            &policy,
-            Detail::WithFiles,
-        )
-        .unwrap();
-        assert_eq!(shown.files.len(), 2);
+    fn detail_pages_prepare_every_listed_path() {
+        // Stored paths are at most MAX_PATH_CHARS long; enough of them
+        // overflow the listing budget.
+        let long = "x".repeat(MAX_PATH_CHARS);
+        let paths = vec![long.as_str(); 40];
+        let shown = show(&record("fine", &paths), Detail::WithFiles);
+        assert_eq!(shown.files.len(), MAX_LISTED_PATH_CHARS / MAX_PATH_CHARS);
+        assert!(shown.files_cut);
+        // Result lists prepare nothing to list and are never truncated.
+        let shown = show(&record("fine", &paths), Detail::NameOnly);
+        assert!(shown.files.is_empty());
         assert!(!shown.files_cut);
+        // Within the budget every path is listed.
+        let shown = show(&record("fine", &paths[..3]), Detail::WithFiles);
+        assert_eq!(shown.files.len(), 3);
+        assert!(!shown.files_cut);
+        // The name is always shown.
+        let shown = show(&record("forbiddenword", &paths), Detail::WithFiles);
+        assert_eq!(shown.name, "forbiddenword");
     }
 
     #[test]
-    fn affixed_short_terms_hide_torrents() {
-        let policy = TermMatcher::load("pthc\n").unwrap();
-        assert!(
-            show(
-                &record("fine", &["xpthc/a.jpg"]),
-                &policy,
-                Detail::WithFiles
-            )
-            .is_none()
+    fn every_name_and_path_is_shown() {
+        assert_eq!(
+            show(&record("fine", &["xpthc/a.jpg"]), Detail::WithFiles)
+                .files
+                .len(),
+            1
         );
-        assert!(show(&record("fine", &["xpthc/a.jpg"]), &policy, Detail::NameOnly).is_none());
-        assert!(show(&record("xpthc movie", &[]), &policy, Detail::NameOnly).is_none());
-        assert!(
-            show(
-                &record("holiday photos", &["ok.jpg"]),
-                &policy,
-                Detail::NameOnly
-            )
-            .is_some()
+        assert_eq!(
+            show(&record("xpthc movie", &[]), Detail::NameOnly).name,
+            "xpthc movie"
+        );
+        assert_eq!(
+            show(&record("holiday photos", &["ok.jpg"]), Detail::NameOnly).name,
+            "holiday photos"
         );
     }
 

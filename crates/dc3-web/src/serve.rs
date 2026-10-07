@@ -187,7 +187,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use dc3_core::AnyKey;
-    use dc3_policy::TermMatcher;
     use dc3_search::SearchHandle;
     use dc3_store::{PublicStats, TorrentRecord};
 
@@ -244,8 +243,6 @@ mod tests {
             listen: "127.0.0.1:0".parse().unwrap(),
             base_url: "https://s.example".into(),
             site_name: "s".into(),
-            contact_email: String::new(),
-            dmca_agent: String::new(),
             hsts: false,
             trusted_proxies: Vec::new(),
             seeder_freshness: Duration::from_secs(604800),
@@ -253,7 +250,6 @@ mod tests {
         let deps = WebDeps {
             backend: backend.clone(),
             search: SearchHandle::open(dir.path()).unwrap(),
-            policy: Arc::new(TermMatcher::empty()),
         };
         let (_router, state) = app::build(cfg, deps);
 
@@ -326,8 +322,6 @@ mod tests {
             listen: "127.0.0.1:0".parse().unwrap(),
             base_url: "https://s.example".into(),
             site_name: "s".into(),
-            contact_email: String::new(),
-            dmca_agent: String::new(),
             hsts: false,
             trusted_proxies: Vec::new(),
             seeder_freshness: Duration::from_secs(604800),
@@ -335,7 +329,6 @@ mod tests {
         let deps = WebDeps {
             backend: Slow,
             search: SearchHandle::open(dir.path()).unwrap(),
-            policy: Arc::new(TermMatcher::empty()),
         };
         let (_router, state) = app::build(cfg, deps);
         let started = tokio::time::Instant::now();

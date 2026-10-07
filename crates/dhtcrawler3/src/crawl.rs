@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use dc3_dht::{DhtConfig, DhtStatsSnapshot, DhtTuning, Family, MIN_GOOD_NODES};
-use dc3_policy::TermMatcher;
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -38,7 +37,7 @@ pub const SHUTDOWN_FETCH_WAIT: Duration = Duration::from_secs(30);
 
 const METRIC_QUEUE_DEPTH: &str = "dc3_queue_depth";
 
-/// Everything the crawl role needs besides the store and the policy.
+/// Everything the crawl role needs besides the store.
 #[derive(Debug, Clone)]
 pub struct CrawlOptions {
     /// The DHT node. Tests set `allow_private_addrs`, `tuning` (with
@@ -160,7 +159,6 @@ impl Crawler {
     pub async fn start<S: CrawlStore>(
         opts: CrawlOptions,
         store: S,
-        policy: Arc<TermMatcher>,
         ready: Arc<AtomicBool>,
         cancel: CancellationToken,
     ) -> Result<Crawler, CrawlError> {
@@ -190,7 +188,6 @@ impl Crawler {
         let fetcher = Arc::new(Fetcher::new(
             store.clone(),
             dht.clone(),
-            policy,
             opts.filter,
             hints,
             opts.limits,
@@ -259,11 +256,10 @@ impl Crawler {
 pub async fn run<S: CrawlStore>(
     opts: CrawlOptions,
     store: S,
-    policy: Arc<TermMatcher>,
     ready: Arc<AtomicBool>,
     cancel: CancellationToken,
 ) -> Result<(), CrawlError> {
-    Crawler::start(opts, store, policy, ready, cancel)
+    Crawler::start(opts, store, ready, cancel)
         .await?
         .join()
         .await

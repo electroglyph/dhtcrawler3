@@ -38,7 +38,6 @@ use common::{note, wait_until};
 use dc3_core::DhtKey;
 use dc3_dht::{DEFAULT_BOOTSTRAP, Dht, DhtConfig, Discovered, MIN_GOOD_NODES, Source};
 use dc3_peer::{FetchLimits, fetch_metadata};
-use dc3_policy::{TermMatcher, normalise};
 use dc3_search::{IndexDoc, SearchIndex, SearchQuery};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -457,94 +456,7 @@ async fn live_fetch_verifies_real_metadata() {
     .expect("the live fetch test timed out");
 }
 
-/// Test 5: the policy matcher and normaliser survive real-world names and
-/// paths without panicking, and agree with themselves on live data: the
-/// first normalised token of a fetched name, loaded as a single-term list,
-/// matches that name (both sides normalise identically, so it must sit at
-/// position zero of the token stream).
-#[ignore]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn live_policy_handles_wild_names() {
-    require_live_env();
-    tokio::time::timeout(Duration::from_secs(20 * 60), async {
-        let mut node = LiveNode::start(true).await;
-        node.wait_for_table().await;
-
-        let keys =
-            collect_samples(&mut node.rx, node.started, 15, Duration::from_secs(8 * 60)).await;
-        assert!(
-            !keys.is_empty(),
-            "the live sampler produced no keys in 8 minutes: {}",
-            stats_line(&node.dht),
-        );
-        let (fetched, attempts) = fetch_from_live_peers(&node, &keys, 2, 48).await;
-        assert!(
-            !fetched.is_empty(),
-            "no peer yielded metadata after {attempts} attempts: {}",
-            stats_line(&node.dht),
-        );
-
-        let mut self_consistent = 0;
-        for (key, info) in &fetched {
-            let meta = dc3_torrent::parse_info(info)
-                .unwrap_or_else(|e| panic!("live metadata for {key} must parse: {e:?}"));
-            let mut texts = vec![meta.name.clone()];
-            texts.extend(meta.files.iter().map(|f| f.path.clone()));
-            for text in &texts {
-                // Crash-resistance on adversarial input: every entry point
-                // runs to a verdict.
-                let tokens = normalise(text);
-                let empty = TermMatcher::empty();
-                let _ = empty.matches(text);
-                let _ = empty.matches_affixed(text);
-                note(
-                    node.started,
-                    &format!("{} tokens in {text:?}", tokens.len()),
-                );
-            }
-            if let Some(first) = normalise(&meta.name).into_iter().next() {
-                // An overlong token is lawfully refused by the loader; that
-                // tests the gate, not the agreement, so it skips.
-                let matcher = match TermMatcher::load(&first) {
-                    Ok(matcher) => matcher,
-                    Err(e) => {
-                        note(
-                            node.started,
-                            &format!("single token {first:?} refused: {e:?}"),
-                        );
-                        continue;
-                    }
-                };
-                assert!(
-                    matcher.matches(&meta.name),
-                    "the name's own first token {first:?} does not match"
-                );
-                self_consistent += 1;
-                announce(
-                    node.started,
-                    &format!(
-                        "{}: {} files, first token {first:?} matches",
-                        meta.name, meta.file_count,
-                    ),
-                );
-            }
-        }
-        assert!(
-            self_consistent >= 1,
-            "no fetched name yielded a matchable token: {}",
-            stats_line(&node.dht),
-        );
-        announce(
-            node.started,
-            &format!("policy test done: {}", stats_line(&node.dht)),
-        );
-        node.shutdown().await;
-    })
-    .await
-    .expect("the live policy test timed out");
-}
-
-/// Test 6: fetched live torrents round-trip through a real search index:
+/// Test 5: fetched live torrents round-trip through a real search index:
 /// upsert and commit, then query runs of each name and find the document
 /// back. The parser and the index share a tokenizer, so a surviving run
 /// must retrieve its own document.

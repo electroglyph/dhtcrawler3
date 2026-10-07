@@ -1,6 +1,6 @@
 [package]
 name = "dc3-store"
-description = "PostgreSQL storage for dhtcrawler3: schema, lease queue, change feed, denylist"
+description = "PostgreSQL storage for dhtcrawler3: schema, lease queue, change feed"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

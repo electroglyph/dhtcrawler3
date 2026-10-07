@@ -26,7 +26,6 @@ clap.workspace = true
 dc3-core.workspace = true
 dc3-dht.workspace = true
 dc3-peer.workspace = true
-dc3-policy.workspace = true
 dc3-search.workspace = true
 dc3-store.workspace = true
 dc3-torrent.workspace = true

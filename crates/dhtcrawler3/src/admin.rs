@@ -1,32 +1,17 @@
 //! Admin subcommands (design §13; 04-operations §3). They connect with the
 //! `[database]` credentials, which compose sets to the owner for admin runs.
-//!
-//! Text that came from torrents (notes) is sanitised before it is printed,
-//! so it cannot carry terminal control sequences.
 
 use std::io::Write;
 
 use dc3_core::AnyKey;
-use dc3_core::text::sanitize_display;
-use dc3_policy::TermMatcher;
-use dc3_store::{DenyOutcome, DenyReason, MAX_FEED_PAGE, Store, StoreError};
+use dc3_store::{Store, StoreError};
 
 use crate::config::{Config, DbRole};
 
-/// Actor recorded for admin commands.
-pub const ADMIN_ACTOR: &str = "cli";
-/// Actor recorded for `policy rescan` denials.
-pub const RESCAN_ACTOR: &str = "policy-rescan";
-/// Note recorded for `policy rescan` denials.
-pub const RESCAN_NOTE: &str = "blocked term (policy rescan)";
-/// Rows read per `policy rescan` page.
-pub const RESCAN_PAGE: i64 = MAX_FEED_PAGE;
 /// Default number of rows listed.
 pub const DEFAULT_LIST_LIMIT: i64 = 100;
 /// Days shown by `stats`.
 pub const STATS_DAYS: u32 = 7;
-/// Characters of free text shown per field in listings.
-pub const LIST_TEXT_CHARS: usize = 200;
 
 /// Why an admin command failed.
 #[derive(Debug, thiserror::Error)]
@@ -41,26 +26,6 @@ pub enum AdminError {
 
 type Out<'a> = &'a mut (dyn Write + Send);
 
-/// The raw bytes of a key: 20 for a DHT or v1 key, 32 for a v2 infohash.
-pub fn key_bytes(key: &AnyKey) -> Vec<u8> {
-    match key {
-        AnyKey::V1OrDht(k) => k.0.to_vec(),
-        AnyKey::V2(h) => h.0.to_vec(),
-    }
-}
-
-/// Lowercase hex of a key.
-pub fn key_hex(key: &AnyKey) -> String {
-    match key {
-        AnyKey::V1OrDht(k) => k.to_hex(),
-        AnyKey::V2(h) => h.to_hex(),
-    }
-}
-
-fn clean(text: &str) -> String {
-    sanitize_display(text, LIST_TEXT_CHARS)
-}
-
 /// `migrate`: applies the migrations.
 pub async fn migrate(store: &Store, out: Out<'_>) -> Result<(), AdminError> {
     store.migrate().await?;
@@ -69,155 +34,26 @@ pub async fn migrate(store: &Store, out: Out<'_>) -> Result<(), AdminError> {
     Ok(())
 }
 
-/// `deny add`.
-pub async fn deny_add(
-    store: &Store,
-    key: &AnyKey,
-    reason: DenyReason,
-    note: Option<&str>,
-    out: Out<'_>,
-) -> Result<DenyOutcome, AdminError> {
-    let outcome = store
-        .deny(&key_bytes(key), reason, note, ADMIN_ACTOR)
-        .await?;
-    writeln!(
-        out,
-        "{} {} ({reason}); {} torrent(s) removed",
-        key_hex(key),
-        if outcome.newly_denied {
-            "denied"
-        } else {
-            "was already denied"
-        },
-        outcome.tombstoned
-    )?;
-    Ok(outcome)
-}
-
-/// `deny remove`. It is an error if the key was not denied.
-pub async fn deny_remove(store: &Store, key: &AnyKey, out: Out<'_>) -> Result<(), AdminError> {
-    if !store.undeny(&key_bytes(key), ADMIN_ACTOR).await? {
-        return Err(AdminError::Refused(format!(
-            "{} is not on the denylist",
-            key_hex(key)
-        )));
-    }
-    writeln!(
-        out,
-        "{} removed from the denylist (torrents already removed stay removed until fetched again)",
-        key_hex(key)
-    )?;
-    Ok(())
-}
-
-/// `deny list`.
-pub async fn deny_list(store: &Store, limit: i64, out: Out<'_>) -> Result<(), AdminError> {
-    let entries = store.list_denied(limit, 0).await?;
-    writeln!(
-        out,
-        "{:<64}  {:<9}  {:<20}  {:<14}  note",
-        "key", "reason", "created", "by"
-    )?;
-    for e in &entries {
-        writeln!(
-            out,
-            "{:<64}  {:<9}  {:<20}  {:<14}  {}",
-            key_hex(&e.key),
-            e.reason.as_str(),
-            e.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-            clean(&e.created_by),
-            clean(e.note.as_deref().unwrap_or(""))
-        )?;
-    }
-    writeln!(out, "{} entr{}", entries.len(), plural_y(entries.len()))?;
-    Ok(())
-}
-
-fn plural_y(n: usize) -> &'static str {
-    if n == 1 { "y" } else { "ies" }
-}
-
-/// Counts from `policy rescan`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RescanSummary {
-    pub scanned: u64,
-    pub matched: u64,
-    pub newly_denied: u64,
-    pub removed: u64,
-}
-
-/// `policy rescan`: denies every stored torrent whose name or any stored
-/// path matches `policy`.
-pub async fn policy_rescan(
-    store: &Store,
-    policy: &TermMatcher,
-    out: Out<'_>,
-) -> Result<RescanSummary, AdminError> {
-    let mut summary = RescanSummary::default();
-    let mut after = 0i64;
-    loop {
-        let rows = store.scan_live(after, RESCAN_PAGE).await?;
-        let Some(last) = rows.last() else { break };
-        after = last.id;
-        for row in &rows {
-            summary.scanned = summary.scanned.saturating_add(1);
-            let matched = policy.matches_affixed(&row.name)
-                || row.paths.iter().any(|p| policy.matches_affixed(p));
-            if !matched {
-                continue;
-            }
-            summary.matched = summary.matched.saturating_add(1);
-            let outcome = store
-                .deny(
-                    row.dht_key.as_bytes(),
-                    DenyReason::CsamAuto,
-                    Some(RESCAN_NOTE),
-                    RESCAN_ACTOR,
-                )
-                .await?;
-            if outcome.newly_denied {
-                summary.newly_denied = summary.newly_denied.saturating_add(1);
-            }
-            summary.removed = summary.removed.saturating_add(outcome.tombstoned);
-        }
-    }
-    tracing::info!(
-        scanned = summary.scanned,
-        matched = summary.matched,
-        newly_denied = summary.newly_denied,
-        removed = summary.removed,
-        "policy rescan finished"
-    );
-    writeln!(
-        out,
-        "scanned {} torrent(s); {} matched; {} key(s) newly denied; {} torrent(s) removed",
-        summary.scanned, summary.matched, summary.newly_denied, summary.removed
-    )?;
-    Ok(summary)
-}
-
 /// `stats`.
 pub async fn stats(store: &Store, out: Out<'_>) -> Result<(), AdminError> {
     let s = store.stats().await?;
     writeln!(out, "torrents      {}", s.torrents)?;
     writeln!(out, "pending       {}", s.pending)?;
     writeln!(out, "gave up       {}", s.gave_up)?;
-    writeln!(out, "denylisted    {}", s.denylisted)?;
     writeln!(out)?;
     writeln!(
         out,
-        "{:<10}  {:>12}  {:>12}  {:>12}  {:>12}",
-        "day (UTC)", "discovered", "fetched", "failed", "blocked"
+        "{:<10}  {:>12}  {:>12}  {:>12}",
+        "day (UTC)", "discovered", "fetched", "failed"
     )?;
     for d in store.daily_stats(STATS_DAYS).await? {
         writeln!(
             out,
-            "{:<10}  {:>12}  {:>12}  {:>12}  {:>12}",
+            "{:<10}  {:>12}  {:>12}  {:>12}",
             d.day.to_string(),
             d.discovered,
             d.fetched,
-            d.fetch_failed,
-            d.blocked
+            d.fetch_failed
         )?;
     }
     Ok(())
@@ -279,10 +115,9 @@ mod tests {
     #[test]
     fn keys() {
         let v1 = parse_key(&"AB".repeat(20)).unwrap();
-        assert_eq!(key_bytes(&v1), vec![0xab; 20]);
-        assert_eq!(key_hex(&v1), "ab".repeat(20));
+        assert!(matches!(v1, AnyKey::V1OrDht(_)));
         let v2 = parse_key(&"cd".repeat(32)).unwrap();
-        assert_eq!(key_bytes(&v2).len(), 32);
+        assert!(matches!(v2, AnyKey::V2(_)));
         assert!(parse_key("xyz").is_err());
         assert!(parse_key(&"a".repeat(41)).is_err());
     }
@@ -314,11 +149,5 @@ mod tests {
         let mut parsed = crate::config::from_toml_str(&body, Vec::new()).unwrap();
         parsed.database.url = cfg.database.url.clone();
         assert_eq!(parsed, cfg);
-    }
-
-    #[test]
-    fn listings_sanitise_text() {
-        assert_eq!(clean("a\u{1b}[31mred\u{202e}x\ny"), "a[31mredx y");
-        assert_eq!(clean(&"z".repeat(500)).len(), LIST_TEXT_CHARS);
     }
 }

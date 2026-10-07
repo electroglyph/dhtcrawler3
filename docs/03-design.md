@@ -1,6 +1,6 @@
 # 03 — Design
 
-This design implements the requirements R1–R20 from
+This design implements the requirements R1–R17, R19–R20 from
 [01-first-principles](01-first-principles.md). Each section names the requirements it
 serves. Terms are defined in [00-horismos](00-horismos.md).
 
@@ -23,11 +23,11 @@ authoritative.
                  │                                        │                   │
                  │   PostgreSQL ◄── pending (lease queue) ┘                   │
  peers ⇄         │   fetch workers: claim → get_peers → address chokepoint    │
-   (TCP)         │     → dc3-peer BEP 9 fetch → verify → parse → policy → store│
+   (TCP)         │     → dc3-peer BEP 9 fetch → verify → parse → store    │
                  └────────────────────────────────────────────────────────────┘
                  ┌──── index ─────┐          ┌──────────── web ────────────────┐
  PostgreSQL ────►│ tail change_seq│─► Tantivy│ axum + askama, no JS, strict CSP│◄─ reverse proxy ◄─ visitors
-                 │ policy re-check│  index ─►│ search → hydrate from Postgres  │
+                 │                │  index ─►│ search → hydrate from Postgres  │
                  └────────────────┘          └─────────────────────────────────┘
 ```
 
@@ -50,8 +50,7 @@ crates/
   dc3-torrent   info-dict parsing (v1/v2/hybrid), verification            (R4 R6 R8)
   dc3-dht       KRPC, routing table, BEP 42 IDs, tokens, BEP 51 sampler   (R1-R4)
   dc3-peer      BEP 3/10/9 metadata fetch; test seeder                    (R5 R7)
-  dc3-policy    blocked-term matcher (NFKC, case, confusables, leet)      (R18)
-  dc3-store     PostgreSQL schema, migrations, lease queue, repositories  (R15 R18)
+  dc3-store     PostgreSQL schema, migrations, lease queue, repositories  (R15)
   dc3-search    Tantivy schema, CJK tokenizer, query builder, generations (R16 R17)
   dc3-web       axum app, templates, security middleware                  (R9-R12)
   dhtcrawler3   the binary: config, CLI, pipeline wiring, end-to-end tests (R19 R20)
@@ -59,7 +58,7 @@ fuzz/           cargo-fuzz targets (separate workspace)                   (R7)
 ```
 
 Dependency direction: `core` ← `bencode` ← {`torrent`, `dht`, `peer`}; `core` ←
-{`policy`, `store`, `search`} ← `web` ← `dhtcrawler3`. There are no cycles.
+{`store`, `search`} ← `web` ← `dhtcrawler3`. There are no cycles.
 
 Rules for every crate:
 - `#![forbid(unsafe_code)]`.
@@ -101,7 +100,7 @@ Rules for every crate:
 | Concurrent peer connections | `crawl.max_connections` (default 256) | dhtcrawler3 |
 | Per destination IP | ≤ 2 concurrent connections and ≤ 10 attempts per minute; refused or timed-out destinations are skipped for 10 min (map: 100 000 IPs) | dhtcrawler3 |
 | Metadata bencode depth / items | 64 / 1 000 000 | torrent |
-| Policy-visited text | 4 characters per metadata byte, clamped to 1–16 MiB; beyond it the torrent is rejected (`TooMuchText`, fail closed). Padding paths and a hybrid's v1 list are visited too | torrent |
+| Visited text | 4 characters per metadata byte, clamped to 1–16 MiB; beyond it the torrent is rejected (`TooMuchText`, fail closed). Padding paths and a hybrid's v1 list are visited too | torrent |
 | Detail lookups (store) | at most 256 KiB of path text per `get_by_key`, then `files_truncated` | store |
 | File-tree depth | 64 | torrent |
 | Files parsed / stored | 200 000 / 2 000 (the rest are counted and flagged as truncated) | torrent |
@@ -112,7 +111,6 @@ Rules for every crate:
 | HTTP request body | 4 KiB | web |
 | Web rate-limiter map | 100 000 prefixes, 10 min idle expiry; refilled buckets are forgotten first; when full, new clients share one of 64 overflow buckets chosen by IPv4 /16 or IPv6 /32 | web |
 | HTTP request head | must arrive within 10 s of the connection opening (or of the next request's first byte); trickled bytes do not extend it | web |
-| Detail-page policy re-check | name, plus the first 8 KiB of path text | web |
 
 ## 4. dc3-core
 
@@ -161,8 +159,7 @@ pub fn verify(key: &DhtKey, info: &[u8]) -> Option<Verified>;   // SHA-1 == key,
 pub fn parse_info(info: &[u8]) -> Result<TorrentMeta, ParseError>;
 pub fn parse_info_visit(info: &[u8], visit: &mut dyn FnMut(&str)) -> Result<TorrentMeta, ParseError>;
     // Calls `visit` with the sanitised name and with every sanitised path parsed
-    // (up to MAX_FILES_PARSED), including paths not kept in `files`. The crawler
-    // runs the policy matcher here, so a blocked term in any path counts.
+    // (up to MAX_FILES_PARSED), including paths not kept in `files`.
 ```
 
 `TorrentMeta` has these fields:
@@ -289,50 +286,7 @@ The fetch sequence:
 
 Not implemented yet: MSE/PE encryption and uTP (§15).
 
-## 9. dc3-policy (R18)
-
-```rust
-pub fn normalise(text: &str) -> Vec<String>;   // the base token sequence
-pub struct TermMatcher;
-impl TermMatcher { pub fn load(text: &str) -> Result<Self, PolicyError>; pub fn seed() -> Self;
-                   pub fn empty() -> Self; pub fn matches(&self, text: &str) -> bool; pub fn len(&self) -> usize; }
-```
-
-**Normalisation** is applied repeatedly until the text stops changing. Each pass:
-1. NFKC.
-2. Lowercase.
-3. Drop default-ignorable code points.
-4. UTS #39 confusable skeleton, **for non-ASCII, non-CJK characters only**, so ordinary ASCII words are compared as users see them.
-5. Drop combining marks.
-6. NFC.
-7. Lowercase again.
-
-The result is then split on non-alphanumerics (`@` and `$` count as letters). Each Han,
-Hiragana, Katakana or Hangul character becomes its own token.
-
-**Matching.** A term (normalised the same way) matches if its token sequence appears
-contiguously in any of four variants of the text:
-1. the base tokens;
-2. the base tokens with the leet map (`0→o 1→i 3→e 4→a 5→s 7→t @→a $→s`) applied, only to tokens that contain a letter;
-3. variant 1 split at letter↔digit boundaries;
-4. variant 2 split at letter↔digit boundaries.
-
-Matching is whole-token only, so `cp` never matches `mcp`, and `boy` never matches `cowboy`.
-
-**Where the matcher runs:**
-
-| Point | What is checked |
-|---|---|
-| Ingest (crawler) | the name and **every parsed path** (`parse_info_visit`) |
-| Indexing (indexer) | the name and the stored paths; a match is deleted from the index and reported to the crawler role through the `policy rescan` command |
-| Query (web) | the query text |
-
-`dhtcrawler3 policy rescan` re-checks all stored torrents against the current list and
-denies matches as `csam-auto`.
-
-The repository ships `policy/blocked-terms.txt`, a short seed. Operators should extend it.
-
-## 10. dc3-store (R15, R18)
+## 10. dc3-store (R15)
 
 The migrations embedded in the crate are the specification.
 
@@ -345,12 +299,10 @@ The migrations embedded in the crate are the specification.
   - `change_seq` (unique index);
   - `deleted_at`.
 - **`pending`**: `dht_key` (PK), `discovered_at`, `seen_count`, `attempts`, `next_attempt_at`, `lease_until`, `gave_up`.
-- **`denylist`**: `key` (20 or 32 bytes), `reason`, `note`, `created_at`, `created_by`.
 - **`audit_log`**, **`stats_daily`**, and **`settings`** (owner-managed key/value).
 
 **Keys.**
 - A key is **known** if it equals any stored row's `dht_key`, `info_hash_v1`, or the first 20 bytes of `info_hash_v2`.
-- Every **denylist** comparison uses 20-byte prefixes. A 32-byte v2 entry therefore also blocks its truncated DHT key.
 
 **Change feed.** Every insert or update that the index must see runs in one transaction, in this order:
 1. `SELECT pg_advisory_xact_lock_shared(CHANGE_LOCK_KEY)`, as the first statement;
@@ -380,29 +332,22 @@ are expected.
 
 **`complete(key, meta)`** runs in one transaction:
 1. Delete the pending row.
-2. If `key`, `info_hash_v1` or `info_hash_v2[..20]` matches a denylist prefix, finish as *denied*.
-3. Otherwise, update the row whose `dht_key`, `info_hash_v1` or `info_hash_v2` matches, keeping `first_seen_at`, or insert a new row.
-4. In both cases, add the pending row's `seen_count`, bump `change_seq`, and increment `stats_daily.fetched`.
-
-**Takedowns.** `deny(key, reason, note, actor)` runs in one transaction:
-1. Insert into the denylist.
-2. Tombstone every matching torrent: wipe `name` and `files`, set `deleted_at`, bump `change_seq`.
-3. Delete the pending row.
-4. Write the audit log.
+2. Update the row whose `dht_key`, `info_hash_v1` or `info_hash_v2` matches, keeping `first_seen_at`, or insert a new row.
+3. Add the pending row's `seen_count`, bump `change_seq`, and increment `stats_daily.fetched`.
 
 **Roles** are created by `deploy/postgres/init`. Grants are applied by a migration. The web role has no write grants at all.
 
 | Role | Grants |
 |---|---|
-| `dc3_crawler` | SELECT/INSERT/UPDATE on `torrents`, `pending`, `stats_daily`; SELECT/INSERT on `denylist`; INSERT on `audit_log`; DELETE on `pending`; USAGE on `change_seq` |
-| `dc3_indexer` | SELECT on `torrents`, `denylist` and the `change_seq` sequence (the high-water mark reads `last_value` directly) |
-| `dc3_web` | SELECT on `torrents`, `denylist` and `stats_daily`. **No** INSERT, UPDATE or EXECUTE. |
+| `dc3_crawler` | SELECT/INSERT/UPDATE on `torrents`, `pending`, `stats_daily`; INSERT on `audit_log`; DELETE on `pending`; USAGE on `change_seq` |
+| `dc3_indexer` | SELECT on `torrents` and the `change_seq` sequence (the high-water mark reads `last_value` directly) |
+| `dc3_web` | SELECT on `torrents` and `stats_daily`. **No** INSERT, UPDATE or EXECUTE. |
 | `dc3_owner` | owns everything; runs migrations and admin commands |
 
 All queries use bound parameters.
 
 **Read bounds.**
-- `changes_since` and `scan_live` return at most 1 000 rows per page, and also stop at a byte cap, so a short page does not prove the range is drained. Callers loop until an empty page.
+- `changes_since` returns at most 1 000 rows per page, and also stops at a byte cap, so a short page does not prove the range is drained. Callers loop until an empty page.
 - `get_many` returns at most 10 file rows per record for result lists. `get_by_key` returns the full stored list.
 - Public statistics count only visible rows.
 
@@ -449,16 +394,16 @@ rename.
 **Indexer loop** (in the binary):
 1. Take the high-water mark (§10).
 2. Read up to 1 000 rows with `checkpoint < change_seq ≤ mark`.
-3. Delete rows that are tombstoned or denylisted, **or whose name or stored paths match the policy**. Upsert the rest.
+3. Delete rows that are tombstoned. Upsert the rest.
 4. Commit with the batch's last `change_seq`.
 5. Repeat without sleeping if the batch was full. Otherwise sleep for `index.poll_interval_ms`.
 
 ## 12. dc3-web (R9–R12)
 
 ```rust
-pub struct WebConfig { listen, base_url, site_name, contact_email, dmca_agent, hsts, trusted_proxies: Vec<IpNet>, .. }
+pub struct WebConfig { listen, base_url, site_name, hsts, trusted_proxies: Vec<IpNet>, .. }
 pub fn app(state: AppState) -> axum::Router;
-pub async fn serve(cfg: WebConfig, store: Store, index: SearchHandle, policy: Arc<TermMatcher>,
+pub async fn serve(cfg: WebConfig, store: Store, index: SearchHandle,
                    shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), WebError>;
 ```
 
@@ -470,7 +415,7 @@ pub async fn serve(cfg: WebConfig, store: Store, index: SearchHandle, policy: Ar
 | `GET /search?q=&p=&sort=` | results |
 | `GET /t/{key}` | torrent detail; 40-hex DHT or v1 key, or 64-hex v2 |
 | `GET /api/v1/search`, `GET /api/v1/torrents/{key}` | JSON API |
-| `GET /about`, `/legal`, `/privacy` | information pages |
+| `GET /about`, `/privacy` | information pages |
 | `GET /robots.txt`, `/.well-known/security.txt` | crawler and security contact files |
 | `GET /static/style.css` | stylesheet, embedded in the binary |
 | `GET /healthz`, `GET /readyz` | liveness and readiness |
@@ -520,17 +465,12 @@ No `Server` header is sent.
 - at most 16 concurrent detail lookups;
 - detail listings capped at 128 000 path characters.
 
-**Second checks.** Names and paths are sanitised again, and names are checked against
-the policy again, before display.
+**Second checks.** Names and paths are sanitised again before display.
 
 **JSON.** API JSON escapes `<`, `>`, `&`, `'`, U+2028 and U+2029, so it is safe to embed
-in HTML. A blocked API query returns the normal shape, with `blocked: true` and no
-results.
+in HTML.
 
 **CSRF.** There are no POST endpoints; every request is a GET.
-
-**Blocked queries** get a page with no results and a deterrence and help message. They
-increment a counter and are never logged.
 
 **Logging.** The application logs method, route template, status and latency only.
 **The reverse proxy must log no more.** The shipped proxy example (`deploy/Caddyfile`)
@@ -542,9 +482,7 @@ has no access log. For nginx, use a format without `$remote_addr` or `$request`,
 ```
 dhtcrawler3 [--config FILE] <COMMAND>
   migrate | crawl | index [--rebuild] | web | all
-  deny add <KEY> --reason <dmca|csam|abuse|other> [--note TEXT] | deny remove <KEY> | deny list [--limit N]
   all [--migrate]
-  policy rescan
   stats | check-config
   healthcheck <URL>            # GET URL, exit 0 on 2xx (the distroless image has no curl)
 ```
@@ -556,7 +494,6 @@ dhtcrawler3 [--config FILE] <COMMAND>
 - `[index]`.
 - `[web]`.
 - `[metrics]` (`listen`).
-- `[policy]` (`terms_file`).
 - `[log]`.
 
 Unknown keys are an error. Environment variables `DC3_<SECTION>__<KEY>` override the file.
@@ -573,8 +510,8 @@ List values are comma-separated.
 1. `claim(1, 120 s)`, renewing the lease if it still holds the item after 90 s;
 2. collects peers from the hint map and from `dht.get_peers` (15 s), passing every peer through the chokepoint, rejecting our own addresses, and applying the per-destination limits (§3);
 3. tries up to 8 peers, 3 at a time, within the connection semaphore and the byte budget;
-4. runs `verify`, then `parse_info_visit` with the policy matcher;
-5. finishes with `complete`, `fail`, or `deny` (`csam-auto` for term matches, `private` for BEP 27 torrents).
+4. runs `verify`, then `parse_info_visit`;
+5. finishes with `complete` or `fail`, or gives up on BEP 27 private torrents.
 
 **Metrics and health.**
 - Each role serves `/metrics`, `/healthz` (the process is alive) and `/readyz` on `metrics.listen`.
@@ -586,7 +523,7 @@ List values are comma-separated.
 
 **End-to-end tests** (in `crates/dhtcrawler3/tests/`):
 1. **No database or network.** 16 DHT nodes on `127.0.0.1` with `allow_private_addrs` and `tuning.limits_by_endpoint`, plus the test seeder. The crawler discovers a key by BEP 51, finds the seeder, and fetches, verifies and parses the torrent.
-2. **With `DATABASE_URL` set.** Discovery → pending → fetch → torrents → index → web search → deny.
+2. **With `DATABASE_URL` set.** Discovery → pending → fetch → torrents → index → web search.
 
 ## 14. Deployment and supply chain (R12, R13)
 
@@ -610,7 +547,7 @@ List values are comma-separated.
 - `fmt`, `clippy -D warnings`, and `test` with PostgreSQL;
 - `cargo deny` and `cargo audit`;
 - an image build with SBOM and provenance;
-- a 60 s fuzz smoke run for each target: `bencode_decode`, `krpc_message`, `compact_lists`, `peer_frames`, `parse_info`, `policy_normalise`, `search_query`.
+- a 60 s fuzz smoke run for each target: `bencode_decode`, `krpc_message`, `compact_lists`, `peer_frames`, `parse_info`, `search_query`.
 
 Actions are pinned to commit SHAs, and permissions are read-only. Dependabot covers cargo, GitHub Actions and Docker.
 
@@ -643,11 +580,8 @@ Operators verify with `gh attestation verify` (04 §7).
 ## 16. Review record
 
 An independent review on 2026-09-16 raised these points. All were adopted above:
-- a bounded, audited CSAM auto-hide;
 - proxy logging;
 - a single address chokepoint with per-destination caps;
-- the policy normalisation order and full-path matching;
-- policy checks at indexing time;
 - `X-Forwarded-For` parsing and multi-prefix rate limits;
 - `get_peers` reply trimming;
 - non-extended peer frames;

@@ -16,7 +16,7 @@ use crate::render::{
     html, with_type,
 };
 use crate::static_files::{ROBOTS_TXT, STYLE_CSS};
-use crate::templates::{AboutPage, EmailView, HomePage, LegalPage, PrivacyPage, StatsView};
+use crate::templates::{AboutPage, HomePage, PrivacyPage, StatsView};
 
 const SECONDS_PER_MINUTE: u64 = 60;
 
@@ -38,20 +38,6 @@ pub(crate) async fn home<B: Backend>(State(st): State<Arc<AppState<B>>>) -> Resp
 pub(crate) async fn about<B: Backend>(State(st): State<Arc<AppState<B>>>) -> Response {
     let page = AboutPage {
         page: st.site.page("About", "", true),
-    };
-    cached(html(StatusCode::OK, &page), STATIC_PAGE_CACHE)
-}
-
-/// `GET /legal`.
-pub(crate) async fn legal<B: Backend>(State(st): State<Arc<AppState<B>>>) -> Response {
-    let site = &st.site;
-    let page = LegalPage {
-        page: site.page("Legal", "", true),
-        contact: site.mailto().map(|href| EmailView {
-            href,
-            text: site.contact_email.clone(),
-        }),
-        dmca_agent: (!site.dmca_agent.is_empty()).then_some(site.dmca_agent.as_str()),
     };
     cached(html(StatusCode::OK, &page), STATIC_PAGE_CACHE)
 }

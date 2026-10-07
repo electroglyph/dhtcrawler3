@@ -4,8 +4,8 @@
 //! Each poll:
 //! 1. take the high-water mark (keep the previous one if the lock was busy);
 //! 2. read pages with `checkpoint < change_seq <= mark`;
-//! 3. upsert visible rows whose name and paths pass the policy, delete the
-//!    rest, and commit with the page's last `change_seq`;
+//! 3. upsert visible rows, delete the rest, and commit with the page's
+//!    last `change_seq`;
 //! 4. an empty page means the range is drained: commit with the mark (a
 //!    short page proves nothing);
 //! 5. check that `CURRENT` still names our generation, then sleep.
@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dc3_policy::TermMatcher;
 use dc3_search::{IndexDoc, IndexRoot, IndexWriterHandle, SearchError, SearchIndex};
 use dc3_store::{IndexRow, StoreError};
 use tokio::time::Instant;
@@ -96,16 +95,6 @@ where
         .map_err(|e| IndexError::Task(e.to_string()))?
 }
 
-/// True if the row's name or any of its stored paths matches `policy`,
-/// including short seeds hidden inside longer tokens.
-pub fn blocked_by_policy(policy: &TermMatcher, row: &IndexRow) -> bool {
-    policy.matches_affixed(&row.name)
-        || row
-            .files_text
-            .lines()
-            .any(|line| policy.matches_affixed(line))
-}
-
 /// The search document for a row.
 pub fn index_doc(row: &IndexRow) -> IndexDoc {
     IndexDoc {
@@ -124,11 +113,10 @@ fn apply_rows(
     writer: &mut IndexWriterHandle,
     rows: &[IndexRow],
     commit_to: i64,
-    policy: &TermMatcher,
 ) -> Result<(u64, u64), SearchError> {
     let (mut upserts, mut deletes) = (0u64, 0u64);
     for row in rows {
-        if row.visible && !blocked_by_policy(policy, row) {
+        if row.visible {
             writer.upsert(&index_doc(row))?;
             upserts = upserts.saturating_add(1);
         } else {
@@ -166,19 +154,13 @@ impl Projector {
         })
     }
 
-    async fn apply(
-        &mut self,
-        rows: Vec<IndexRow>,
-        commit_to: i64,
-        policy: &Arc<TermMatcher>,
-    ) -> Result<(), IndexError> {
+    async fn apply(&mut self, rows: Vec<IndexRow>, commit_to: i64) -> Result<(), IndexError> {
         let mut writer = self
             .writer
             .take()
             .ok_or_else(|| IndexError::Task("the index writer was lost".into()))?;
-        let policy = Arc::clone(policy);
         let (writer, result) = tokio::task::spawn_blocking(move || {
-            let result = apply_rows(&mut writer, &rows, commit_to, &policy);
+            let result = apply_rows(&mut writer, &rows, commit_to);
             (writer, result)
         })
         .await
@@ -211,7 +193,6 @@ async fn drain<F: ChangeFeed>(
     feed: &F,
     mark: i64,
     batch: i64,
-    policy: &Arc<TermMatcher>,
     cancel: &CancellationToken,
 ) -> Result<usize, IndexError> {
     let mut pages = 0usize;
@@ -232,7 +213,7 @@ async fn drain<F: ChangeFeed>(
                 });
             }
         };
-        proj.apply(rows, commit_to, policy).await?;
+        proj.apply(rows, commit_to).await?;
         if drained {
             break;
         }
@@ -272,7 +253,6 @@ impl FeedErrors {
 pub async fn run<F: ChangeFeed>(
     opts: IndexOptions,
     feed: F,
-    policy: Arc<TermMatcher>,
     ready: Arc<AtomicBool>,
     cancel: CancellationToken,
 ) -> Result<(), IndexError> {
@@ -291,7 +271,7 @@ pub async fn run<F: ChangeFeed>(
         documents = proj.doc_count(),
         "indexer started"
     );
-    let result = follow(&opts, &feed, &policy, &ready, &cancel, &root, &mut proj).await;
+    let result = follow(&opts, &feed, &ready, &cancel, &root, &mut proj).await;
     ready.store(false, Ordering::Relaxed);
     let closed = proj.close().await;
     result?;
@@ -303,7 +283,6 @@ pub async fn run<F: ChangeFeed>(
 async fn follow<F: ChangeFeed>(
     opts: &IndexOptions,
     feed: &F,
-    policy: &Arc<TermMatcher>,
     ready: &AtomicBool,
     cancel: &CancellationToken,
     root: &IndexRoot,
@@ -335,7 +314,7 @@ async fn follow<F: ChangeFeed>(
             }
         };
         if proj.checkpoint < mark {
-            match drain(proj, feed, mark, opts.batch_size, policy, cancel).await {
+            match drain(proj, feed, mark, opts.batch_size, cancel).await {
                 Ok(_) => {}
                 Err(IndexError::Cancelled) => return Ok(()),
                 Err(IndexError::Store(e)) => failure = Some(e),
@@ -393,7 +372,6 @@ pub struct RebuildSummary {
 pub async fn rebuild<F: ChangeFeed>(
     opts: IndexOptions,
     feed: F,
-    policy: Arc<TermMatcher>,
     cancel: CancellationToken,
     grace: Duration,
 ) -> Result<RebuildSummary, IndexError> {
@@ -411,7 +389,7 @@ pub async fn rebuild<F: ChangeFeed>(
     .await?;
     tracing::info!(previous, generation, "index rebuild started");
     let mut proj = Projector::open(index, generation, opts.writer_heap_bytes).await?;
-    let caught_up = catch_up(&opts, &feed, &policy, &cancel, &mut proj).await;
+    let caught_up = catch_up(&opts, &feed, &cancel, &mut proj).await;
     let (checkpoint, documents) = (proj.checkpoint, proj.doc_count());
     let (upserts, deletes) = (proj.upserts, proj.deletes);
     let closed = proj.close().await;
@@ -492,7 +470,6 @@ async fn fresh_mark<F: ChangeFeed>(
 async fn catch_up<F: ChangeFeed>(
     opts: &IndexOptions,
     feed: &F,
-    policy: &Arc<TermMatcher>,
     cancel: &CancellationToken,
     proj: &mut Projector,
 ) -> Result<(), IndexError> {
@@ -501,7 +478,7 @@ async fn catch_up<F: ChangeFeed>(
         if proj.checkpoint >= mark {
             return Ok(());
         }
-        let pages = drain(proj, feed, mark, opts.batch_size, policy, cancel).await?;
+        let pages = drain(proj, feed, mark, opts.batch_size, cancel).await?;
         tracing::info!(
             checkpoint = proj.checkpoint,
             documents = proj.doc_count(),
@@ -510,7 +487,7 @@ async fn catch_up<F: ChangeFeed>(
         if pages <= 1 {
             let mark = fresh_mark(feed, opts.poll_interval, cancel).await?;
             if proj.checkpoint < mark {
-                drain(proj, feed, mark, opts.batch_size, policy, cancel).await?;
+                drain(proj, feed, mark, opts.batch_size, cancel).await?;
             }
             return Ok(());
         }
@@ -640,8 +617,16 @@ mod tests {
         }
     }
 
-    fn policy() -> Arc<TermMatcher> {
-        Arc::new(dc3_policy::try_seed().unwrap())
+    #[test]
+    fn documents() {
+        let feed = FakeFeed::new(10);
+        feed.put(1, "debian", "a/b.iso\nc.txt", true);
+        feed.put(2, "debian", "iso/debian.iso", true);
+        let rows = feed.inner.lock().unwrap().rows.clone();
+        let doc = index_doc(&rows[1]);
+        assert_eq!(doc.id, 2);
+        assert_eq!(doc.created, 1_700_000_000);
+        assert_eq!(doc.files, "iso/debian.iso");
     }
 
     async fn ids(handle: &SearchHandle, text: &str) -> Vec<i64> {
@@ -687,35 +672,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn policy_and_documents() {
-        let feed = FakeFeed::new(10);
-        feed.put(1, "debian", "a/pthc/b.iso\nc.txt", true);
-        feed.put(2, "PTHC video", "", true);
-        feed.put(3, "debian", "iso/debian.iso", true);
-        feed.put(4, "xpthc movie", "ok.txt", true);
-        feed.put(5, "holiday", "xpthc/a.jpg", true);
-        let rows = feed.inner.lock().unwrap().rows.clone();
-        let p = policy();
-        assert!(blocked_by_policy(&p, &rows[0]));
-        assert!(blocked_by_policy(&p, &rows[1]));
-        assert!(!blocked_by_policy(&p, &rows[2]));
-        assert!(blocked_by_policy(&p, &rows[3]));
-        assert!(blocked_by_policy(&p, &rows[4]));
-        let doc = index_doc(&rows[2]);
-        assert_eq!(doc.id, 3);
-        assert_eq!(doc.created, 1_700_000_000);
-        assert_eq!(doc.files, "iso/debian.iso");
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn follows_the_feed_and_stops_on_a_generation_change() {
         let dir = tempfile::tempdir().unwrap();
         // Two rows per page, so short pages happen before the range is drained.
         let feed = FakeFeed::new(2);
         feed.put(1, "ubuntu desktop", "ubuntu.iso", true);
-        feed.put(2, "blocked pthc name", "x.iso", true);
-        feed.put(3, "ubuntu server", "images/pthc/x.iso", true);
+        feed.put(2, "ubuntu docs", "x.iso", true);
+        feed.put(3, "ubuntu server", "images/x.iso", true);
         feed.put(4, "ubuntu hidden", "y.iso", false);
         feed.put(5, "ubuntu core", "core.iso", true);
         feed.skip(3);
@@ -724,7 +688,6 @@ mod tests {
         let task = tokio::spawn(run(
             options(dir.path()),
             feed.clone(),
-            policy(),
             Arc::clone(&ready),
             cancel.clone(),
         ));
@@ -743,7 +706,7 @@ mod tests {
         // Pages of 2, 2 and 1 rows, then an empty page ends the range.
         assert!(feed.pages() >= 4, "{} pages", feed.pages());
         let handle = SearchHandle::open(dir.path()).unwrap();
-        assert_eq!(ids(&handle, "ubuntu").await, vec![1, 5]);
+        assert_eq!(ids(&handle, "ubuntu").await, vec![1, 2, 3, 5]);
 
         // Later changes: a hide and a new row.
         feed.set_busy(true);
@@ -762,7 +725,7 @@ mod tests {
             async move { checkpoint(&path).await == 10 }
         })
         .await;
-        assert_eq!(ids(&handle, "ubuntu").await, vec![5, 6]);
+        assert_eq!(ids(&handle, "ubuntu").await, vec![2, 3, 5, 6]);
 
         // Another process promotes a new generation: the indexer stops.
         let root = IndexRoot::open(dir.path()).unwrap();
@@ -793,7 +756,6 @@ mod tests {
         let task = tokio::spawn(run(
             options(dir.path()),
             feed.clone(),
-            policy(),
             Arc::clone(&ready),
             cancel.clone(),
         ));
@@ -815,7 +777,6 @@ mod tests {
         let result = run(
             options(dir.path()),
             empty,
-            policy(),
             Arc::new(AtomicBool::new(false)),
             CancellationToken::new(),
         )
@@ -842,7 +803,6 @@ mod tests {
         let task = tokio::spawn(run(
             options(dir.path()),
             feed.clone(),
-            policy(),
             Arc::new(AtomicBool::new(false)),
             cancel.clone(),
         ));
@@ -899,7 +859,6 @@ mod tests {
             let result = rebuild(
                 options(dir.path()),
                 feed.clone(),
-                policy(),
                 CancellationToken::new(),
                 Duration::from_millis(50),
             )
@@ -913,7 +872,6 @@ mod tests {
         let summary = rebuild(
             options(dir.path()),
             feed.clone(),
-            policy(),
             CancellationToken::new(),
             Duration::from_millis(100),
         )

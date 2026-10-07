@@ -20,7 +20,6 @@ dc3-bencode = { path = "../crates/dc3-bencode" }
 dc3-core = { path = "../crates/dc3-core" }
 dc3-dht = { path = "../crates/dc3-dht" }
 dc3-peer = { path = "../crates/dc3-peer" }
-dc3-policy = { path = "../crates/dc3-policy" }
 dc3-search = { path = "../crates/dc3-search" }
 dc3-torrent = { path = "../crates/dc3-torrent" }
 
@@ -55,13 +54,6 @@ bench = false
 [[bin]]
 name = "peer_frames"
 path = "fuzz_targets/peer_frames.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "policy_normalise"
-path = "fuzz_targets/policy_normalise.rs"
 test = false
 doc = false
 bench = false

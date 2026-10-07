@@ -1,5 +1,5 @@
 //! End to end with PostgreSQL (design §13): discovery → pending → fetch →
-//! torrents → index → web search → deny.
+//! torrents → index → web search.
 //!
 //! Runs only when `DATABASE_URL` names a superuser connection; the test
 //! creates and drops its own database and never touches the one in the URL.
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{
-    NETWORK_NODES, Network, Seeder, announce, crawl_options, http, info_dict, note, seed_policy,
+    NETWORK_NODES, Network, Seeder, announce, crawl_options, http, info_dict, note,
     wait_for_tables, wait_until,
 };
 use dc3_core::AnyKey;
@@ -28,11 +28,10 @@ use dc3_dht::Dht;
 use dc3_search::{SearchHandle, SearchQuery};
 use dc3_store::sqlx::postgres::PgConnection;
 use dc3_store::sqlx::{self, AssertSqlSafe, Connection};
-use dc3_store::{DenyReason, Observation, PgConnectOptions, Store, StoreError};
+use dc3_store::{PgConnectOptions, Store};
 use dc3_web::{WebConfig, WebDeps};
 use dhtcrawler3::admin;
 use dhtcrawler3::crawl::Crawler;
-use dhtcrawler3::fetch::new_torrent;
 use dhtcrawler3::index::{self, IndexOptions, READY_MAX_LAG};
 use tokio::net::TcpListener;
 use tokio::time::Instant;
@@ -124,7 +123,7 @@ async fn drop_database(admin: &PgConnectOptions, name: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn crawl_index_search_and_deny() {
+async fn crawl_index_and_search() {
     let Some(url) = database_url() else {
         eprintln!("skipping the database end-to-end test: DATABASE_URL is not set");
         return;
@@ -174,7 +173,6 @@ async fn scenario(options: PgConnectOptions) {
     let store = Store::connect_with(options, POOL_SIZE).await.unwrap();
     let mut out: Vec<u8> = Vec::new();
     admin::migrate(&store, &mut out).await.unwrap();
-    let policy = seed_policy();
 
     // --- Crawl: discovery → pending → fetch → torrents ---
     let network = Network::start(NETWORK_NODES).await;
@@ -185,8 +183,8 @@ async fn scenario(options: PgConnectOptions) {
         &[("a/one.txt", 100), ("b/two.bin", 2_000), ("c.nfo", 30)],
     ))
     .await;
-    let blocked = Seeder::start(info_dict("e2e pthc set", &[("x.txt", 1)])).await;
-    for seeder in [&clean, &blocked] {
+    let second = Seeder::start(info_dict("other second set", &[("x.txt", 1)])).await;
+    for seeder in [&clean, &second] {
         announce(nodes[1], nodes[2], seeder).await;
     }
     note(started, "torrents announced");
@@ -195,7 +193,6 @@ async fn scenario(options: PgConnectOptions) {
     let crawler = Crawler::start(
         crawl_options(network.seed()),
         store.clone(),
-        Arc::clone(&policy),
         Arc::new(AtomicBool::new(false)),
         cancel.clone(),
     )
@@ -203,27 +200,19 @@ async fn scenario(options: PgConnectOptions) {
     .unwrap();
 
     let clean_key = AnyKey::V1OrDht(clean.key);
-    wait_until("the torrent to be stored", Duration::from_secs(40), || {
-        let store = store.clone();
-        async move {
-            retry_failed_fetches(&store).await;
-            store.get_by_key(&clean_key).await.unwrap().is_some()
-        }
-    })
-    .await;
-    wait_until(
-        "the blocked torrent to be denied",
-        Duration::from_secs(40),
-        || {
-            let (store, key) = (store.clone(), blocked.key);
+    let second_key = AnyKey::V1OrDht(second.key);
+    for (key, what) in [(&clean_key, "first"), (&second_key, "second")] {
+        wait_until("the torrent to be stored", Duration::from_secs(40), || {
+            let store = store.clone();
+            let key = *key;
             async move {
                 retry_failed_fetches(&store).await;
-                store.is_denied(&[key.as_bytes()]).await.unwrap()
+                store.get_by_key(&key).await.unwrap().is_some()
             }
-        },
-    )
-    .await;
-    note(started, "crawled");
+        })
+        .await;
+        note(started, &format!("crawled the {what} torrent"));
+    }
 
     let record = store.get_by_key(&clean_key).await.unwrap().unwrap();
     assert_eq!(record.name, "e2e test torrent");
@@ -231,19 +220,14 @@ async fn scenario(options: PgConnectOptions) {
     assert_eq!(record.files.len(), 3);
     assert_eq!(record.total_size, 2_130);
     assert_eq!(record.info_hash_v1, Some(clean.key));
+    assert!(store.get_by_key(&second_key).await.unwrap().is_some());
     let stats = store.stats().await.unwrap();
-    assert_eq!(stats.torrents, 1);
+    assert_eq!(stats.torrents, 2);
     assert_eq!(stats.pending, 0, "both keys left the queue");
-    assert_eq!(stats.denylisted, 1);
     let today = store.daily_stats(1).await.unwrap();
     let today = today.last().expect("a stats row for today");
     assert!(today.discovered >= 2, "{today:?}");
-    assert!(today.fetched >= 1, "{today:?}");
-    assert!(today.blocked >= 1, "{today:?}");
-    let denied = store.list_denied(10, 0).await.unwrap();
-    assert_eq!(denied.len(), 1);
-    assert_eq!(denied[0].reason, DenyReason::CsamAuto);
-    assert_eq!(denied[0].created_by, "crawler");
+    assert!(today.fetched >= 2, "{today:?}");
 
     // --- Index ---
     let index_dir = tempfile::tempdir().unwrap();
@@ -257,7 +241,6 @@ async fn scenario(options: PgConnectOptions) {
             ready_max_lag: READY_MAX_LAG,
         },
         store.clone(),
-        Arc::clone(&policy),
         Arc::clone(&index_ready),
         cancel.clone(),
     ));
@@ -282,8 +265,6 @@ async fn scenario(options: PgConnectOptions) {
         listen: "127.0.0.1:0".parse().unwrap(),
         base_url: BASE_URL.into(),
         site_name: "dhtcrawler3 e2e".into(),
-        contact_email: "abuse@example.org".into(),
-        dmca_agent: String::new(),
         hsts: false,
         trusted_proxies: Vec::new(),
         seeder_freshness: Duration::from_secs(7 * 24 * 60 * 60),
@@ -293,7 +274,6 @@ async fn scenario(options: PgConnectOptions) {
         WebDeps {
             backend: store.clone(),
             search: search.clone(),
-            policy: Arc::clone(&policy),
         },
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -315,53 +295,6 @@ async fn scenario(options: PgConnectOptions) {
     assert_eq!(detail.status, 200, "{detail:?}");
     assert!(detail.body.contains("e2e test torrent"));
     assert!(detail.body.contains("two.bin"));
-
-    // --- Admin deny: removed for good ---
-    let outcome = admin::deny_add(
-        &store,
-        &clean_key,
-        DenyReason::Csam,
-        Some("e2e takedown"),
-        &mut out,
-    )
-    .await
-    .unwrap();
-    assert!(outcome.newly_denied);
-    assert_eq!(outcome.tombstoned, 1);
-    assert!(store.is_denied(&[clean.key.as_bytes()]).await.unwrap());
-    let meta = dc3_torrent::parse_info(&clean.info).unwrap();
-    assert!(matches!(
-        store
-            .complete(&clean.key, &new_torrent(clean.key, meta))
-            .await,
-        Err(StoreError::Denied)
-    ));
-    let seen_again = store
-        .observe(
-            &[Observation {
-                key: clean.key,
-                sightings: 1,
-                priority: true,
-            }],
-            1_000,
-        )
-        .await
-        .unwrap();
-    // The tombstoned row still holds the key, so it counts as known; either
-    // way it is never queued again.
-    assert_eq!(seen_again.known + seen_again.denied, 1, "{seen_again:?}");
-    assert_eq!(seen_again.queued, 0);
-    assert_eq!(store.stats().await.unwrap().pending, 0);
-    let detail = http(web_addr, "GET", &detail_path, &[], b"").await;
-    assert_eq!(detail.status, 404, "{detail:?}");
-    // The policy rescan finds nothing new: the blocked torrent was never stored.
-    let rescan = admin::policy_rescan(&store, &policy, &mut out)
-        .await
-        .unwrap();
-    assert_eq!(rescan.matched, 0);
-    let printed = String::from_utf8(out).unwrap();
-    assert!(printed.contains("denied"), "{printed}");
-    note(started, "denied");
 
     // --- Shutdown ---
     cancel.cancel();

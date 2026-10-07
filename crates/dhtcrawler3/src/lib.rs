@@ -15,7 +15,7 @@
 //!   ([`metrics_server`]).
 //! * [`stores`]: the store operations the pipeline uses, as traits;
 //!   [`memstore`] is an in-memory implementation for tests.
-//! * [`policy`], [`logging`], [`signals`]: startup helpers.
+//! * [`logging`], [`signals`]: startup helpers.
 //!
 //! Every role stops gracefully when its `CancellationToken` is cancelled
 //! ([`signals`] cancels it on SIGINT and SIGTERM).
@@ -33,7 +33,6 @@ pub mod logging;
 pub mod memstore;
 pub mod metrics_server;
 pub mod peers;
-pub mod policy;
 pub mod roles;
 pub mod scrape;
 pub mod signals;

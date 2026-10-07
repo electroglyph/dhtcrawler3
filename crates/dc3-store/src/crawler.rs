@@ -1,5 +1,5 @@
-//! Crawler operations: observation, the lease queue, completion, denial and
-//! the policy rescan. Every method here needs the `dc3_crawler` user (or the
+//! Crawler operations: observation, the lease queue, completion and the
+//! scrape bookkeeping. Every method here needs the `dc3_crawler` user (or the
 //! owner).
 
 use std::collections::{BTreeMap, HashSet};
@@ -9,15 +9,14 @@ use dc3_core::DhtKey;
 use sqlx::PgConnection;
 
 use crate::types::{
-    DenyOutcome, DenyReason, LiveRow, NewTorrent, Observation, ObserveOutcome, PendingItem,
-    RemovalCooldown, ScrapeItem, files_to_json,
+    NewTorrent, Observation, ObserveOutcome, PendingItem, RemovalCooldown, ScrapeItem,
+    files_to_json,
 };
 use crate::{
     CountedTable, DailyCounter, EXACT_COUNT_THRESHOLD, FAIL_BASE_BACKOFF, FAIL_MAX_BACKOFF,
-    FEED_PAGE_MAX_BYTES, MAX_CLAIM, MAX_FEED_PAGE, MAX_FETCH_ATTEMPTS, MAX_NAME_CHARS,
-    MAX_PATH_CHARS, MAX_STORED_FILES, OBSERVE_CHUNK, Result, Store, StoreError, bump_daily,
-    check_actor, check_key_len, check_len, check_note, count_u64, estimated_rows, get, hex_of,
-    lock_change_shared, lock_keys, prefix, secs, to_i64, write_audit,
+    MAX_CLAIM, MAX_FETCH_ATTEMPTS, MAX_NAME_CHARS, MAX_PATH_CHARS, MAX_STORED_FILES, OBSERVE_CHUNK,
+    Result, Store, StoreError, bump_daily, check_key_len, check_len, count_u64, estimated_rows,
+    get, lock_change_shared, lock_keys, prefix, secs, to_i64,
 };
 
 /// Bumps `seen_count` of torrents stored under the given DHT keys. `change_seq`
@@ -46,11 +45,6 @@ UPDATE torrents t
   FROM input i
  WHERE t.info_hash_v1 = i.k OR substring(t.info_hash_v2 FROM 1 FOR 20) = i.k
 RETURNING i.k";
-
-const OBSERVE_DENIED_SQL: &str = "\
-SELECT DISTINCT substring(d.key FROM 1 FOR 20) AS k
-  FROM denylist d
- WHERE substring(d.key FROM 1 FOR 20) = ANY($1::bytea[])";
 
 /// Queues new keys and counts sightings of keys already queued.
 ///
@@ -141,14 +135,6 @@ INSERT INTO torrents (dht_key, info_hash_v1, info_hash_v2, name, total_size, fil
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, coalesce($11, now()), nextval('change_seq'))
 RETURNING id";
 
-const TOMBSTONE_SQL: &str = "\
-UPDATE torrents
-   SET name = '', files = '[]'::jsonb, files_truncated = false,
-       deleted_at = coalesce(deleted_at, now()),
-       change_seq = nextval('change_seq')
- WHERE dht_key = $1 OR info_hash_v1 = $1 OR substring(info_hash_v2 FROM 1 FOR 20) = $1
-RETURNING id";
-
 /// Claims rows due for a BEP 33 scrape and stamps the claim (`$2`/`$3` are
 /// the unknown/live intervals in seconds). Never-scraped rows
 /// (`last_scraped_at IS NULL`) are always due; unaware rows
@@ -162,7 +148,6 @@ UPDATE torrents t
  WHERE t.id IN (
         SELECT s.id FROM torrents s
          WHERE s.deleted_at IS NULL
-           AND NOT dc3_key_denied(s.dht_key, s.info_hash_v1, s.info_hash_v2)
            AND (s.last_scraped_at IS NULL
                 OR (s.seeders_est IS NULL
                     AND s.last_scraped_at IS NOT NULL
@@ -190,9 +175,8 @@ UPDATE torrents AS t
   FROM unnest($1::bigint[], $2::integer[], $3::integer[]) AS i(id, est, failures)
  WHERE t.id = i.id";
 
-/// Conditional scrape tombstone: wipes name/files like [`TOMBSTONE_SQL`]
-/// (without a denylist insert) but only when the row is still exactly as
-/// claimed, so a concurrent fetch is never clobbered.
+/// Conditional scrape tombstone: wipes name/files but only when the row is
+/// still exactly as claimed, so a concurrent fetch is never clobbered.
 const TOMBSTONE_DEAD_SQL: &str = "\
 UPDATE torrents
    SET name = '', files = '[]'::jsonb, files_truncated = false,
@@ -200,15 +184,16 @@ UPDATE torrents
        change_seq = nextval('change_seq')
  WHERE id = $1 AND deleted_at IS NULL AND last_seen_at = $2 AND change_seq = $3";
 
-/// Deletes scrape tombstones older than the grace, keeping denylist
-/// tombstones (the block record) forever.
+/// Deletes tombstones older than the grace, biggest first, so each sweep
+/// frees the most disk (win 5). Returns the number removed. The grace lets
+/// the indexer observably drop the document first (it sees `visible=false`
+/// through the change feed).
 const PURGE_TOMBSTONED_SQL: &str = "\
 DELETE FROM torrents
  WHERE id IN (
         SELECT t.id FROM torrents t
          WHERE t.deleted_at IS NOT NULL
            AND t.deleted_at < now() - make_interval(secs => $1)
-           AND NOT dc3_key_denied(t.dht_key, t.info_hash_v1, t.info_hash_v2)
          ORDER BY t.total_size DESC
          LIMIT $2)";
 
@@ -222,40 +207,13 @@ ON CONFLICT (key) DO UPDATE
        removals = removed_keys.removals + 1,
        sightings = 0";
 
-/// Rows of a [`Store::scan_live`] page: at most `$2` rows after id `$1`,
-/// stopping once the earlier rows hold `$3` bytes of text (the first row is
-/// always included). The sizes come from the JSON text of `files`, which is
-/// at least as long as its paths.
-const SCAN_LIVE_SQL: &str = "\
-WITH page AS (
-    SELECT t.id, octet_length(t.name)::bigint + octet_length(t.files::text) AS bytes
-      FROM torrents t
-     WHERE t.id > $1 AND t.deleted_at IS NULL
-     ORDER BY t.id
-     LIMIT $2
-), sized AS (
-    SELECT p.id,
-           coalesce(sum(p.bytes) OVER (ORDER BY p.id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0)
-               AS before
-      FROM page p
-)
-SELECT t.id, t.dht_key, t.name, x.paths
-  FROM sized s
-  JOIN torrents t ON t.id = s.id
- CROSS JOIN LATERAL (
-       SELECT coalesce(array_agg(f.e ->> 'p' ORDER BY f.o) FILTER (WHERE f.e ->> 'p' IS NOT NULL),
-                       '{}') AS paths
-         FROM jsonb_array_elements(t.files) WITH ORDINALITY AS f(e, o)) x
- WHERE s.before < $3
- ORDER BY s.id";
-
 impl Store {
     /// Records one batch of sightings in one transaction.
     ///
     /// * Keys of stored torrents get `seen_count += sightings` and
     ///   `last_seen_at = now()`; `change_seq` moves only when
     ///   floor(log2(seen_count)) changes.
-    /// * Other keys that are not denylisted add their sightings to
+    /// * Other keys add their sightings to
     ///   `pending.seen_count` when already queued, and are otherwise inserted
     ///   into `pending`.
     /// * While [`Store::pending_depth`] is at least `max_pending`, only
@@ -311,7 +269,6 @@ impl Store {
             let c = observe_chunk(&mut tx, chunk, gate).await?;
             out.known = out.known.saturating_add(c.known);
             out.queued = out.queued.saturating_add(c.queued);
-            out.denied = out.denied.saturating_add(c.denied);
             out.dropped = out.dropped.saturating_add(c.dropped);
         }
         bump_daily(
@@ -414,11 +371,10 @@ impl Store {
     /// Upserts by `dht_key`. A row stored under another key with the same v1 or
     /// v2 infohash is the same torrent and is updated instead. On update,
     /// `first_seen_at` is kept and the queue row's `seen_count` is added. A
-    /// tombstoned row is restored (possible only after [`Store::undeny`]).
+    /// tombstoned row is restored when the key is fetched again.
     /// Calling it again is harmless.
     ///
-    /// Returns the torrent id, or [`StoreError::Denied`] when any of the
-    /// torrent's keys is denylisted; the queue row is removed in that case too.
+    /// Returns the torrent id.
     /// A torrent that can never be stored (a size above `i64::MAX`, a name or
     /// path over its limit) fails with [`StoreError::Invalid`] before the
     /// database is touched; the caller should then [`Store::give_up`].
@@ -471,17 +427,6 @@ impl Store {
             .bind(key.as_bytes().as_slice())
             .execute(&mut *tx)
             .await?;
-
-        let denied: bool = sqlx::query_scalar("SELECT dc3_key_denied($1, $2, $3)")
-            .bind(key.as_bytes().as_slice())
-            .bind(v1.as_deref())
-            .bind(v2.as_deref())
-            .fetch_one(&mut *tx)
-            .await?;
-        if denied {
-            tx.commit().await?;
-            return Err(StoreError::Denied);
-        }
 
         let rows = sqlx::query(
             "SELECT id, dht_key, info_hash_v1, info_hash_v2 FROM torrents \
@@ -604,96 +549,9 @@ impl Store {
         Ok(res.rows_affected())
     }
 
-    /// True when any of `keys` (20 or 32 bytes each) is covered by the
-    /// denylist. Keys are compared by their 20-byte prefix, so a v2 infohash
-    /// and its truncated DHT key deny each other.
-    pub async fn is_denied(&self, keys: &[&[u8]]) -> Result<bool> {
-        let prefixes: Vec<Vec<u8>> = keys.iter().map(|k| prefix(k).to_vec()).collect();
-        if prefixes.is_empty() {
-            return Ok(false);
-        }
-        let denied: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM denylist d WHERE substring(d.key FROM 1 FOR 20) = ANY($1::bytea[]))",
-        )
-        .bind(&prefixes)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(denied)
-    }
-
-    /// Parallel deny mask over `keys`: `out[i]` is true when `keys[i]` is
-    /// covered by the denylist (20-byte prefix match, same as
-    /// [`Store::is_denied`]). One round-trip for the whole batch; an empty
-    /// input short-circuits without touching the database.
-    pub async fn denied_mask(&self, keys: &[&[u8]]) -> Result<Vec<bool>> {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-        let prefixes: Vec<Vec<u8>> = keys.iter().map(|k| prefix(k).to_vec()).collect();
-        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT DISTINCT substring(d.key FROM 1 FOR 20) FROM denylist d WHERE substring(d.key FROM 1 FOR 20) = ANY($1::bytea[])",
-        )
-        .bind(&prefixes)
-        .fetch_all(&self.pool)
-        .await?;
-        let hit: HashSet<&[u8]> = rows.iter().map(Vec::as_slice).collect();
-        Ok(prefixes
-            .iter()
-            .map(|p| hit.contains(p.as_slice()))
-            .collect())
-    }
-
-    /// Denies `key` (20 or 32 bytes) in one transaction: adds it to the
-    /// denylist (an existing entry is kept unchanged), tombstones every torrent
-    /// whose DHT key, v1 infohash or truncated v2 infohash equals the key's
-    /// 20-byte prefix (wiping name and files and bumping `change_seq`), deletes
-    /// the queue row, writes the audit log and, for a new entry, adds one to
-    /// `stats_daily.blocked`.
-    pub async fn deny(
-        &self,
-        key: &[u8],
-        reason: DenyReason,
-        note: Option<&str>,
-        actor: &str,
-    ) -> Result<DenyOutcome> {
-        let mut tx = self.pool.begin().await?;
-        let out = deny_in_tx(&mut tx, key, reason, note, actor).await?;
-        tx.commit().await?;
-        Ok(out)
-    }
-
-    /// Torrents that are not tombstoned (hidden ones included) with
-    /// `id > after_id`, in id order, for `policy rescan`. Returns at most
-    /// `limit` rows (capped at [`MAX_FEED_PAGE`]) and stops early once the
-    /// rows hold [`FEED_PAGE_MAX_BYTES`] of text, so only an empty page means
-    /// the scan is done. Continue from the last returned id.
-    pub async fn scan_live(&self, after_id: i64, limit: i64) -> Result<Vec<LiveRow>> {
-        self.scan_live_within(after_id, limit, FEED_PAGE_MAX_BYTES)
-            .await
-    }
-
-    /// [`Store::scan_live`] with an explicit byte budget.
-    pub(crate) async fn scan_live_within(
-        &self,
-        after_id: i64,
-        limit: i64,
-        max_bytes: i64,
-    ) -> Result<Vec<LiveRow>> {
-        if limit <= 0 {
-            return Ok(Vec::new());
-        }
-        let rows = sqlx::query(SCAN_LIVE_SQL)
-            .bind(after_id)
-            .bind(limit.min(MAX_FEED_PAGE))
-            .bind(max_bytes.max(1))
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(LiveRow::from_row).collect()
-    }
-
     /// Claims up to `limit` stored torrents due for a BEP 33 scrape, oldest
-    /// scrape first (never-scraped first). A row is due when it is visible
-    /// (not hidden, tombstoned or denylisted) and either never scraped, or
+    /// scrape first (never-scraped first). A row is due when it is not
+    /// tombstoned and either never scraped, or
     /// scraped longer ago than `unknown_interval` (still-unaware rows, whose
     /// `seeders_est` is NULL) or `live_interval` (rows with an estimate).
     ///
@@ -791,8 +649,7 @@ impl Store {
     /// The wipe is conditional on the row being unchanged since the claim
     /// (`last_seen_at` and `change_seq` snapshots): a concurrent fetch that
     /// revived or refreshed the row wins, and this call then records nothing
-    /// (returns false, without touching `removed_keys`). Denylist tombstones
-    /// are never touched here; only scrape deaths.
+    /// (returns false, without touching `removed_keys`).
     pub async fn tombstone_dead(
         &self,
         id: i64,
@@ -829,9 +686,9 @@ impl Store {
         Ok(true)
     }
 
-    /// Deletes up to `limit` scrape tombstones older than `grace`, biggest
-    /// first, so each sweep frees the most disk (win 5). Denylist tombstones
-    /// are never purged: they are the block record. Returns the number
+    /// Deletes up to `limit` tombstones older than `grace`, biggest
+    /// first, so each sweep frees the most disk (win 5).
+    /// Returns the number
     /// removed. The grace lets the indexer observably drop the document
     /// first (it sees `visible=false` through the change feed).
     pub async fn purge_tombstoned(&self, grace: Duration, limit: i64) -> Result<u64> {
@@ -1120,16 +977,7 @@ async fn observe_chunk(
     if rest.is_empty() {
         return Ok(out);
     }
-    let (keys, _) = columns(rest.iter().copied());
-    let denied: HashSet<Vec<u8>> = sqlx::query_scalar(OBSERVE_DENIED_SQL)
-        .bind(&keys)
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .collect();
-    out.denied = count_u64(denied.len());
-
-    let rest = rest.into_iter().filter(|m| !denied.contains(&m.key));
+    let rest = rest.into_iter();
     let (queue, count_only): (Vec<&Merged>, Vec<&Merged>) = match gate {
         QueueGate::Open => (rest.collect(), Vec::new()),
         QueueGate::PriorityOnly => rest.partition(|m| m.priority),
@@ -1178,66 +1026,4 @@ fn validate_torrent(t: &NewTorrent) -> Result<()> {
         return Err(StoreError::Invalid("piece_length must be positive".into()));
     }
     Ok(())
-}
-
-/// The body of [`Store::deny`], for use inside a larger transaction.
-pub(crate) async fn deny_in_tx(
-    conn: &mut PgConnection,
-    key: &[u8],
-    reason: DenyReason,
-    note: Option<&str>,
-    actor: &str,
-) -> Result<DenyOutcome> {
-    check_key_len(key)?;
-    check_note(note)?;
-    check_actor(actor)?;
-    let p = prefix(key);
-
-    lock_change_shared(conn).await?;
-    lock_keys(conn, &[p]).await?;
-
-    let newly_denied = sqlx::query(
-        "INSERT INTO denylist (key, reason, note, created_by) VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (key) DO NOTHING",
-    )
-    .bind(key)
-    .bind(reason.as_str())
-    .bind(note)
-    .bind(actor)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected()
-        > 0;
-
-    // A repeat deny must be a no-op for indexed content: re-running the
-    // tombstone would bump change_seq again and churn the indexer feed.
-    // (The pending cleanup below stays unconditional so a repeat deny
-    // still clears rows that arrived after the first deny.)
-    let ids: Vec<i64> = if newly_denied {
-        sqlx::query_scalar(TOMBSTONE_SQL)
-            .bind(p)
-            .fetch_all(&mut *conn)
-            .await?
-    } else {
-        Vec::new()
-    };
-    sqlx::query("DELETE FROM pending WHERE dht_key = $1")
-        .bind(p)
-        .execute(&mut *conn)
-        .await?;
-
-    let detail = serde_json::json!({
-        "reason": reason.as_str(),
-        "note": note,
-        "newly_denied": newly_denied,
-        "tombstoned_ids": ids,
-    });
-    write_audit(conn, actor, "deny", &hex_of(key), &detail).await?;
-    if newly_denied {
-        bump_daily(conn, DailyCounter::Blocked, 1).await?;
-    }
-    Ok(DenyOutcome {
-        newly_denied,
-        tombstoned: count_u64(ids.len()),
-    })
 }

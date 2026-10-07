@@ -68,12 +68,6 @@ pub(crate) struct SearchPage<'a> {
     pub next_href: Option<String>,
 }
 
-#[derive(Template)]
-#[template(path = "blocked.html")]
-pub(crate) struct BlockedPage<'a> {
-    pub page: PageMeta<'a>,
-}
-
 /// The facts shown about one torrent.
 pub(crate) struct TorrentView {
     pub name: String,
@@ -116,20 +110,6 @@ pub(crate) struct TorrentPage<'a> {
 #[template(path = "about.html")]
 pub(crate) struct AboutPage<'a> {
     pub page: PageMeta<'a>,
-}
-
-/// A contact address as a `mailto:` link.
-pub(crate) struct EmailView {
-    pub href: String,
-    pub text: String,
-}
-
-#[derive(Template)]
-#[template(path = "legal.html")]
-pub(crate) struct LegalPage<'a> {
-    pub page: PageMeta<'a>,
-    pub contact: Option<EmailView>,
-    pub dmca_agent: Option<&'a str>,
 }
 
 #[derive(Template)]

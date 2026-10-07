@@ -102,9 +102,6 @@ listen = "127.0.0.1:8080"
 # Public origin, used for CSRF checks on forms and in security.txt.
 base_url = "http://127.0.0.1:8080"
 site_name = "dhtcrawler3"
-# Shown on /legal and /.well-known/security.txt. Set these before going public.
-contact_email = ""
-dmca_agent = ""
 # Send Strict-Transport-Security. Only enable when served exclusively over HTTPS.
 hsts = false
 # Reverse proxies whose X-Forwarded-For header is trusted (CIDR list). Behind
@@ -114,10 +111,6 @@ trusted_proxies = []
 [metrics]
 # Prometheus endpoint for whichever role is running. Keep it off the public network.
 listen = "127.0.0.1:9100"
-
-[policy]
-# Extra blocked terms, appended to the built-in seed list. Empty = seed list only.
-terms_file = ""
 
 [log]
 # "json" or "pretty"

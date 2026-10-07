@@ -1,5 +1,5 @@
 //! Fetch workers (design §13): claim a key, find peers, fetch its metadata
-//! over BEP 9, verify and parse it, apply the policy, and store the result.
+//! over BEP 9, verify and parse it, and store the result.
 //!
 //! Each worker:
 //! 1. claims one key with a 120 s lease, renewed every 90 s while it works;
@@ -7,11 +7,9 @@
 //!    the address chokepoint and the per-destination limits;
 //! 3. tries up to 8 peers, 3 at a time, inside the global connection limit
 //!    and the metadata byte budget, all within 60 s;
-//! 4. verifies, parses and checks the name and every path against the
-//!    blocked terms;
-//! 5. finishes with `complete`, `fail`, `give_up` (verified metadata that
-//!    cannot be parsed or stored) or `deny` (`csam-auto` for blocked
-//!    terms, `private` for BEP 27 torrents).
+//! 4. verifies and parses the metadata;
+//! 5. finishes with `complete`, `fail` or `give_up` (verified metadata that
+//!    cannot be parsed or stored, or a BEP 27 private torrent).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -21,15 +19,14 @@ use std::time::Duration;
 use dc3_core::DhtKey;
 use dc3_dht::compact::canonical_addr;
 use dc3_peer::{BYTE_BUDGET_UNIT, FetchError, FetchLimits};
-use dc3_policy::TermMatcher;
-use dc3_store::{DenyReason, FileRow, NewTorrent, PendingItem, StoreError};
+use dc3_store::{FileRow, NewTorrent, PendingItem, StoreError};
 use dc3_torrent::TorrentMeta;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::admission::{METRIC_BLOCKED, SharedHints, take_hints};
+use crate::admission::{SharedHints, take_hints};
 use crate::peers::{OwnAddrs, PeerFilter, PeerSource};
 use crate::stores::CrawlStore;
 
@@ -75,12 +72,6 @@ pub const STORE_RETRY_BASE: Duration = Duration::from_secs(1);
 pub const STORE_RETRY_MAX: Duration = Duration::from_secs(30);
 /// Shortest lease renewal period accepted (guards against a zero period).
 const MIN_RENEW_INTERVAL: Duration = Duration::from_millis(10);
-/// Actor recorded for the crawler's own denials.
-pub const DENY_ACTOR: &str = "crawler";
-/// Note recorded when a name or path matched a blocked term.
-pub const BLOCKED_TERM_NOTE: &str = "blocked term";
-/// Note recorded for BEP 27 private torrents.
-pub const PRIVATE_NOTE: &str = "BEP 27 private torrent";
 
 const METRIC_FETCH: &str = "dc3_fetch_total";
 const METRIC_DESTINATION_SKIPPED: &str = "dc3_destination_skipped_total";
@@ -150,26 +141,20 @@ pub enum FetchOutcome {
     FetchFailed,
     /// The metadata was verified but could not be parsed.
     ParseError,
-    /// The name or a path matched a blocked term; the key was denied.
-    Blocked,
-    /// A BEP 27 private torrent; the key was denied.
+    /// A BEP 27 private torrent; the key is given up.
     Private,
-    /// The store refused it: a key is on the denylist.
-    Denied,
     /// The final database operation failed.
     StoreError,
 }
 
 impl FetchOutcome {
     /// Every outcome.
-    pub const ALL: [FetchOutcome; 8] = [
+    pub const ALL: [FetchOutcome; 6] = [
         FetchOutcome::Ok,
         FetchOutcome::NoPeers,
         FetchOutcome::FetchFailed,
         FetchOutcome::ParseError,
-        FetchOutcome::Blocked,
         FetchOutcome::Private,
-        FetchOutcome::Denied,
         FetchOutcome::StoreError,
     ];
 
@@ -180,9 +165,7 @@ impl FetchOutcome {
             FetchOutcome::NoPeers => "no_peers",
             FetchOutcome::FetchFailed => "fetch_failed",
             FetchOutcome::ParseError => "parse_error",
-            FetchOutcome::Blocked => "blocked",
             FetchOutcome::Private => "private",
-            FetchOutcome::Denied => "denied",
             FetchOutcome::StoreError => "store_error",
         }
     }
@@ -434,9 +417,6 @@ impl Drop for DestPermit {
 pub enum Inspection {
     /// It does not hash to the key.
     Mismatch,
-    /// The name or a path matched a blocked term (checked even when parsing
-    /// failed part-way, since the visitor saw those entries).
-    Blocked,
     /// It could not be parsed.
     Invalid,
     /// A BEP 27 private torrent.
@@ -445,21 +425,13 @@ pub enum Inspection {
     Valid(TorrentMeta),
 }
 
-/// Verifies `info` against `key`, parses it, and matches the name and every
-/// parsed path against `policy`. CPU-bound; run it off the async threads.
-pub fn inspect(key: &DhtKey, info: &[u8], policy: &TermMatcher) -> Inspection {
+/// Verifies `info` against `key` and parses it. CPU-bound; run it off the
+/// async threads.
+pub fn inspect(key: &DhtKey, info: &[u8]) -> Inspection {
     if dc3_torrent::verify(key, info).is_none() {
         return Inspection::Mismatch;
     }
-    let mut blocked = false;
-    let parsed = dc3_torrent::parse_info_visit(info, &mut |text| {
-        if !blocked && policy.matches_affixed(text) {
-            blocked = true;
-        }
-    });
-    if blocked {
-        return Inspection::Blocked;
-    }
+    let parsed = dc3_torrent::parse_info_visit(info, &mut |_| {});
     match parsed {
         Err(_) => Inspection::Invalid,
         Ok(meta) if meta.private => Inspection::Private,
@@ -538,7 +510,6 @@ enum Obtained {
 pub struct Fetcher<S, P> {
     store: S,
     peers: P,
-    policy: Arc<TermMatcher>,
     filter: PeerFilter,
     hints: SharedHints,
     limiter: Arc<DestinationLimiter>,
@@ -572,7 +543,6 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
     pub fn new(
         store: S,
         peers: P,
-        policy: Arc<TermMatcher>,
         filter: PeerFilter,
         hints: SharedHints,
         limits: FetchLimitsConfig,
@@ -588,7 +558,6 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         Self {
             store,
             peers,
-            policy,
             filter,
             hints,
             limiter: DestinationLimiter::new(destinations),
@@ -741,38 +710,19 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
     }
 
     async fn store_metadata(&self, key: DhtKey, info: Vec<u8>) -> FetchOutcome {
-        let policy = Arc::clone(&self.policy);
-        let inspection = tokio::task::spawn_blocking(move || inspect(&key, &info, &policy))
+        let inspection = tokio::task::spawn_blocking(move || inspect(&key, &info))
             .await
             .unwrap_or(Inspection::Invalid);
         match inspection {
             Inspection::Mismatch => self.give_back(key, FetchOutcome::FetchFailed).await,
             // Verified metadata that does not parse never will: stop now.
             Inspection::Invalid => self.give_up(key, FetchOutcome::ParseError).await,
-            Inspection::Blocked => {
-                metrics::counter!(METRIC_BLOCKED, "reason" => "blocked_term").increment(1);
-                self.deny(
-                    key,
-                    DenyReason::CsamAuto,
-                    BLOCKED_TERM_NOTE,
-                    FetchOutcome::Blocked,
-                )
-                .await
-            }
-            Inspection::Private => {
-                metrics::counter!(METRIC_BLOCKED, "reason" => "private").increment(1);
-                self.deny(
-                    key,
-                    DenyReason::Private,
-                    PRIVATE_NOTE,
-                    FetchOutcome::Private,
-                )
-                .await
-            }
+            // BEP 27 private torrents cannot be fetched by design: stop
+            // now, without keeping any record of the key.
+            Inspection::Private => self.give_up(key, FetchOutcome::Private).await,
             Inspection::Valid(meta) => {
                 match self.store.complete(&key, &new_torrent(key, meta)).await {
                     Ok(_) => FetchOutcome::Ok,
-                    Err(StoreError::Denied) => FetchOutcome::Denied,
                     // The store can never accept this torrent (e.g. a size
                     // above i64::MAX); retrying would loop on it forever.
                     Err(e @ StoreError::Invalid(_)) => {
@@ -803,26 +753,6 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
             Ok(_) => outcome,
             Err(e) => {
                 tracing::warn!(error = %e, "recording a failed fetch failed");
-                FetchOutcome::StoreError
-            }
-        }
-    }
-
-    async fn deny(
-        &self,
-        key: DhtKey,
-        reason: DenyReason,
-        note: &str,
-        outcome: FetchOutcome,
-    ) -> FetchOutcome {
-        match self
-            .store
-            .deny(key.as_bytes(), reason, Some(note), DENY_ACTOR)
-            .await
-        {
-            Ok(_) => outcome,
-            Err(e) => {
-                tracing::warn!(error = %e, "denying a fetched torrent failed");
                 FetchOutcome::StoreError
             }
         }
@@ -1009,9 +939,7 @@ mod tests {
                 "no_peers",
                 "fetch_failed",
                 "parse_error",
-                "blocked",
                 "private",
-                "denied",
                 "store_error"
             ]
         );
@@ -1135,16 +1063,11 @@ mod tests {
         dc3_torrent::parse_info(info).unwrap().info_hash_v1.unwrap()
     }
 
-    fn seed_policy() -> Arc<TermMatcher> {
-        Arc::new(dc3_policy::try_seed().unwrap())
-    }
-
     #[test]
     fn inspection() {
-        let policy = seed_policy();
         let good = info_dict("ubuntu images", &["a/one.iso", "b/two.iso"], false);
         let k = key_of(&good);
-        match inspect(&k, &good, &policy) {
+        match inspect(&k, &good) {
             Inspection::Valid(meta) => {
                 assert_eq!(meta.name, "ubuntu images");
                 let t = new_torrent(k, meta);
@@ -1154,29 +1077,9 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(
-            inspect(&DhtKey([0; 20]), &good, &policy),
-            Inspection::Mismatch
-        );
-        let named = info_dict("some PTHC stuff", &["x.txt"], false);
-        assert_eq!(
-            inspect(&key_of(&named), &named, &policy),
-            Inspection::Blocked
-        );
-        let pathed = info_dict(
-            "holiday",
-            &["ok.txt", "deep/p.t.h.c/x.txt", "hussyfan/y"],
-            false,
-        );
-        assert_eq!(
-            inspect(&key_of(&pathed), &pathed, &policy),
-            Inspection::Blocked
-        );
+        assert_eq!(inspect(&DhtKey([0; 20]), &good), Inspection::Mismatch);
         let private = info_dict("tracker only", &["x.txt"], true);
-        assert_eq!(
-            inspect(&key_of(&private), &private, &policy),
-            Inspection::Private
-        );
+        assert_eq!(inspect(&key_of(&private), &private), Inspection::Private);
         // The test SHA-1 agrees with dc3-torrent.
         assert_eq!(DhtKey(sha1(&good)), k);
         assert_eq!(
@@ -1185,31 +1088,11 @@ mod tests {
         );
         // Verified but unparseable: not a torrent, or a negative length.
         let junk = dc3_bencode::encode(&OwnedValue::Dict(BTreeMap::new()));
-        assert_eq!(
-            inspect(&DhtKey(sha1(&junk)), &junk, &policy),
-            Inspection::Invalid
-        );
+        assert_eq!(inspect(&DhtKey(sha1(&junk)), &junk), Inspection::Invalid);
         let negative = info_dict_sized("clean name", &[("a.txt", 5), ("b.txt", -1)], false);
         assert_eq!(
-            inspect(&DhtKey(sha1(&negative)), &negative, &policy),
+            inspect(&DhtKey(sha1(&negative)), &negative),
             Inspection::Invalid
-        );
-        // A blocked term seen before the parse error still blocks.
-        let both = info_dict_sized("clean", &[("pthc.txt", 5), ("b.txt", -1)], false);
-        assert_eq!(
-            inspect(&DhtKey(sha1(&both)), &both, &policy),
-            Inspection::Blocked
-        );
-        // Short seeds hidden in affixes block too, matching display.
-        let affixed_name = info_dict("xpthc movie", &["ok.txt"], false);
-        assert_eq!(
-            inspect(&key_of(&affixed_name), &affixed_name, &policy),
-            Inspection::Blocked
-        );
-        let affixed_path = info_dict("holiday", &["xpthc/a.jpg"], false);
-        assert_eq!(
-            inspect(&key_of(&affixed_path), &affixed_path, &policy),
-            Inspection::Blocked
         );
     }
 
@@ -1262,7 +1145,6 @@ mod tests {
         Arc::new(Fetcher::new(
             store.clone(),
             peers,
-            seed_policy(),
             filter,
             shared_hints(&AdmissionTuning::default()),
             FetchLimitsConfig {
@@ -1354,19 +1236,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_stores_denies_and_fails() {
-        let good = info_dict("fetch test", &["a.txt", "b/c.txt"], false);
-        let blocked = info_dict("fetch test", &["pthc/c.txt"], false);
+    async fn process_stores_and_fails() {
+        let first = info_dict("fetch test", &["a.txt", "b/c.txt"], false);
+        let second = info_dict("fetch test second", &["x.txt"], false);
         let private = info_dict("private test", &["a.txt"], true);
         let seeders = [
-            seeder(&good).await,
-            seeder(&blocked).await,
+            seeder(&first).await,
+            seeder(&second).await,
             seeder(&private).await,
         ];
         let store = MemoryStore::new();
         for (info, addr, expected) in [
-            (&good, seeders[0], FetchOutcome::Ok),
-            (&blocked, seeders[1], FetchOutcome::Blocked),
+            (&first, seeders[0], FetchOutcome::Ok),
+            (&second, seeders[1], FetchOutcome::Ok),
             (&private, seeders[2], FetchOutcome::Private),
         ] {
             let k = key_of(info);
@@ -1378,27 +1260,14 @@ mod tests {
             let f = fetcher(&store, FixedPeers(vec![dead_addr, addr]));
             assert_eq!(f.process(&item(k)).await, expected);
         }
-        let good_key = key_of(&good);
-        let stored = store.torrent(&good_key).unwrap();
+        let first_key = key_of(&first);
+        let stored = store.torrent(&first_key).unwrap();
         assert_eq!(stored.name, "fetch test");
         assert_eq!(stored.files.len(), 2);
-        let denial = store.denial(key_of(&blocked).as_bytes()).unwrap();
-        assert_eq!(denial.reason, DenyReason::CsamAuto);
-        assert_eq!(denial.actor, DENY_ACTOR);
-        assert_eq!(denial.note.as_deref(), Some(BLOCKED_TERM_NOTE));
-        assert!(store.torrent(&key_of(&blocked)).is_none());
-        assert_eq!(
-            store.denial(key_of(&private).as_bytes()).unwrap().reason,
-            DenyReason::Private
-        );
+        assert!(store.torrent(&key_of(&second)).is_some());
+        // A private torrent is given up at once: not stored, never claimed.
+        assert!(store.torrent(&key_of(&private)).is_none());
         assert!(store.pending_keys().is_empty());
-
-        // A denied key is refused by the store.
-        let again = info_dict("denied later", &["a.txt"], false);
-        let k = key_of(&again);
-        store.preload_denial(k.as_bytes(), DenyReason::Dmca);
-        let f = fetcher(&store, FixedPeers(vec![seeder(&again).await]));
-        assert_eq!(f.process(&item(k)).await, FetchOutcome::Denied);
 
         // No peers at all.
         let k = DhtKey([9; 20]);
@@ -1413,7 +1282,6 @@ mod tests {
         let f = Arc::new(Fetcher::new(
             store.clone(),
             FixedPeers(vec![own, zero]),
-            seed_policy(),
             PeerFilter {
                 allow_private: true,
                 by_endpoint: false,
@@ -1429,7 +1297,7 @@ mod tests {
         assert_eq!(f.process(&item(k)).await, FetchOutcome::NoPeers);
 
         // A peer that serves the wrong data: the fetch fails.
-        let wrong = seeder(&good).await;
+        let wrong = seeder(&first).await;
         let other = DhtKey([8; 20]);
         store.enqueue(other);
         let f = fetcher(&store, FixedPeers(vec![wrong]));

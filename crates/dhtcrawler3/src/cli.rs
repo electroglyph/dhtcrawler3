@@ -8,9 +8,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use clap::{Parser, Subcommand, ValueEnum};
-use dc3_core::AnyKey;
-use dc3_store::{DenyReason, MAX_PAGE};
+use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 
 use crate::admin;
@@ -57,12 +55,6 @@ pub enum Command {
         #[arg(long)]
         migrate: bool,
     },
-    /// Manage the denylist.
-    #[command(subcommand)]
-    Deny(DenyCommand),
-    /// Content-policy tasks.
-    #[command(subcommand)]
-    Policy(PolicyCommand),
     /// Show totals and the counters of the last days.
     Stats,
     /// Check the configuration and print it without secrets.
@@ -72,64 +64,6 @@ pub enum Command {
         /// For example http://127.0.0.1:9100/readyz
         url: String,
     },
-}
-
-fn parse_key(text: &str) -> Result<AnyKey, String> {
-    admin::parse_key(text)
-}
-
-/// `deny` subcommands.
-#[derive(Debug, Subcommand)]
-pub enum DenyCommand {
-    /// Deny a key: remove its torrent now and refuse it from now on.
-    Add {
-        /// 40-hex (or 32-base32) DHT or v1 key, or a 64-hex v2 infohash.
-        #[arg(value_parser = parse_key)]
-        key: AnyKey,
-        #[arg(long, value_enum)]
-        reason: DenyReasonArg,
-        /// Free text for the audit trail, for example a notice number.
-        #[arg(long)]
-        note: Option<String>,
-    },
-    /// Take a key off the denylist.
-    Remove {
-        #[arg(value_parser = parse_key)]
-        key: AnyKey,
-    },
-    /// List denied keys, newest first.
-    List {
-        #[arg(long, default_value_t = admin::DEFAULT_LIST_LIMIT,
-              value_parser = clap::value_parser!(i64).range(1..=MAX_PAGE))]
-        limit: i64,
-    },
-}
-
-/// `policy` subcommands.
-#[derive(Debug, Subcommand)]
-pub enum PolicyCommand {
-    /// Deny every stored torrent that matches the current blocked-term list.
-    Rescan,
-}
-
-/// Reasons an admin may give for a denial.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum DenyReasonArg {
-    Dmca,
-    Csam,
-    Abuse,
-    Other,
-}
-
-impl From<DenyReasonArg> for DenyReason {
-    fn from(r: DenyReasonArg) -> Self {
-        match r {
-            DenyReasonArg::Dmca => DenyReason::Dmca,
-            DenyReasonArg::Csam => DenyReason::Csam,
-            DenyReasonArg::Abuse => DenyReason::Abuse,
-            DenyReasonArg::Other => DenyReason::Other,
-        }
-    }
 }
 
 /// An error and its causes on one line. A cause whose text the message so
@@ -233,23 +167,6 @@ async fn dispatch(
             admin::migrate(&store, out).await?;
             Ok(())
         }
-        Command::Deny(cmd) => {
-            let store = roles::connect(&cfg, DbRole::Main).await?;
-            match cmd {
-                DenyCommand::Add { key, reason, note } => {
-                    admin::deny_add(&store, &key, reason.into(), note.as_deref(), out).await?;
-                }
-                DenyCommand::Remove { key } => admin::deny_remove(&store, &key, out).await?,
-                DenyCommand::List { limit } => admin::deny_list(&store, limit, out).await?,
-            }
-            Ok(())
-        }
-        Command::Policy(PolicyCommand::Rescan) => {
-            let store = roles::connect(&cfg, DbRole::Main).await?;
-            let policy = crate::policy::load_shared(cfg.policy.terms_file.clone()).await?;
-            admin::policy_rescan(&store, &policy, out).await?;
-            Ok(())
-        }
         Command::Stats => {
             let store = roles::connect(&cfg, DbRole::Main).await?;
             admin::stats(&store, out).await?;
@@ -282,7 +199,6 @@ mod tests {
 
     #[test]
     fn commands_parse() {
-        let key = "ab".repeat(20);
         let cli = parse(&["--config", "/tmp/x.toml", "crawl"]).unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/x.toml")));
         assert!(matches!(cli.command, Command::Crawl));
@@ -300,28 +216,6 @@ mod tests {
         for simple in ["migrate", "web", "stats", "check-config"] {
             assert!(parse(&[simple]).is_ok(), "{simple}");
         }
-        match parse(&["deny", "add", &key, "--reason", "dmca", "--note", "n #1"])
-            .unwrap()
-            .command
-        {
-            Command::Deny(DenyCommand::Add {
-                key: k,
-                reason,
-                note,
-            }) => {
-                assert_eq!(admin::key_hex(&k), key);
-                assert_eq!(DenyReason::from(reason), DenyReason::Dmca);
-                assert_eq!(note.as_deref(), Some("n #1"));
-            }
-            other => panic!("{other:?}"),
-        }
-        let v2 = "cd".repeat(32);
-        assert!(parse(&["deny", "remove", &v2]).is_ok());
-        match parse(&["deny", "list"]).unwrap().command {
-            Command::Deny(DenyCommand::List { limit }) => assert_eq!(limit, 100),
-            other => panic!("{other:?}"),
-        }
-        assert!(parse(&["policy", "rescan"]).is_ok());
         match parse(&["healthcheck", "http://127.0.0.1:9100/readyz"])
             .unwrap()
             .command
@@ -333,18 +227,13 @@ mod tests {
 
     #[test]
     fn usage_errors_exit_with_2() {
-        let key = "ab".repeat(20);
         for args in [
             vec![],
             vec!["frobnicate"],
-            vec!["deny", "add", key.as_str()],
-            vec!["deny", "add", key.as_str(), "--reason", "csam-auto"],
-            vec!["deny", "add", "not-a-key", "--reason", "dmca"],
-            vec!["deny", "list", "--limit", "0"],
-            vec!["deny", "list", "--limit", "10001"],
+            vec!["deny"],
+            vec!["policy"],
             vec!["index", "--rebuild=maybe"],
             vec!["healthcheck"],
-            vec!["policy"],
         ] {
             let err = parse(&args).unwrap_err();
             assert_eq!(err.exit_code(), 2, "{args:?}: {err}");

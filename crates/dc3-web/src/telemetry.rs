@@ -12,8 +12,6 @@ pub mod metric_names {
     pub const SEARCH_SECONDS: &str = "dc3_search_seconds";
     /// Counter `{route}`: requests refused by the rate limiter.
     pub const RATE_LIMITED: &str = "dc3_rate_limited_total";
-    /// Counter: searches refused by the blocked-term policy.
-    pub const BLOCKED_QUERIES: &str = "dc3_blocked_queries_total";
 }
 
 /// Registers help texts for the metrics above with the installed recorder.
@@ -33,10 +31,5 @@ pub fn describe_metrics() {
         RATE_LIMITED,
         Unit::Count,
         "Requests refused by the rate limiter, by route template"
-    );
-    describe_counter!(
-        BLOCKED_QUERIES,
-        Unit::Count,
-        "Searches refused because they contain a blocked term"
     );
 }

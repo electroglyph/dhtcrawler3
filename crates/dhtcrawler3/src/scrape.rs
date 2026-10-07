@@ -17,7 +17,7 @@
 //!
 //! The tombstone is conditional on the row being unchanged since the claim,
 //! so a concurrent fetch wins the race. A periodic sweep purges old scrape
-//! tombstones (never denylist ones) and trims removal memory.
+//! tombstones and trims removal memory.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -190,28 +190,11 @@ impl<S: CrawlStore> Scraper<S> {
     /// outcomes in one batched stats-only write (win 7), then exports the
     /// batch's outcome shares (skipped for an empty batch: div-zero guard).
     async fn scrape_all(self: &Arc<Self>, items: &[ScrapeItem], stop: &CancellationToken) {
-        // One deny recheck for the whole batch: the claim filter already
-        // excluded denied rows, this only closes the race. A failed recheck
-        // skips the batch (the old per-row skip, one log line instead of N).
-        let keys: Vec<&[u8]> = items
-            .iter()
-            .map(|item| item.dht_key.as_bytes() as &[u8])
-            .collect();
-        let denied = match self.store.denied_mask(&keys).await {
-            Ok(denied) => denied,
-            Err(e) => {
-                tracing::error!(error = %e, rows = items.len(), "scrape deny recheck failed");
-                return;
-            }
-        };
         let semaphore = Arc::new(Semaphore::new(self.tuning.concurrency.max(1)));
         let mut in_flight = FuturesUnordered::new();
-        for (item, denied) in items.iter().zip(denied) {
+        for item in items.iter() {
             if stop.is_cancelled() {
                 break;
-            }
-            if denied {
-                continue;
             }
             let this = Arc::clone(self);
             let permit = Arc::clone(&semaphore);
@@ -309,11 +292,6 @@ impl<S: CrawlStore> Scraper<S> {
     /// dilute the shares). The lookup tries IPv4 first and skips IPv6 only
     /// on proven-live (win 3); death always needs both families.
     async fn scrape_one(&self, item: &ScrapeItem) -> Option<(ScrapeItem, ScrapeVerdict)> {
-        // Denied rows never reach this point: `scrape_all` filters the
-        // whole batch with one deny recheck up front (the claim filter
-        // already excluded them, the recheck only closes the race; hidden
-        // rows have no cheap check, recording stats on one is harmless and
-        // the tombstone below still cannot clobber fresh data).
         let report = self
             .dht
             .scrape_v4_first(
@@ -432,52 +410,5 @@ mod tests {
             ScrapeVerdict::Live { est: as_u32 }
         );
         assert_eq!(classify(&r, est), ScrapeVerdict::Dead { est: as_u32 });
-    }
-
-    /// The batch deny recheck is one store call, not one per row: with
-    /// every row denied no lookup may run, so this finishes without
-    /// touching the network (the loopback node is never spoken to).
-    #[tokio::test]
-    async fn scrape_all_rechecks_denials_once_for_the_whole_batch() {
-        use chrono::Utc;
-        use dc3_core::DhtKey;
-        use dc3_store::DenyReason;
-        use tokio::sync::mpsc;
-
-        use crate::memstore::MemoryStore;
-
-        let store = MemoryStore::new();
-        let keys = [DhtKey([1; 20]), DhtKey([2; 20]), DhtKey([3; 20])];
-        for key in &keys {
-            store.preload_denial(key.as_bytes(), DenyReason::Other);
-        }
-        let items: Vec<ScrapeItem> = keys
-            .iter()
-            .enumerate()
-            .map(|(i, key)| ScrapeItem {
-                id: i as i64,
-                dht_key: *key,
-                seeders_est: None,
-                scrape_failures: 0,
-                last_seen_at: Utc::now(),
-                change_seq: 0,
-            })
-            .collect();
-        let (tx, _rx) = mpsc::channel(16);
-        let dht = Dht::start(
-            dc3_dht::DhtConfig {
-                bind_v4: Some("127.0.0.1:0".parse().unwrap()),
-                bind_v6: None,
-                allow_private_addrs: true,
-                ..dc3_dht::DhtConfig::default()
-            },
-            tx,
-        )
-        .await
-        .unwrap();
-        let scraper = Arc::new(Scraper::new(store.clone(), dht, ScrapeTuning::default()));
-        scraper.scrape_all(&items, &CancellationToken::new()).await;
-        assert_eq!(store.deny_mask_calls(), 1);
-        assert_eq!(store.deny_calls(), 0);
     }
 }

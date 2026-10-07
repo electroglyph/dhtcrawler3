@@ -52,16 +52,6 @@ fn torrent(k: DhtKey, name: &str) -> NewTorrent {
     }
 }
 
-/// A v2-only torrent, keyed by its truncated hash.
-fn torrent_v2(h: InfoHashV2, name: &str) -> NewTorrent {
-    NewTorrent {
-        dht_key: h.truncated(),
-        info_hash_v1: None,
-        info_hash_v2: Some(h),
-        ..torrent(h.truncated(), name)
-    }
-}
-
 /// A torrent with `n` files named `dir/fNNN`.
 fn torrent_with_files(k: DhtKey, n: usize) -> NewTorrent {
     let files: Vec<FileRow> = (0..n)
@@ -125,16 +115,7 @@ async fn today(pool: &PgPool) -> DailyStats {
         discovered: 0,
         fetched: 0,
         fetch_failed: 0,
-        blocked: 0,
     })
-}
-
-async fn audit_count(pool: &PgPool, action: &str) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = $1")
-        .bind(action)
-        .fetch_one(pool)
-        .await
-        .unwrap()
 }
 
 async fn pending_seen(pool: &PgPool, k: DhtKey) -> Option<i64> {
@@ -180,14 +161,8 @@ async fn insert_bare_torrents(pool: &PgPool, n: i64) {
 
 #[test]
 fn enums_round_trip() {
-    for r in DenyReason::ALL {
-        assert_eq!(r.as_str().parse::<DenyReason>().unwrap(), *r);
-    }
-    assert_eq!(DenyReason::CsamAuto.as_str(), "csam-auto");
-    assert!("nope".parse::<DenyReason>().is_err());
     assert_eq!(key_lock_id(&[1, 2, 3, 4, 5]), 0x0102_0304);
     assert_eq!(key_lock_id(&[1]), 0x0100_0000);
-    assert_eq!(hex_of(&[0, 0xab]), "00ab");
 }
 
 #[test]
@@ -253,13 +228,13 @@ async fn migrations_and_ping(pool: PgPool) {
     .await
     .unwrap();
     assert!(gone);
-    let public_exec: bool = sqlx::query_scalar(
-        "SELECT has_function_privilege('public', 'dc3_key_denied(bytea, bytea, bytea)', 'EXECUTE')",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(!public_exec);
+    // The denylist write path is gone: no dc3_key_denied function exists.
+    let fn_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_proc WHERE proname = 'dc3_key_denied'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(fn_count, 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -282,13 +257,13 @@ async fn connections_get_session_settings(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn observe_unknown_known_and_denied(pool: PgPool) {
+async fn observe_unknown_and_known(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
-    let (a, b, c) = (key(1), key(2), key(3));
+    let (a, b) = (key(1), key(2));
 
-    // Unknown keys are queued; duplicates merge.
+    // Unknown keys are queued; duplicates merge; zero sightings are ignored.
     let o = s
-        .observe(&[obs(a, 1), obs(b, 2), obs(a, 3), obs(c, 0)], NO_LIMIT)
+        .observe(&[obs(a, 1), obs(b, 2), obs(a, 3), obs(key(3), 0)], NO_LIMIT)
         .await
         .unwrap();
     assert_eq!(
@@ -296,12 +271,11 @@ async fn observe_unknown_known_and_denied(pool: PgPool) {
         ObserveOutcome {
             known: 0,
             queued: 2,
-            denied: 0,
             dropped: 0
         }
     );
     assert_eq!(pending_seen(&pool, a).await, Some(4));
-    assert_eq!(pending_seen(&pool, c).await, None);
+    assert_eq!(pending_seen(&pool, key(3)).await, None);
     assert_eq!(today(&pool).await.discovered, 2);
 
     // Already pending: counted, not queued again.
@@ -309,28 +283,6 @@ async fn observe_unknown_known_and_denied(pool: PgPool) {
     assert_eq!(o, ObserveOutcome::default());
     assert_eq!(pending_seen(&pool, a).await, Some(5));
     assert_eq!(today(&pool).await.discovered, 2);
-
-    // Denied keys are not queued, including by a v2 hash whose prefix is the key.
-    let h = v2(9);
-    s.deny(h.as_bytes(), DenyReason::Dmca, None, "test")
-        .await
-        .unwrap();
-    s.deny(c.as_bytes(), DenyReason::Abuse, Some("n"), "test")
-        .await
-        .unwrap();
-    let o = s
-        .observe(&[obs(c, 1), prio(h.truncated(), 1)], NO_LIMIT)
-        .await
-        .unwrap();
-    assert_eq!(
-        o,
-        ObserveOutcome {
-            known: 0,
-            queued: 0,
-            denied: 2,
-            dropped: 0
-        }
-    );
 
     // Known keys: counted, not queued.
     let id = s.complete(&b, &torrent(b, "bee")).await.unwrap();
@@ -371,11 +323,7 @@ async fn observe_unknown_known_and_denied(pool: PgPool) {
 async fn observe_gates_new_keys_on_max_pending(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let known = key(1);
-    let denied = key(8);
     s.complete(&known, &torrent(known, "known")).await.unwrap();
-    s.deny(denied.as_bytes(), DenyReason::Other, None, "test")
-        .await
-        .unwrap();
     s.observe(&[obs(key(2), 1), obs(key(3), 1)], NO_LIMIT)
         .await
         .unwrap();
@@ -392,7 +340,6 @@ async fn observe_gates_new_keys_on_max_pending(pool: PgPool) {
                 obs(key(4), 1),
                 obs(key(5), 1),
                 prio(key(5), 1),
-                obs(denied, 1),
             ],
             2,
         )
@@ -403,7 +350,6 @@ async fn observe_gates_new_keys_on_max_pending(pool: PgPool) {
         ObserveOutcome {
             known: 1,
             queued: 1,
-            denied: 1,
             dropped: 1
         }
     );
@@ -428,7 +374,6 @@ async fn observe_gates_new_keys_on_max_pending(pool: PgPool) {
         ObserveOutcome {
             known: 0,
             queued: 1,
-            denied: 0,
             dropped: 1
         }
     );
@@ -1024,274 +969,6 @@ async fn complete_moves_change_seq_only_on_content_change(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn denied_mask_reports_each_key_in_one_round_trip(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-
-    // Empty input short-circuits without touching the database.
-    assert!(s.denied_mask(&[]).await.unwrap().is_empty());
-
-    let a = key(1);
-    let live = key(50);
-    let c_v2 = v2(3);
-    s.deny(a.as_bytes(), DenyReason::Dmca, None, "admin")
-        .await
-        .unwrap();
-    s.deny(c_v2.as_bytes(), DenyReason::Other, None, "admin")
-        .await
-        .unwrap();
-
-    // Denied, live, full v2, truncated v2: the mask matches `is_denied`
-    // position by position.
-    let c_trunc = c_v2.truncated();
-    let keys = [
-        a.as_bytes() as &[u8],
-        live.as_bytes(),
-        c_v2.as_bytes(),
-        c_trunc.as_bytes(),
-    ];
-    let mask = s.denied_mask(&keys).await.unwrap();
-    assert_eq!(mask, vec![true, false, true, true]);
-    for (key, denied) in keys.iter().zip(&mask) {
-        assert_eq!(s.is_denied(&[*key]).await.unwrap(), *denied);
-    }
-    // Duplicates report per position.
-    let mask = s
-        .denied_mask(&[live.as_bytes(), a.as_bytes(), live.as_bytes()])
-        .await
-        .unwrap();
-    assert_eq!(mask, vec![false, true, false]);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn deny_tombstones_by_each_key_type(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-
-    let a = key(1); // denied by DHT key
-    let b_v1 = key(2); // hybrid stored under truncated v2, denied by v1
-    let b_v2 = v2(2);
-    let c_v2 = v2(3); // v2-only, denied by full v2 hash
-    let d_v2 = v2(4); // hybrid stored under v1, denied by truncated v2 (20 bytes)
-    let d_v1 = key(40);
-
-    let ta = torrent(a, "alpha");
-    let tb = NewTorrent {
-        dht_key: b_v2.truncated(),
-        info_hash_v1: Some(b_v1),
-        info_hash_v2: Some(b_v2),
-        ..torrent(b_v2.truncated(), "bravo")
-    };
-    let tc = torrent_v2(c_v2, "charlie");
-    let td = NewTorrent {
-        info_hash_v2: Some(d_v2),
-        ..torrent(d_v1, "delta")
-    };
-    let live = key(50);
-    let tl = torrent(live, "live");
-
-    let ia = s.complete(&a, &ta).await.unwrap();
-    let ib = s.complete(&tb.dht_key, &tb).await.unwrap();
-    let ic = s.complete(&tc.dht_key, &tc).await.unwrap();
-    let id = s.complete(&d_v1, &td).await.unwrap();
-    let il = s.complete(&live, &tl).await.unwrap();
-
-    let mark0 = s.high_water_mark().await.unwrap().unwrap();
-    let rows = s.changes_since(0, mark0, 100).await.unwrap();
-    assert_eq!(rows.len(), 5);
-    assert!(rows.iter().all(|r| r.visible));
-    assert!(rows.windows(2).all(|w| w[0].change_seq < w[1].change_seq));
-    assert_eq!(rows[0].files_text, "a/one.txt\nb/two.bin");
-    assert_eq!(rows[0].name, "alpha");
-    assert_eq!(rows[1].info_hash_v2, Some(b_v2));
-
-    // Before: all visible by every key form.
-    assert!(
-        s.get_by_key(&AnyKey::V1OrDht(b_v1))
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(s.get_by_key(&AnyKey::V2(c_v2)).await.unwrap().is_some());
-    assert_eq!(s.get_many(&[il, ia, ib, ic, id]).await.unwrap().len(), 5);
-
-    // A pending row under a denied key is removed.
-    let pk = key(60);
-    s.observe(&[obs(pk, 1)], NO_LIMIT).await.unwrap();
-
-    let out = s
-        .deny(a.as_bytes(), DenyReason::Dmca, Some("notice 1"), "admin")
-        .await
-        .unwrap();
-    assert_eq!(
-        out,
-        DenyOutcome {
-            newly_denied: true,
-            tombstoned: 1
-        }
-    );
-    let out = s
-        .deny(a.as_bytes(), DenyReason::Other, None, "admin")
-        .await
-        .unwrap();
-    // A repeat deny is a no-op for indexed content: no re-tombstone, no
-    // change_seq bump.
-    let seq_before = change_seq_of(&pool, ia).await;
-    assert_eq!(
-        out,
-        DenyOutcome {
-            newly_denied: false,
-            tombstoned: 0
-        },
-        "idempotent"
-    );
-    assert_eq!(change_seq_of(&pool, ia).await, seq_before);
-    assert_eq!(
-        s.deny(b_v1.as_bytes(), DenyReason::Csam, None, "admin")
-            .await
-            .unwrap()
-            .tombstoned,
-        1
-    );
-    assert_eq!(
-        s.deny(c_v2.as_bytes(), DenyReason::Abuse, None, "admin")
-            .await
-            .unwrap()
-            .tombstoned,
-        1
-    );
-    assert_eq!(
-        s.deny(
-            d_v2.truncated().as_bytes(),
-            DenyReason::Other,
-            None,
-            "admin"
-        )
-        .await
-        .unwrap()
-        .tombstoned,
-        1
-    );
-    assert_eq!(
-        s.deny(pk.as_bytes(), DenyReason::Private, None, "crawler")
-            .await
-            .unwrap()
-            .tombstoned,
-        0
-    );
-    assert!(matches!(
-        s.deny(&[1, 2, 3], DenyReason::Other, None, "a").await,
-        Err(StoreError::Invalid(_))
-    ));
-    assert!(matches!(
-        s.deny(a.as_bytes(), DenyReason::Other, None, "").await,
-        Err(StoreError::Invalid(_))
-    ));
-
-    for idn in [ia, ib, ic, id] {
-        let r = raw_torrent(&pool, idn).await;
-        assert!(r.deleted_at.is_some());
-        assert_eq!(r.name, "");
-        assert!(r.files.is_empty());
-    }
-    assert_eq!(s.stats().await.unwrap().pending, 0);
-
-    // get_by_key: denied rows are gone under every key form.
-    for k in [
-        AnyKey::V1OrDht(a),
-        AnyKey::V1OrDht(b_v1),
-        AnyKey::V1OrDht(b_v2.truncated()),
-        AnyKey::V2(b_v2),
-        AnyKey::V2(c_v2),
-        AnyKey::V1OrDht(c_v2.truncated()),
-        AnyKey::V1OrDht(d_v1),
-        AnyKey::V2(d_v2),
-    ] {
-        assert!(s.get_by_key(&k).await.unwrap().is_none(), "{k:?}");
-    }
-    assert_eq!(
-        s.get_by_key(&AnyKey::V1OrDht(live))
-            .await
-            .unwrap()
-            .unwrap()
-            .id,
-        il
-    );
-
-    // get_many keeps order and drops invisible rows.
-    let many = s.get_many(&[il, ia, 9999, ib, il]).await.unwrap();
-    assert_eq!(many.iter().map(|r| r.id).collect::<Vec<_>>(), vec![il, il]);
-    assert!(s.get_many(&vec![1; MAX_GET_MANY + 1]).await.is_err());
-    assert!(s.get_many(&[]).await.unwrap().is_empty());
-
-    // The change feed reports the tombstones as invisible, with no text.
-    let mark1 = s.high_water_mark().await.unwrap().unwrap();
-    assert!(mark1 > mark0);
-    let changed = s.changes_since(mark0, mark1, 100).await.unwrap();
-    let ids: HashSet<i64> = changed.iter().map(|r| r.id).collect();
-    assert_eq!(ids, HashSet::from([ia, ib, ic, id]));
-    assert!(changed.iter().all(|r| !r.visible));
-    assert!(
-        changed
-            .iter()
-            .all(|r| r.files_text.is_empty() && r.name.is_empty())
-    );
-    assert!(s.changes_since(mark1, mark1, 100).await.unwrap().is_empty());
-    assert!(s.changes_since(0, mark1, 0).await.unwrap().is_empty());
-    assert_eq!(s.changes_since(0, mark1, 2).await.unwrap().len(), 2);
-
-    // is_denied by every form.
-    assert!(s.is_denied(&[a.as_bytes()]).await.unwrap());
-    assert!(
-        s.is_denied(&[key(77).as_bytes(), b_v1.as_bytes()])
-            .await
-            .unwrap()
-    );
-    assert!(s.is_denied(&[c_v2.truncated().as_bytes()]).await.unwrap());
-    assert!(s.is_denied(&[d_v2.as_bytes()]).await.unwrap());
-    assert!(
-        !s.is_denied(&[live.as_bytes(), key(77).as_bytes()])
-            .await
-            .unwrap()
-    );
-    assert!(!s.is_denied(&[]).await.unwrap());
-
-    // Completing a denied torrent fails and drops the queue row.
-    sqlx::query("INSERT INTO pending (dht_key) VALUES ($1)")
-        .bind(a.0.as_slice())
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert!(matches!(s.complete(&a, &ta).await, Err(StoreError::Denied)));
-    assert_eq!(s.stats().await.unwrap().pending, 0);
-    assert!(raw_torrent(&pool, ia).await.deleted_at.is_some());
-
-    // Denylist listing, stats and audit.
-    let listed = s.list_denied(100, 0).await.unwrap();
-    assert_eq!(listed.len(), 5);
-    let ea = listed.iter().find(|e| e.key == AnyKey::V1OrDht(a)).unwrap();
-    assert_eq!(
-        (ea.reason, ea.note.as_deref(), ea.created_by.as_str()),
-        (DenyReason::Dmca, Some("notice 1"), "admin")
-    );
-    assert!(listed.iter().any(|e| e.key == AnyKey::V2(c_v2)));
-    assert_eq!(s.list_denied(2, 4).await.unwrap().len(), 1);
-    assert_eq!(today(&pool).await.blocked, 5);
-    let st = s.stats().await.unwrap();
-    assert_eq!((st.torrents, st.denylisted), (1, 5));
-    assert_eq!(audit_count(&pool, "deny").await, 6);
-
-    // Undeny removes the entry but leaves the tombstone; a new fetch restores it.
-    assert!(s.undeny(a.as_bytes(), "admin").await.unwrap());
-    assert!(!s.undeny(a.as_bytes(), "admin").await.unwrap());
-    assert!(!s.is_denied(&[a.as_bytes()]).await.unwrap());
-    assert!(s.get_by_key(&AnyKey::V1OrDht(a)).await.unwrap().is_none());
-    assert_eq!(s.complete(&a, &ta).await.unwrap(), ia);
-    let restored = s.get_by_key(&AnyKey::V1OrDht(a)).await.unwrap().unwrap();
-    assert_eq!(restored.name, "alpha");
-    assert_eq!(restored.files.len(), 2);
-    assert_eq!(audit_count(&pool, "undeny").await, 2);
-}
-
-#[sqlx::test(migrations = "./migrations")]
 async fn high_water_mark_waits_for_writers(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let id = s.complete(&key(1), &torrent(key(1), "one")).await.unwrap();
@@ -1459,73 +1136,6 @@ async fn change_feed_pages_within_the_byte_budget(pool: PgPool) {
     insert_bare_torrents(&pool, MAX_FEED_PAGE + 1).await;
     let mark = s.high_water_mark().await.unwrap().unwrap();
     assert_eq!(s.changes_since(0, mark, i64::MAX).await.unwrap().len(), cap);
-    assert_eq!(s.scan_live(0, i64::MAX).await.unwrap().len(), cap);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn scan_live_pages_in_id_order(pool: PgPool) {
-    let s = Store::from_pool(pool.clone());
-    let t1 = s.complete(&key(1), &torrent(key(1), "one")).await.unwrap();
-    let t2 = s.complete(&key(2), &torrent(key(2), "two")).await.unwrap();
-    let t3 = s
-        .complete(&key(3), &torrent(key(3), "three"))
-        .await
-        .unwrap();
-    let h = v2(4);
-    let t4 = s
-        .complete(&h.truncated(), &torrent_v2(h, "four"))
-        .await
-        .unwrap();
-    let t5 = s
-        .complete(&key(5), &torrent_with_files(key(5), 3))
-        .await
-        .unwrap();
-    // Tombstoned rows are not scanned.
-    s.deny(key(3).as_bytes(), DenyReason::Dmca, None, "admin")
-        .await
-        .unwrap();
-
-    let p1 = s.scan_live(0, 2).await.unwrap();
-    assert_eq!(p1.iter().map(|r| r.id).collect::<Vec<_>>(), vec![t1, t2]);
-    assert_eq!(
-        p1[0],
-        LiveRow {
-            id: t1,
-            dht_key: key(1),
-            name: "one".into(),
-            paths: vec!["a/one.txt".into(), "b/two.bin".into()],
-        }
-    );
-    let p2 = s.scan_live(p1[1].id, 2).await.unwrap();
-    assert_eq!(p2.iter().map(|r| r.id).collect::<Vec<_>>(), vec![t4, t5]);
-    assert_eq!(p2[0].dht_key, h.truncated());
-    assert_eq!(p2[1].paths, vec!["dir/f000", "dir/f001", "dir/f002"]);
-    assert!(s.scan_live(t5, 2).await.unwrap().is_empty());
-    assert!(s.scan_live(0, 0).await.unwrap().is_empty());
-    assert!(s.scan_live(0, -1).await.unwrap().is_empty());
-
-    // A tiny byte budget still returns one row per page.
-    let mut after = 0;
-    let mut seen = Vec::new();
-    loop {
-        let page = s.scan_live_within(after, 10, 1).await.unwrap();
-        if page.is_empty() {
-            break;
-        }
-        assert_eq!(page.len(), 1);
-        after = page[0].id;
-        seen.push(after);
-    }
-    assert_eq!(seen, vec![t1, t2, t4, t5]);
-    assert!(!seen.contains(&t3));
-
-    // A torrent without files has no paths.
-    sqlx::query("UPDATE torrents SET files = '[]' WHERE id = $1")
-        .bind(t1)
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert!(s.scan_live(0, 1).await.unwrap()[0].paths.is_empty());
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -1537,9 +1147,7 @@ async fn lookups_and_stats(pool: PgPool) {
         .complete(&key(3), &torrent_with_files(key(3), 25))
         .await
         .unwrap();
-    s.complete(&key(4), &torrent(key(4), "denied"))
-        .await
-        .unwrap();
+    s.complete(&key(4), &torrent(key(4), "d")).await.unwrap();
     s.observe(&[obs(key(5), 1), obs(key(6), 1)], NO_LIMIT)
         .await
         .unwrap();
@@ -1572,24 +1180,18 @@ async fn lookups_and_stats(pool: PgPool) {
         many[0]
     );
 
-    // One tombstoned.
-    s.deny(key(4).as_bytes(), DenyReason::Dmca, None, "admin")
-        .await
-        .unwrap();
-
     assert_eq!(
         s.stats().await.unwrap(),
         StoreStats {
-            torrents: 3,
+            torrents: 4,
             pending: 2,
             gave_up: 0,
-            denylisted: 1,
         }
     );
     assert_eq!(
         s.public_stats().await.unwrap(),
         PublicStats {
-            torrents: 3,
+            torrents: 4,
             added_today: 4,
             added_yesterday: 0
         }
@@ -1624,8 +1226,8 @@ async fn lookups_and_stats(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(s.stats().await.unwrap().torrents, 3);
-    assert_eq!(s.public_stats().await.unwrap().torrents, 3);
+    assert_eq!(s.stats().await.unwrap().torrents, 4);
+    assert_eq!(s.public_stats().await.unwrap().torrents, 4);
 
     // Above the threshold, the estimate is used.
     let estimate = EXACT_COUNT_THRESHOLD * 3;
@@ -1705,8 +1307,6 @@ async fn schema_constraints(pool: PgPool) {
     // itself.
     let bad = [
         "INSERT INTO pending (dht_key) VALUES ('\\x00')",
-        "INSERT INTO denylist (key, reason, created_by) VALUES (decode(repeat('00', 21), 'hex'), 'dmca', 'a')",
-        "INSERT INTO denylist (key, reason, created_by) VALUES (decode(repeat('00', 20), 'hex'), 'bogus', 'a')",
         "INSERT INTO torrents (dht_key, name, total_size, file_count, change_seq, deleted_at) \
          VALUES (decode(repeat('00', 20), 'hex'), 'still named', 0, 0, 1, now())",
         "INSERT INTO torrents (dht_key, name, total_size, file_count, change_seq, info_hash_v2) \
@@ -1753,7 +1353,7 @@ async fn schema_constraints(pool: PgPool) {
 
     let indexes: HashSet<String> = sqlx::query_scalar(
         "SELECT indexname::text FROM pg_indexes \
-          WHERE tablename IN ('torrents', 'pending', 'denylist', 'audit_log', 'settings', \
+          WHERE tablename IN ('torrents', 'pending', 'audit_log', 'settings', \
                               'removed_keys')",
     )
     .fetch_all(&pool)
@@ -1770,7 +1370,6 @@ async fn schema_constraints(pool: PgPool) {
         "pending_ready",
         "pending_gave_up",
         "pending_seeders",
-        "denylist_prefix",
         "audit_log_at",
         "audit_log_action_at",
         "settings_pkey",
@@ -1997,7 +1596,7 @@ async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
+async fn purge_tombstoned_keeps_fresh_rows(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     // Old scrape tombstone: purged.
     let a = key(41);
@@ -2024,14 +1623,18 @@ async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
             .await
             .unwrap()
     );
-    // Old denial tombstone: never purged (it is the block record).
+    // A second old scrape tombstone: purged too (no tombstone is special).
     let c = key(43);
-    s.complete(&c, &torrent(c, "denied")).await.unwrap();
-    s.deny(&c.0, DenyReason::Other, None, "tester")
-        .await
-        .unwrap();
-    sqlx::query("UPDATE torrents SET deleted_at = now() - interval '2 hours' WHERE dht_key = $1")
-        .bind(c.0.as_slice())
+    let idc = s.complete(&c, &torrent(c, "older-dead")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == idc).unwrap().clone();
+    assert!(
+        s.tombstone_dead(idc, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE torrents SET deleted_at = now() - interval '2 hours' WHERE id = $1")
+        .bind(idc)
         .execute(&pool)
         .await
         .unwrap();
@@ -2041,15 +1644,9 @@ async fn purge_tombstoned_keeps_deny_tombstones_and_fresh_rows(pool: PgPool) {
         s.purge_tombstoned(Duration::from_secs(3600), 1000)
             .await
             .unwrap(),
-        1
+        2
     );
     assert!(raw_torrent(&pool, idb).await.deleted_at.is_some());
-    let denied_id: i64 = sqlx::query_scalar("SELECT id FROM torrents WHERE dht_key = $1")
-        .bind(c.0.as_slice())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(raw_torrent(&pool, denied_id).await.deleted_at.is_some());
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -2208,7 +1805,7 @@ async fn removal_cooldown_shortens_on_strong_evidence_but_never_bypasses(pool: P
     s.note_removal(&a.0).await.unwrap();
     s.note_removal(&b.0).await.unwrap();
 
-    // Baseline: both blocked for ~7d.
+    // Baseline: both in cooldown for ~7d.
     let rows = s.removal_cooldowns(&[a, b], 7, &[]).await.unwrap();
     assert!(rows.iter().all(|r| r.remaining > days(6)));
 
@@ -2332,8 +1929,13 @@ async fn refresh_scraped_defers_without_a_lookup(pool: PgPool) {
     assert_eq!(change_seq_of(&pool, id).await, before);
     // Unknown keys match nothing; tombstones stay tombstoned.
     assert_eq!(s.refresh_scraped(&[key(95)]).await.unwrap(), 0);
-    s.deny(&k.0, DenyReason::Other, None, "tester")
-        .await
-        .unwrap();
+    backdate_scrape(&pool, id, days(40), Some(12)).await;
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
     assert_eq!(s.refresh_scraped(&[k]).await.unwrap(), 0);
 }

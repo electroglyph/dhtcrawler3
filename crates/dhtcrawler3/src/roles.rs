@@ -13,7 +13,7 @@ use crate::config::{Config, DbRole};
 use crate::crawl::{self, CrawlOptions};
 use crate::index::{self, IndexOptions, REBUILD_GRACE};
 use crate::metrics_server::{self, MetricsServer, Readiness};
-use crate::{admin, policy, web};
+use crate::{admin, web};
 
 /// Connects a pool with `role`'s credentials.
 pub async fn connect(cfg: &Config, role: DbRole) -> anyhow::Result<Store> {
@@ -43,8 +43,7 @@ pub async fn crawl(cfg: &Config, cancel: CancellationToken) -> anyhow::Result<()
     let result: anyhow::Result<()> = async {
         let opts = CrawlOptions::from_config(cfg)?;
         let store = connect(cfg, DbRole::Crawler).await?;
-        let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
-        crawl::run(opts, store, policy, ready, cancel).await?;
+        crawl::run(opts, store, ready, cancel).await?;
         Ok(())
     }
     .await;
@@ -59,15 +58,7 @@ pub async fn index(cfg: &Config, cancel: CancellationToken) -> anyhow::Result<()
     let metrics = start_metrics(cfg, readiness).await?;
     let result: anyhow::Result<()> = async {
         let store = connect(cfg, DbRole::Indexer).await?;
-        let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
-        index::run(
-            IndexOptions::from_config(&cfg.index),
-            store,
-            policy,
-            ready,
-            cancel,
-        )
-        .await?;
+        index::run(IndexOptions::from_config(&cfg.index), store, ready, cancel).await?;
         Ok(())
     }
     .await;
@@ -82,7 +73,6 @@ pub async fn rebuild(
     out: &mut (dyn Write + Send),
 ) -> anyhow::Result<()> {
     let store = connect(cfg, DbRole::Indexer).await?;
-    let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
     writeln!(
         out,
         "rebuilding the search index in {}",
@@ -91,7 +81,6 @@ pub async fn rebuild(
     let s = index::rebuild(
         IndexOptions::from_config(&cfg.index),
         store,
-        policy,
         cancel,
         REBUILD_GRACE,
     )
@@ -129,9 +118,8 @@ pub async fn web(cfg: &Config, cancel: CancellationToken) -> anyhow::Result<()> 
         log_warnings(cfg);
         let web_cfg = web::web_config(cfg)?;
         let store = connect(cfg, DbRole::Web).await?;
-        let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
         let search = web::open_search(&cfg.index.path).await?;
-        web::run(web_cfg, store, search, policy, ready, cancel).await?;
+        web::run(web_cfg, store, search, ready, cancel).await?;
         Ok(())
     }
     .await;
@@ -172,35 +160,33 @@ async fn run_all(
     let crawl_store = connect(cfg, DbRole::Crawler).await?;
     let index_store = connect(cfg, DbRole::Indexer).await?;
     let web_store = connect(cfg, DbRole::Web).await?;
-    let policy = policy::load_shared(cfg.policy.terms_file.clone()).await?;
     let search = web::open_search(&cfg.index.path).await?;
 
     let roles = cancel.child_token();
     let mut tasks: JoinSet<(&'static str, anyhow::Result<()>)> = JoinSet::new();
     {
-        let (policy, token) = (policy.clone(), roles.clone());
+        let token = roles.clone();
         tasks.spawn(async move {
-            let result = crawl::run(crawl_opts, crawl_store, policy, crawl_ready, token).await;
+            let result = crawl::run(crawl_opts, crawl_store, crawl_ready, token).await;
             ("crawl", result.map_err(anyhow::Error::from))
         });
     }
     {
-        let (policy, token) = (policy.clone(), roles.clone());
+        let token = roles.clone();
         tasks.spawn(async move {
-            let result = index::run(index_opts, index_store, policy, index_ready, token).await;
+            let result = index::run(index_opts, index_store, index_ready, token).await;
             ("index", result.map_err(anyhow::Error::from))
         });
     }
     {
         let token = roles.clone();
         tasks.spawn(async move {
-            let result = web::run(web_cfg, web_store, search, policy, web_ready, token).await;
+            let result = web::run(web_cfg, web_store, search, web_ready, token).await;
             ("web", result.map_err(anyhow::Error::from))
         });
     }
 
-    let first_error =
-        supervise_roles(&mut tasks, &roles, &cancel, ROLE_SHUTDOWN_TIMEOUT).await;
+    let first_error = supervise_roles(&mut tasks, &roles, &cancel, ROLE_SHUTDOWN_TIMEOUT).await;
     first_error.map_or(Ok(()), Err)
 }
 
@@ -285,8 +271,7 @@ mod tests {
             std::future::pending::<()>().await;
             ("hung", Ok(()))
         });
-        let err =
-            supervise_roles(&mut tasks, &roles, &cancel, Duration::from_millis(100)).await;
+        let err = supervise_roles(&mut tasks, &roles, &cancel, Duration::from_millis(100)).await;
         let err = err.expect("the failing role error is returned");
         assert!(
             err.to_string().contains("the failing role failed"),

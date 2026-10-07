@@ -13,16 +13,14 @@
 //!   [`Store::note_removal`], [`Store::note_removed_sighting`],
 //!   [`Store::note_removed_sightings`], [`Store::removal_cooldown_remaining`],
 //!   [`Store::removal_cooldowns`], [`Store::refresh_scraped`],
-//!   [`Store::removed_keys_count`],
-//!   [`Store::is_denied`], [`Store::deny`], [`Store::scan_live`];
+//!   [`Store::removed_keys_count`];
 //! * **index** (`dc3_indexer`): [`Store::high_water_mark`],
 //!   [`Store::changes_since`];
 //! * **web** (`dc3_web`): [`Store::get_by_key`], [`Store::get_many`],
 //!   [`Store::public_stats`],
 //!   [`Store::daily_stats`];
 //! * **admin** (`dc3_owner`): [`Store::migrate`], [`Store::stats`],
-//!   [`Store::undeny`], [`Store::list_denied`], [`Store::audit`],
-//!   [`Store::get_setting`], [`Store::set_setting`].
+//!   [`Store::audit`], [`Store::get_setting`], [`Store::set_setting`].
 //!
 //! [`Store::ping`] works for every user, and the owner may call every method.
 //! A method called by a user without the grant fails with
@@ -39,12 +37,6 @@
 //! finished transaction and none is skipped. It waits at most
 //! [`HWM_LOCK_TIMEOUT`]; every connection also ends abandoned transactions
 //! after [`IDLE_IN_TRANSACTION_TIMEOUT`] (see [`session_options`]).
-//!
-//! # Denial
-//!
-//! A denylist key is 20 bytes (DHT key or v1 infohash) or 32 bytes (v2
-//! infohash). A v2 torrent is found in the DHT under the first 20 bytes of its
-//! hash, so keys are matched by their 20-byte prefix everywhere.
 //!
 //! All SQL uses bound parameters; strings are never concatenated into SQL.
 #![forbid(unsafe_code)]
@@ -74,9 +66,8 @@ pub use sqlx;
 /// Connection options for [`Store::connect_with`].
 pub use sqlx::postgres::PgConnectOptions;
 pub use types::{
-    DailyStats, DenyEntry, DenyOutcome, DenyReason, FileRow, IndexRow, LiveRow, NewTorrent,
-    Observation, ObserveOutcome, ParseEnumError, PendingItem, PublicStats, RemovalCooldown,
-    ScrapeItem, StoreStats, TorrentRecord,
+    DailyStats, FileRow, IndexRow, NewTorrent, Observation, ObserveOutcome, PendingItem,
+    PublicStats, RemovalCooldown, ScrapeItem, StoreStats, TorrentRecord,
 };
 
 /// Advisory lock key of the change feed (ASCII `"dc3chg"` followed by 0x0001).
@@ -92,9 +83,9 @@ pub const MAX_NAME_CHARS: usize = 1024;
 pub const MAX_PATH_CHARS: usize = 4096;
 /// Maximum number of file rows stored per torrent.
 pub const MAX_STORED_FILES: usize = 2000;
-/// Maximum characters in a denial or resolution note.
+/// Maximum characters in a stored note.
 pub const NOTE_MAX_CHARS: usize = 2000;
-/// Maximum characters in an actor name (audit log, denylist).
+/// Maximum characters in an actor name (audit log).
 pub const ACTOR_MAX_CHARS: usize = 128;
 /// Maximum characters in an audit action.
 pub const AUDIT_ACTION_MAX_CHARS: usize = 64;
@@ -105,10 +96,9 @@ pub const AUDIT_SUBJECT_MAX_CHARS: usize = 256;
 pub const MAX_CLAIM: i64 = 10_000;
 /// Largest `limit` accepted by the listing queries.
 pub const MAX_PAGE: i64 = 10_000;
-/// Largest `limit` accepted by [`Store::changes_since`] and
-/// [`Store::scan_live`].
+/// Largest `limit` accepted by [`Store::changes_since`].
 pub const MAX_FEED_PAGE: i64 = 1_000;
-/// [`Store::changes_since`] and [`Store::scan_live`] stop adding rows once
+/// [`Store::changes_since`] stops adding rows once
 /// the rows so far hold this many bytes of name and file-list text. A page
 /// always holds at least one row, so it may exceed the budget by one row.
 pub const FEED_PAGE_MAX_BYTES: i64 = 64 * 1024 * 1024;
@@ -169,7 +159,7 @@ const SQLSTATE_CHECK_VIOLATION: &str = "23514";
 const MAX_INTERVAL_SECS: f64 = 100.0 * 365.25 * 24.0 * 3600.0;
 /// How long [`Store::connect`] waits for a pooled connection.
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Length of a DHT key and of a denylist key prefix.
+/// Length of a DHT key, the prefix by which 32-byte keys are matched.
 const PREFIX_LEN: usize = 20;
 /// Length of a v2 infohash.
 const V2_LEN: usize = 32;
@@ -183,9 +173,6 @@ pub enum StoreError {
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error("invalid input: {0}")]
     Invalid(String),
-    /// One of the torrent's keys is on the denylist.
-    #[error("key is denylisted")]
-    Denied,
     #[error("not found")]
     NotFound,
     /// A value read from the database does not fit the Rust type.
@@ -328,10 +315,6 @@ async fn bump_daily(conn: &mut PgConnection, column: DailyCounter, n: i64) -> Re
             "INSERT INTO stats_daily (day, fetch_failed) VALUES ((now() AT TIME ZONE 'UTC')::date, $1) \
              ON CONFLICT (day) DO UPDATE SET fetch_failed = stats_daily.fetch_failed + EXCLUDED.fetch_failed"
         }
-        DailyCounter::Blocked => {
-            "INSERT INTO stats_daily (day, blocked) VALUES ((now() AT TIME ZONE 'UTC')::date, $1) \
-             ON CONFLICT (day) DO UPDATE SET blocked = stats_daily.blocked + EXCLUDED.blocked"
-        }
     };
     sqlx::query(sql).bind(n).execute(conn).await?;
     Ok(())
@@ -342,7 +325,6 @@ enum DailyCounter {
     Discovered,
     Fetched,
     FetchFailed,
-    Blocked,
 }
 
 /// Tables whose size may be estimated; a fixed set, so no name is ever
@@ -416,14 +398,7 @@ fn check_len(what: &str, s: &str, min: usize, max: usize) -> Result<()> {
     Ok(())
 }
 
-fn check_note(note: Option<&str>) -> Result<()> {
-    match note {
-        Some(n) => check_len("note", n, 0, NOTE_MAX_CHARS),
-        None => Ok(()),
-    }
-}
-
-/// Validates a denylist key (20 or 32 bytes).
+/// Validates a removal-memory key (20 or 32 bytes).
 fn check_key_len(key: &[u8]) -> Result<()> {
     match key.len() {
         PREFIX_LEN | V2_LEN => Ok(()),
@@ -456,17 +431,6 @@ fn db_message(e: &sqlx::Error) -> String {
     e.as_database_error()
         .map(|d| d.message().to_owned())
         .unwrap_or_default()
-}
-
-/// Lowercase hex of arbitrary bytes.
-fn hex_of(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len().saturating_mul(2));
-    for b in bytes {
-        // Writing to a String cannot fail.
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 /// Clamps a duration to SQL-friendly seconds.

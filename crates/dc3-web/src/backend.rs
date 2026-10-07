@@ -43,7 +43,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<TorrentRecord>, BackendError>> + Send;
 
     /// The visible torrents among `ids`, in the order of `ids`. Ids that are
-    /// missing, hidden, denied or deleted are skipped.
+    /// missing or deleted are skipped.
     fn get_many(
         &self,
         ids: &[i64],

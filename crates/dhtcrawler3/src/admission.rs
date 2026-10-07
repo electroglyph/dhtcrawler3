@@ -742,10 +742,6 @@ impl<S: CrawlStore> Admission<S> {
                         self.sources.clear();
                     }
                     self.batch.clear();
-                    if outcome.denied > 0 {
-                        metrics::counter!(METRIC_BLOCKED, "reason" => "denylisted")
-                            .increment(outcome.denied);
-                    }
                     if outcome.dropped > 0 {
                         metrics::counter!(METRIC_BLOCKED, "reason" => "queue_full")
                             .increment(outcome.dropped);

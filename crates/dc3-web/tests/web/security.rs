@@ -226,7 +226,6 @@ async fn every_kind_of_response_has_the_security_headers() {
             StatusCode::NOT_FOUND,
         ),
         (Method::GET, "/about".into(), StatusCode::OK),
-        (Method::GET, "/legal".into(), StatusCode::OK),
         (Method::GET, "/privacy".into(), StatusCode::OK),
         (Method::GET, "/robots.txt".into(), StatusCode::OK),
         (
@@ -240,7 +239,7 @@ async fn every_kind_of_response_has_the_security_headers() {
         (Method::GET, "/does-not-exist".into(), StatusCode::NOT_FOUND),
         (
             Method::PATCH,
-            "/legal".into(),
+            "/privacy".into(),
             StatusCode::METHOD_NOT_ALLOWED,
         ),
         (
@@ -321,7 +320,7 @@ async fn forwarded_addresses_are_used_only_from_trusted_proxies() {
     let app = app_with(Vec::new(), cfg);
     let proxy = "10.1.2.3:5555";
     let forwarded = |client: &str| {
-        let mut req = get_from("/legal", proxy);
+        let mut req = get_from("/privacy", proxy);
         req.headers_mut().insert(
             "x-forwarded-for",
             format!("6.6.6.6, {client}").parse().unwrap(),
@@ -342,12 +341,12 @@ async fn forwarded_addresses_are_used_only_from_trusted_proxies() {
     // An untrusted peer's header is ignored: its own address is limited.
     let direct = "203.0.113.9:1";
     for _ in 0..30 {
-        let mut req = get_from("/legal", direct);
+        let mut req = get_from("/privacy", direct);
         req.headers_mut()
             .insert("x-forwarded-for", "198.51.100.200".parse().unwrap());
         assert_eq!(send(&app.router, req).await.status, StatusCode::OK);
     }
-    let mut req = get_from("/legal", direct);
+    let mut req = get_from("/privacy", direct);
     req.headers_mut()
         .insert("x-forwarded-for", "198.51.100.201".parse().unwrap());
     assert_eq!(

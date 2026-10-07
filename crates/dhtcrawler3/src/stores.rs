@@ -8,8 +8,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use dc3_core::DhtKey;
 use dc3_store::{
-    DenyOutcome, DenyReason, IndexRow, NewTorrent, Observation, ObserveOutcome, PendingItem,
-    RemovalCooldown, Result, ScrapeItem, Store,
+    IndexRow, NewTorrent, Observation, ObserveOutcome, PendingItem, RemovalCooldown, Result,
+    ScrapeItem, Store,
 };
 
 /// What the crawl role needs from the database (the `dc3_crawler` user).
@@ -34,14 +34,6 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
     fn fail(&self, key: &DhtKey) -> impl Future<Output = Result<bool>> + Send;
     /// See [`Store::give_up`].
     fn give_up(&self, key: &DhtKey) -> impl Future<Output = Result<bool>> + Send;
-    /// See [`Store::deny`].
-    fn deny(
-        &self,
-        key: &[u8],
-        reason: DenyReason,
-        note: Option<&str>,
-        actor: &str,
-    ) -> impl Future<Output = Result<DenyOutcome>> + Send;
     /// See [`Store::pending_depth`].
     fn pending_depth(&self) -> impl Future<Output = Result<i64>> + Send;
     /// See [`Store::claim_scrape_due`].
@@ -86,10 +78,6 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
     fn trim_removed_keys(&self, cap: i64) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::removed_keys_count`].
     fn removed_keys_count(&self) -> impl Future<Output = Result<i64>> + Send;
-    /// See [`Store::is_denied`].
-    fn is_denied(&self, keys: &[&[u8]]) -> impl Future<Output = Result<bool>> + Send;
-    /// See [`Store::denied_mask`].
-    fn denied_mask(&self, keys: &[&[u8]]) -> impl Future<Output = Result<Vec<bool>>> + Send;
     /// See [`Store::removal_cooldowns`].
     fn removal_cooldowns(
         &self,
@@ -136,16 +124,6 @@ impl CrawlStore for Store {
 
     fn give_up(&self, key: &DhtKey) -> impl Future<Output = Result<bool>> + Send {
         Store::give_up(self, key)
-    }
-
-    fn deny(
-        &self,
-        key: &[u8],
-        reason: DenyReason,
-        note: Option<&str>,
-        actor: &str,
-    ) -> impl Future<Output = Result<DenyOutcome>> + Send {
-        Store::deny(self, key, reason, note, actor)
     }
 
     fn pending_depth(&self) -> impl Future<Output = Result<i64>> + Send {
@@ -208,14 +186,6 @@ impl CrawlStore for Store {
 
     fn removed_keys_count(&self) -> impl Future<Output = Result<i64>> + Send {
         Store::removed_keys_count(self)
-    }
-
-    fn is_denied(&self, keys: &[&[u8]]) -> impl Future<Output = Result<bool>> + Send {
-        Store::is_denied(self, keys)
-    }
-
-    fn denied_mask(&self, keys: &[&[u8]]) -> impl Future<Output = Result<Vec<bool>>> + Send {
-        Store::denied_mask(self, keys)
     }
 
     fn removal_cooldowns(

@@ -1,7 +1,6 @@
 //! `GET /search` and the search logic the JSON API shares.
 //!
-//! Search text is never logged. A query containing a blocked term is not
-//! searched at all.
+//! Search text is never logged.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,7 +26,7 @@ use crate::app::{AppState, routes};
 use crate::format::{date, grouped, human_size, plural, rfc3339};
 use crate::render::{Flavor, error_response, error_with_query, html};
 use crate::telemetry::metric_names;
-use crate::templates::{BlockedPage, ResultRow, SearchPage, SortLink};
+use crate::templates::{ResultRow, SearchPage, SortLink};
 
 /// Raw query-string parameters of the search page and the search API.
 #[derive(Debug, Default, Deserialize)]
@@ -94,47 +93,6 @@ fn parse_bounded(raw: Option<&str>, default: u32, max: u32) -> Option<u32> {
     }
 }
 
-/// True (and counted) if `q` contains a blocked term.
-pub(crate) fn is_blocked<B>(st: &AppState<B>, q: &str) -> bool {
-    let blocked = st.policy.matches(q);
-    if blocked {
-        metrics::counter!(metric_names::BLOCKED_QUERIES).increment(1);
-    }
-    blocked
-}
-
-/// True (and counted) when the query's trailing prefix word expands to an
-/// indexed term the whole-token gate cannot see but the policy denies.
-/// Only single-token prefixes are enumerated; longer words search as
-/// phrases. Runs after parameter validation, so blocked and clean queries
-/// answer bad parameters alike. A broken index is not a block: the search
-/// itself reports it.
-pub(crate) async fn expansion_blocked<B: Backend>(st: &AppState<B>, parsed: &ParsedQuery) -> bool {
-    let single = match parsed.words.last() {
-        Some(last) if last.prefix => match last.tokens.as_slice() {
-            [single] => single.clone(),
-            _ => return false,
-        },
-        _ => return false,
-    };
-    let expansions = match st
-        .search
-        .prefix_expansions(single.clone(), SEARCH_TIMEOUT)
-        .await
-    {
-        Ok(expansions) => expansions,
-        Err(_) => return false,
-    };
-    let blocked = expansions
-        .iter()
-        .any(|term| st.policy.matches_affixed(term))
-        || st.policy.matches_affixed(&single);
-    if blocked {
-        metrics::counter!(metric_names::BLOCKED_QUERIES).increment(1);
-    }
-    blocked
-}
-
 /// True if the trimmed query is longer than the search index accepts.
 /// Cheap: at most `4 * MAX_QUERY_CHARS` bytes are counted.
 pub(crate) fn too_long(q: &str) -> bool {
@@ -195,12 +153,12 @@ impl Failure {
 /// torrents on the page in search-hit order.
 ///
 /// `total` is the index match count minus hits hidden on *this* page
-/// (missing, denied, deleted or policy-blocked during hydration), so a
-/// single-page query cannot be compared against its page to reveal the
-/// moderated count. It is exact when all matches fit on one page; on
-/// multi-page queries hits hidden on other pages are still counted and
-/// `total` may differ per page. Pages are not refilled: a short page
-/// already reveals per-page filtering, so `total` claims no more.
+/// (missing or deleted during hydration), so a single-page query cannot
+/// be compared against its page to reveal the hidden count. It is exact
+/// when all matches fit on one page; on multi-page queries hits hidden on
+/// other pages are still counted and `total` may differ per page. Pages
+/// are not refilled: a short page already reveals per-page filtering, so
+/// `total` claims no more.
 /// `index_total` is the unadjusted index count and drives pagination
 /// (`has_next`): a page that filters heavily must not hide later pages
 /// that still have visible hits.
@@ -211,8 +169,7 @@ pub(crate) struct Found {
 }
 
 /// Searches the index, then loads the hits from the database. Hits that the
-/// database no longer shows (hidden, denied, deleted) or that contain a
-/// blocked term are skipped.
+/// database no longer shows (deleted) are skipped.
 pub(crate) async fn execute<B: Backend>(
     st: &AppState<B>,
     text: &str,
@@ -257,20 +214,20 @@ pub(crate) async fn execute<B: Backend>(
     };
     let mut by_id: HashMap<i64, TorrentRecord> = records.into_iter().map(|r| (r.id, r)).collect();
     let ordered = ids.iter().filter_map(|id| by_id.remove(id)).collect();
-    let Some(mut torrents) = show_all(ordered, &st.policy, Detail::NameOnly).await else {
+    let Some(mut torrents) = show_all(ordered, Detail::NameOnly).await else {
         tracing::error!("preparing search results failed");
         return Err(Failure::Broken);
     };
     let scores: HashMap<i64, f32> = results.hits.iter().map(|hit| (hit.id, hit.score)).collect();
     order_page(&mut torrents, &scores, sort, st.seeder_freshness);
-    // Hits the database no longer shows (hidden, denied, deleted) or that
-    // contain a blocked term were skipped above; subtract those on this
-    // page so a single-page `total` counts visible matches instead of
-    // leaking the moderated count. Pagination still uses the index count:
-    // hidden-heavy pages must not hide later pages with visible hits.
+    // Hits the database no longer shows (deleted) were skipped above;
+    // subtract those on this page so a single-page `total` counts visible
+    // matches instead of leaking the hidden count. Pagination still uses
+    // the index count: hidden-heavy pages must not hide later pages with
+    // visible hits.
     let index_total = results.total;
-    let dropped = u64::try_from(results.hits.len().saturating_sub(torrents.len()))
-        .unwrap_or(u64::MAX);
+    let dropped =
+        u64::try_from(results.hits.len().saturating_sub(torrents.len())).unwrap_or(u64::MAX);
     Ok(Found {
         total: index_total.saturating_sub(dropped),
         index_total,
@@ -383,8 +340,8 @@ pub(crate) async fn search_page<B: Backend>(
     if q.is_empty() {
         return Redirect::to(routes::HOME).into_response();
     }
-    // Checked first, so the term matcher never sees more than the limit.
-    // The refused query is not echoed: it has not been matched.
+    // Checked first, so over-long queries are refused before parsing.
+    // The refused query is not echoed.
     if too_long(q) {
         return error_response(
             site,
@@ -393,8 +350,6 @@ pub(crate) async fn search_page<B: Backend>(
             &too_long_message(),
         );
     }
-    // Parameters validate before either gate, so blocked and clean queries
-    // answer bad parameters alike. The refused query is not echoed.
     let bad_request =
         |message: &str| error_with_query(site, Flavor::Html, StatusCode::BAD_REQUEST, message, q);
     let page_number = match parse_page(params.p.as_deref()) {
@@ -409,15 +364,6 @@ pub(crate) async fn search_page<B: Backend>(
         Ok(n) => n,
         Err(e) => return bad_request(&e.message()),
     };
-    if is_blocked(&st, q) {
-        let page = BlockedPage {
-            page: site.page("Search blocked", "", true),
-        };
-        return html(StatusCode::OK, &page);
-    }
-    // Parsed once and shared by the prefix gate and the search (B-005);
-    // a query that fails to parse is answered exactly as `execute` answered
-    // it before (the gate treats it as not blocked).
     let parsed = match parse_query(q) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -425,12 +371,6 @@ pub(crate) async fn search_page<B: Backend>(
             return error_with_query(site, Flavor::Html, failure.status(), &failure.message(), q);
         }
     };
-    if expansion_blocked(&st, &parsed).await {
-        let page = BlockedPage {
-            page: site.page("Search blocked", "", true),
-        };
-        return html(StatusCode::OK, &page);
-    }
 
     let found = match execute(&st, q, &parsed, page_number, per_page, sort).await {
         Ok(found) => found,

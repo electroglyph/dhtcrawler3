@@ -35,10 +35,8 @@ mod telemetry;
 mod templates;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use dc3_policy::TermMatcher;
 use dc3_search::SearchHandle;
 use ipnet::IpNet;
 
@@ -66,8 +64,6 @@ pub const MAX_CONCURRENT_DETAILS: usize = 16;
 /// A detail page or API response lists file paths until they add up to this
 /// many characters; the rest is left out and the list is marked truncated.
 pub const MAX_LISTED_PATH_CHARS: usize = 128_000;
-/// Every listed path is matched against the blocked terms first; the
-/// listing budget above bounds that work per request.
 /// How long `/readyz` waits for the database.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(2);
 /// `Expires` in `security.txt` lies this far after process start.
@@ -83,10 +79,6 @@ pub struct WebConfig {
     pub base_url: String,
     /// Shown in page titles and headers.
     pub site_name: String,
-    /// Shown on `/legal` and in `security.txt`; may be empty.
-    pub contact_email: String,
-    /// DMCA designated agent (free text) shown on `/legal`; may be empty.
-    pub dmca_agent: String,
     /// Send `Strict-Transport-Security`.
     pub hsts: bool,
     /// Reverse proxies whose `X-Forwarded-For` header is trusted.
@@ -110,15 +102,6 @@ impl WebConfig {
                 "web.site_name must not contain control characters".into(),
             ));
         }
-        if self
-            .contact_email
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace())
-        {
-            return Err(WebError::Config(
-                "web.contact_email must not contain spaces or control characters".into(),
-            ));
-        }
         Ok(())
     }
 }
@@ -130,8 +113,6 @@ pub struct WebDeps<B: Backend> {
     pub backend: B,
     /// The live search index.
     pub search: SearchHandle,
-    /// Blocked search terms (R18).
-    pub policy: Arc<TermMatcher>,
 }
 
 /// Errors from [`serve`] and [`WebConfig::validate`].

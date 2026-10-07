@@ -7,7 +7,6 @@ members = [
     "crates/dc3-torrent",
     "crates/dc3-dht",
     "crates/dc3-peer",
-    "crates/dc3-policy",
     "crates/dc3-store",
     "crates/dc3-search",
     "crates/dc3-web",
@@ -33,13 +32,11 @@ panic = "warn"
 indexing_slicing = "warn"
 
 [workspace.dependencies]
-aho-corasick = "1"
 dc3-core = { path = "crates/dc3-core" }
 dc3-bencode = { path = "crates/dc3-bencode" }
 dc3-torrent = { path = "crates/dc3-torrent" }
 dc3-dht = { path = "crates/dc3-dht" }
 dc3-peer = { path = "crates/dc3-peer" }
-dc3-policy = { path = "crates/dc3-policy" }
 dc3-store = { path = "crates/dc3-store" }
 dc3-search = { path = "crates/dc3-search" }
 dc3-web = { path = "crates/dc3-web" }
@@ -81,7 +78,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json", "env-filter"] }
 unicode-normalization = "0.1.25"
 unicode-script = "0.5.8"
-unicode-security = "0.1.2"
 
 [profile.release]
 lto = "thin"

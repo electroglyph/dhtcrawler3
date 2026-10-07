@@ -34,7 +34,6 @@ async fn home_page_has_a_labelled_search_box_and_no_script() {
     // Footer links.
     for link in [
         r#"<a href="/about">About</a>"#,
-        r#"<a href="/legal">Legal</a>"#,
         r#"<a href="/privacy">Privacy</a>"#,
     ] {
         assert!(r.body.contains(link), "{link}");
@@ -65,7 +64,6 @@ async fn information_pages() {
     let app = app(Vec::new());
     for (path, needle) in [
         ("/about", "How it works"),
-        ("/legal", "Copyright and takedown requests"),
         ("/privacy", "What is never stored"),
     ] {
         let r = send(&app.router, get(path)).await;
@@ -75,14 +73,6 @@ async fn information_pages() {
         assert_security_headers(&r, true);
         assert_safe_html(&r.body);
     }
-
-    let legal = send(&app.router, get("/legal")).await;
-    assert!(
-        legal
-            .body
-            .contains(r#"<a href="mailto:abuse@example.org">abuse@example.org</a>"#)
-    );
-    assert!(legal.body.contains("Example DMCA Agent\n1 Example Street"));
 
     let privacy = send(&app.router, get("/privacy")).await;
     for needle in [
@@ -95,25 +85,6 @@ async fn information_pages() {
     ] {
         assert!(privacy.body.contains(needle), "{needle}");
     }
-}
-
-#[tokio::test]
-async fn legal_page_without_contacts_says_not_configured() {
-    let _serial = serial().await;
-    let mut cfg = config();
-    cfg.contact_email = String::new();
-    cfg.dmca_agent = "  ".into();
-    let app = app_with(Vec::new(), cfg);
-    let r = send(&app.router, get("/legal")).await;
-    assert_eq!(r.status, StatusCode::OK);
-    assert_eq!(r.body.matches("not configured").count(), 2);
-    assert!(!r.body.contains("mailto:"));
-
-    let txt = send(&app.router, get("/.well-known/security.txt")).await;
-    assert!(
-        txt.body
-            .starts_with("Contact: https://search.example.org/legal\n")
-    );
 }
 
 #[tokio::test]
@@ -133,7 +104,7 @@ async fn robots_and_security_txt() {
     assert_eq!(txt.status, StatusCode::OK);
     assert_eq!(txt.header("content-type"), "text/plain; charset=utf-8");
     let lines: Vec<&str> = txt.body.lines().collect();
-    assert_eq!(lines[0], "Contact: mailto:abuse@example.org");
+    assert_eq!(lines[0], "Contact: https://search.example.org/");
     let expires = lines[1].strip_prefix("Expires: ").unwrap();
     let expires = chrono::DateTime::parse_from_rfc3339(expires).unwrap();
     let days = (expires.to_utc() - chrono::Utc::now()).num_days();

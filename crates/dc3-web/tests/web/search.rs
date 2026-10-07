@@ -1,4 +1,4 @@
-//! `GET /search`: results, pagination, the blocked-term policy and errors.
+//! `GET /search`: results, pagination and errors.
 
 use std::sync::atomic::Ordering;
 
@@ -110,10 +110,7 @@ async fn heavily_filtered_page_still_links_to_next_page() {
     assert!(r.body.contains("rel=\"next\""));
     let r = send(&app.router, get("/search?q=common&per_page=2&p=2")).await;
     assert_eq!(r.status, StatusCode::OK);
-    assert_eq!(
-        result_names(&r.body),
-        ["common item 2", "common item 1"]
-    );
+    assert_eq!(result_names(&r.body), ["common item 2", "common item 1"]);
 }
 
 #[tokio::test]
@@ -151,13 +148,12 @@ async fn pagination_links_are_percent_encoded() {
         r#"<a rel="next" href="/search?q={encoded}&#38;p=2&#38;sort=relevance&#38;per_page=20">"#
     )));
     assert!(!r.body.contains("rel=\"prev\""));
-    // No href carries the raw query.
+    // No href carries the raw query. In-page anchors start with '#'.
     for part in r.body.split("href=\"").skip(1) {
         let href = part[..part.find('"').unwrap()].replace("&#38;", "&");
         assert!(!href.contains(' '), "{href}");
         assert!(!href.contains("&#"), "{href}");
-        let fragment_link = href.starts_with("/legal#") || href.starts_with('#');
-        assert!(!href.contains('#') || fragment_link, "{href}");
+        assert!(!href.contains('#') || href.starts_with('#'), "{href}");
         assert!(!href.contains("zz&zz"), "{href}");
     }
 
@@ -194,49 +190,23 @@ async fn last_allowed_page_has_no_next_link() {
 }
 
 #[tokio::test]
-async fn blocked_queries_get_the_deterrence_page_without_searching() {
+async fn every_query_searches_normally() {
     let _serial = serial().await;
     let app = app(vec![torrent(1, "zzforbiddenzz movie", &[("a", 1)])]);
-    let blocked = metrics().counter("dc3_blocked_queries_total");
     let searches = metrics().histogram_count("dc3_search_seconds");
 
-    for q in [
-        "zzforbiddenzz",
-        "movie ZZFORBIDDENZZ",
-        "zzf0rbiddenzz",
-        "a Bad-Phrase",
-    ] {
+    for q in ["zzforbiddenzz", "movie ZZFORBIDDENZZ", "bad phrase"] {
         let r = send(&app.router, get(&format!("/search?q={}", enc(q)))).await;
         assert_eq!(r.status, StatusCode::OK, "{q}");
         assert_security_headers(&r, true);
         assert_safe_html(&r.body);
-        assert!(
-            r.body
-                .contains("Searches for child sexual abuse material are blocked."),
-            "{q}"
-        );
-        assert!(
-            r.body
-                .contains(r#"<a href="https://www.stopitnow.org/">Stop It Now</a>"#)
-        );
-        assert!(
-            r.body
-                .contains(r#"<a href="https://report.cybertip.org/">NCMEC CyberTipline</a>"#)
-        );
-        assert!(
-            r.body
-                .contains(r#"<a href="https://report.iwf.org.uk/">IWF"#)
-        );
-        assert!(!r.body.contains("result-title"));
-        // The query is not echoed back.
-        assert!(!r.body.to_lowercase().contains("zzf"), "{q}");
-        assert!(!r.body.contains("value=\"movie"));
+        // The query is echoed back in the heading and the search box.
+        assert!(r.body.contains("Results for"), "{q}");
     }
-    assert_eq!(metrics().counter("dc3_blocked_queries_total"), blocked + 4);
-    assert_eq!(app.backend.get_many_calls(), 0);
-    assert_eq!(metrics().histogram_count("dc3_search_seconds"), searches);
-
-    // The API gives an empty, flagged result.
+    // The first three queries match the torrent; the last matches nothing.
+    let r = send(&app.router, get("/search?q=zzforbiddenzz")).await;
+    assert!(r.body.contains("1 torrent matches your search."));
+    assert_eq!(result_names(&r.body), ["zzforbiddenzz movie"]);
     let r = send(
         &app.router,
         get("/api/v1/search?q=zzforbiddenzz&per_page=5"),
@@ -244,74 +214,59 @@ async fn blocked_queries_get_the_deterrence_page_without_searching() {
     .await;
     assert_eq!(r.status, StatusCode::OK);
     let json = r.json();
-    assert_eq!(json["blocked"], true);
-    assert_eq!(json["total"], 0);
-    assert_eq!(json["results"].as_array().unwrap().len(), 0);
-    // The refused query is not echoed back.
-    assert_eq!(json["query"], "");
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["results"].as_array().unwrap().len(), 1);
+    assert_eq!(json["query"], "zzforbiddenzz");
     assert_eq!(json["per_page"], 5);
-    assert_eq!(metrics().counter("dc3_blocked_queries_total"), blocked + 5);
-    assert_eq!(app.backend.get_many_calls(), 0);
+    // The no-match query never touched the database; the rest did.
+    assert_eq!(app.backend.get_many_calls(), 4);
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 5
+    );
 
-    // Bad parameters answer alike for blocked and clean queries: no oracle.
-    for q in ["zzforbiddenzz", "hello"] {
-        for bad in [
-            "/api/v1/search?q=hello&p=0",
-            "/api/v1/search?q=hello&per_page=999",
-            "/api/v1/search?q=hello&sort=bogus",
-        ] {
-            let url = bad.replacen("q=hello", &format!("q={q}"), 1);
-            let r = send(&app.router, get(&url)).await;
-            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{url}");
-        }
+    // Bad parameters still answer 400.
+    for bad in [
+        "/api/v1/search?q=hello&p=0",
+        "/api/v1/search?q=hello&per_page=999",
+        "/api/v1/search?q=hello&sort=bogus",
+    ] {
+        let r = send(&app.router, get(bad)).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
     }
-
-    // Whole tokens only: a longer word is not blocked.
-    let r = send(&app.router, get("/search?q=zzforbiddenzzz")).await;
-    assert!(!r.body.contains("This search is blocked"));
-    assert_eq!(metrics().counter("dc3_blocked_queries_total"), blocked + 5);
 }
 
 #[tokio::test]
-async fn short_prefixes_of_blocked_terms_are_blocked() {
+async fn short_prefixes_search_file_names() {
     let _serial = serial().await;
-    // Clean name, blocked term only in the files: reachable only through
-    // prefix expansion.
+    // The term is only in the files: reachable through prefix expansion.
     let app = app(vec![torrent(
         1,
         "holiday photos",
         &[("zzforbiddenzz/a.jpg", 1)],
     )]);
-    let blocked = metrics().counter("dc3_blocked_queries_total");
     let searches = metrics().histogram_count("dc3_search_seconds");
     for q in ["zz", "zzforbiddenz"] {
         let r = send(&app.router, get(&format!("/search?q={}", enc(q)))).await;
         assert_eq!(r.status, StatusCode::OK, "{q}");
-        assert!(
-            r.body
-                .contains("Searches for child sexual abuse material are blocked."),
-            "{q}"
-        );
-        assert!(!r.body.contains("result-title"), "{q}");
-        // The blocked query is searched never and shown nowhere.
+        assert_eq!(result_names(&r.body), ["holiday photos"], "{q}");
         let r = send(&app.router, get(&format!("/api/v1/search?q={}", enc(q)))).await;
         assert_eq!(r.status, StatusCode::OK, "{q}");
         let json = r.json();
-        assert_eq!(json["blocked"], true, "{q}");
-        assert_eq!(json["query"], "", "{q}");
+        assert_eq!(json["total"], 1, "{q}");
+        assert_eq!(json["query"], q, "{q}");
     }
-    assert_eq!(metrics().counter("dc3_blocked_queries_total"), blocked + 4);
-    assert_eq!(app.backend.get_many_calls(), 0);
-    assert_eq!(metrics().histogram_count("dc3_search_seconds"), searches);
+    assert_eq!(
+        metrics().histogram_count("dc3_search_seconds"),
+        searches + 4
+    );
 }
 
 #[tokio::test]
-async fn over_long_queries_are_refused_before_the_policy_check() {
+async fn over_long_queries_are_refused_before_searching() {
     let _serial = serial().await;
     let app = app(vec![torrent(1, "zzforbiddenzz movie", &[("a", 1)])]);
-    let blocked = metrics().counter("dc3_blocked_queries_total");
-    // Over the length limit, with a blocked term: refused as too long, so
-    // the term matcher never sees more than the limit.
+    // Over the length limit: refused as too long, never searched.
     let q = format!("zzforbiddenzz {}", "\u{FDFA}".repeat(250));
     let r = send(&app.router, get(&format!("/search?q={}", enc(&q)))).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -321,36 +276,35 @@ async fn over_long_queries_are_refused_before_the_policy_check() {
     let r = send(&app.router, get(&format!("/api/v1/search?q={}", enc(&q)))).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert!(!r.body.to_lowercase().contains("zzf"));
-    assert_eq!(metrics().counter("dc3_blocked_queries_total"), blocked);
     assert_eq!(app.backend.get_many_calls(), 0);
 }
 
 #[tokio::test]
-async fn blocked_terms_in_stored_text_hide_torrents() {
+async fn every_stored_torrent_is_shown() {
     let _serial = serial().await;
     let app = app(vec![
         torrent(1, "holiday photos", &[("zzforbiddenzz/a.jpg", 1)]),
         torrent(2, "holiday video", &[("b.mp4", 1)]),
         torrent(3, "holiday zzforbiddenzz", &[("c.mp4", 1)]),
     ]);
-    // Result lists screen names and file paths alike: the file-blocked
-    // torrent is hidden, not just unlisted.
+    // Result lists show every visible hit, whatever the stored text holds.
     let r = send(&app.router, get("/search?q=holiday")).await;
     let mut names = result_names(&r.body);
     names.sort();
-    assert_eq!(names, ["holiday video"]);
+    assert_eq!(
+        names,
+        ["holiday photos", "holiday video", "holiday zzforbiddenzz"]
+    );
     let r = send(&app.router, get("/api/v1/search?q=holiday")).await;
-    assert_eq!(r.json()["results"].as_array().unwrap().len(), 1);
-    // Detail pages check the name and every listed path.
-    for id in [1, 3] {
+    assert_eq!(r.json()["results"].as_array().unwrap().len(), 3);
+    // Detail pages show the name and every listed path.
+    for id in [1, 2, 3] {
         let key = key_for(id).to_hex();
         let r = send(&app.router, get(&format!("/t/{key}"))).await;
-        assert_eq!(r.status, StatusCode::NOT_FOUND, "{id}");
+        assert_eq!(r.status, StatusCode::OK, "{id}");
         let r = send(&app.router, get(&format!("/api/v1/torrents/{key}"))).await;
-        assert_eq!(r.status, StatusCode::NOT_FOUND, "{id}");
+        assert_eq!(r.status, StatusCode::OK, "{id}");
     }
-    let r = send(&app.router, get(&format!("/t/{}", key_for(2).to_hex()))).await;
-    assert_eq!(r.status, StatusCode::OK);
 }
 
 #[tokio::test]

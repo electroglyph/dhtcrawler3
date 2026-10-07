@@ -2,8 +2,7 @@
 //!
 //! It follows the queue rules of `dc3-store` closely enough for the pipeline
 //! tests: observations queue new keys, claims lease them, `complete` stores a
-//! torrent unless a key is denied, `fail` backs off and gives up, and `deny`
-//! tombstones. Nothing is persisted.
+//! torrent, and `fail` backs off and gives up. Nothing is persisted.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -12,26 +11,17 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use dc3_core::DhtKey;
 use dc3_store::{
-    DenyOutcome, DenyReason, MAX_FETCH_ATTEMPTS, NewTorrent, Observation, ObserveOutcome,
-    PendingItem, REMOVAL_STRONG_EVIDENCE_SIGHTINGS, RemovalCooldown, Result, ScrapeItem,
-    StoreError,
+    MAX_FETCH_ATTEMPTS, NewTorrent, Observation, ObserveOutcome, PendingItem,
+    REMOVAL_STRONG_EVIDENCE_SIGHTINGS, RemovalCooldown, Result, ScrapeItem, StoreError,
 };
 use tokio::time::Instant;
 
 use crate::stores::CrawlStore;
 
-/// Length of the key prefix denials are matched on.
-const DENY_PREFIX_LEN: usize = 20;
+/// Length of the key prefix removal memory is matched on.
+const PREFIX_LEN: usize = 20;
 /// Retry delay after the first failure; doubled per failure.
 pub const MEMORY_FAIL_BACKOFF: Duration = Duration::from_secs(300);
-
-/// One recorded denial.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Denial {
-    pub reason: DenyReason,
-    pub note: Option<String>,
-    pub actor: String,
-}
 
 #[derive(Debug, Clone)]
 struct Pending {
@@ -48,11 +38,8 @@ struct Pending {
 struct State {
     pending: BTreeMap<DhtKey, Pending>,
     torrents: HashMap<DhtKey, (i64, NewTorrent)>,
-    denied: HashMap<[u8; DENY_PREFIX_LEN], Denial>,
     next_id: i64,
     observe_calls: usize,
-    deny_calls: usize,
-    deny_mask_calls: usize,
     observed: Vec<Observation>,
     failing_observes: usize,
     failing_completes: usize,
@@ -63,7 +50,7 @@ struct State {
     fail_backoff: Option<Duration>,
     scrapes: HashMap<DhtKey, MemScrape>,
     tombstoned: HashMap<DhtKey, (Instant, i64, u64)>,
-    removed: HashMap<[u8; DENY_PREFIX_LEN], RemovedEntry>,
+    removed: HashMap<[u8; PREFIX_LEN], RemovedEntry>,
 }
 
 /// Scrape bookkeeping of one stored torrent. `version` plays the role of
@@ -93,8 +80,8 @@ pub struct MemoryStore {
     state: Arc<Mutex<State>>,
 }
 
-fn prefix(key: &[u8]) -> [u8; DENY_PREFIX_LEN] {
-    let mut out = [0u8; DENY_PREFIX_LEN];
+fn prefix(key: &[u8]) -> [u8; PREFIX_LEN] {
+    let mut out = [0u8; PREFIX_LEN];
     for (dst, src) in out.iter_mut().zip(key) {
         *dst = *src;
     }
@@ -159,23 +146,6 @@ impl MemoryStore {
         self.lock().torrents.len()
     }
 
-    /// The denial covering `key` (matched on its first 20 bytes).
-    pub fn denial(&self, key: &[u8]) -> Option<Denial> {
-        self.lock().denied.get(&prefix(key)).cloned()
-    }
-
-    /// Denies `key` without any other effect, as an admin would beforehand.
-    pub fn preload_denial(&self, key: &[u8], reason: DenyReason) {
-        self.lock().denied.insert(
-            prefix(key),
-            Denial {
-                reason,
-                note: None,
-                actor: "test".into(),
-            },
-        );
-    }
-
     /// Keys in the queue that have not given up.
     pub fn pending_keys(&self) -> Vec<DhtKey> {
         self.lock()
@@ -201,16 +171,6 @@ impl MemoryStore {
     /// Number of `observe` calls, including failed ones.
     pub fn observe_calls(&self) -> usize {
         self.lock().observe_calls
-    }
-
-    /// Number of `is_denied` calls.
-    pub fn deny_calls(&self) -> usize {
-        self.lock().deny_calls
-    }
-
-    /// Number of `denied_mask` calls.
-    pub fn deny_mask_calls(&self) -> usize {
-        self.lock().deny_mask_calls
     }
 
     /// Every observation of every successful `observe` call, in order.
@@ -249,10 +209,6 @@ impl MemoryStore {
     pub fn pending_seeders(&self, key: &DhtKey) -> Option<u32> {
         self.lock().pending.get(key).and_then(|p| p.seeders)
     }
-
-    fn is_denied(state: &State, keys: &[&[u8]]) -> bool {
-        keys.iter().any(|k| state.denied.contains_key(&prefix(k)))
-    }
 }
 
 impl CrawlStore for MemoryStore {
@@ -269,10 +225,8 @@ impl CrawlStore for MemoryStore {
             entry.0 = entry.0.saturating_add(u64::from(o.sightings));
             entry.1 |= o.priority;
         }
-        let full = i64::try_from(
-            state.pending.values().filter(|p| !p.gave_up).count(),
-        )
-        .unwrap_or(i64::MAX)
+        let full = i64::try_from(state.pending.values().filter(|p| !p.gave_up).count())
+            .unwrap_or(i64::MAX)
             >= max_pending;
         let mut out = ObserveOutcome::default();
         let now = Instant::now();
@@ -285,8 +239,6 @@ impl CrawlStore for MemoryStore {
                     sc.version = sc.version.saturating_add(1);
                     sc.seen_at = Utc::now();
                 }
-            } else if Self::is_denied(&state, &[key.as_bytes()]) {
-                out.denied = out.denied.saturating_add(1);
             } else if let Some(p) = state.pending.get_mut(&key) {
                 p.seen = p.seen.saturating_add(n);
             } else if full && !priority {
@@ -384,18 +336,6 @@ impl CrawlStore for MemoryStore {
             return Err(StoreError::Corrupt("injected complete failure".into()));
         }
         state.pending.remove(key);
-        let v1 = t.info_hash_v1.map(|k| k.0);
-        let v2 = t.info_hash_v2.map(|h| h.0);
-        let mut keys: Vec<&[u8]> = vec![key.as_bytes()];
-        if let Some(k) = &v1 {
-            keys.push(k);
-        }
-        if let Some(h) = &v2 {
-            keys.push(h);
-        }
-        if Self::is_denied(&state, &keys) {
-            return Err(StoreError::Denied);
-        }
         let id = match state.torrents.get(key) {
             Some((id, _)) => *id,
             None => {
@@ -455,43 +395,6 @@ impl CrawlStore for MemoryStore {
         Ok(true)
     }
 
-    async fn deny(
-        &self,
-        key: &[u8],
-        reason: DenyReason,
-        note: Option<&str>,
-        actor: &str,
-    ) -> Result<DenyOutcome> {
-        if key.len() != DhtKey::LEN && key.len() != dc3_core::InfoHashV2::LEN {
-            return Err(StoreError::Invalid("key must be 20 or 32 bytes".into()));
-        }
-        let mut state = self.lock();
-        let p = prefix(key);
-        let newly_denied = !state.denied.contains_key(&p);
-        if newly_denied {
-            state.denied.insert(
-                p,
-                Denial {
-                    reason,
-                    note: note.map(str::to_owned),
-                    actor: actor.to_owned(),
-                },
-            );
-        }
-        let before = state.torrents.len();
-        state.torrents.retain(|k, (_, t)| {
-            let v1 = t.info_hash_v1.map(|k| k.0);
-            let v2 = t.info_hash_v2.map(|h| prefix(&h.0));
-            k.0 != p && v1 != Some(p) && v2 != Some(p)
-        });
-        let tombstoned = before.saturating_sub(state.torrents.len());
-        state.pending.remove(&DhtKey(p));
-        Ok(DenyOutcome {
-            newly_denied,
-            tombstoned: u64::try_from(tombstoned).unwrap_or(u64::MAX),
-        })
-    }
-
     async fn pending_depth(&self) -> Result<i64> {
         Ok(
             i64::try_from(self.lock().pending.values().filter(|p| !p.gave_up).count())
@@ -509,9 +412,6 @@ impl CrawlStore for MemoryStore {
         let now = Instant::now();
         let mut due: Vec<(Option<Instant>, DhtKey)> = Vec::new();
         for key in state.torrents.keys() {
-            if Self::is_denied(&state, &[key.as_bytes()]) {
-                continue;
-            }
             let last = state.scrapes.get(key).and_then(|sc| sc.last_scraped);
             let est = state.scrapes.get(key).and_then(|sc| sc.est);
             let stale = match (last, est) {
@@ -629,10 +529,7 @@ impl CrawlStore for MemoryStore {
         let mut doomed: Vec<(u64, DhtKey)> = state
             .tombstoned
             .iter()
-            .filter(|(key, (at, _, _))| {
-                now.saturating_duration_since(*at) >= grace
-                    && !Self::is_denied(&state, &[key.as_bytes()])
-            })
+            .filter(|(_, (at, _, _))| now.saturating_duration_since(*at) >= grace)
             .map(|(key, (_, _, size))| (*size, *key))
             .collect();
         doomed.sort();
@@ -660,7 +557,7 @@ impl CrawlStore for MemoryStore {
         if excess == 0 {
             return Ok(0);
         }
-        let mut oldest: Vec<(Instant, [u8; DENY_PREFIX_LEN])> = state
+        let mut oldest: Vec<(Instant, [u8; PREFIX_LEN])> = state
             .removed
             .iter()
             .map(|(k, e)| (e.removed_at, *k))
@@ -676,21 +573,6 @@ impl CrawlStore for MemoryStore {
         Ok(i64::try_from(self.lock().removed.len()).unwrap_or(i64::MAX))
     }
 
-    async fn is_denied(&self, keys: &[&[u8]]) -> Result<bool> {
-        let mut state = self.lock();
-        state.deny_calls = state.deny_calls.saturating_add(1);
-        Ok(Self::is_denied(&state, keys))
-    }
-
-    async fn denied_mask(&self, keys: &[&[u8]]) -> Result<Vec<bool>> {
-        let mut state = self.lock();
-        state.deny_mask_calls = state.deny_mask_calls.saturating_add(1);
-        Ok(keys
-            .iter()
-            .map(|k| state.denied.contains_key(&prefix(k)))
-            .collect())
-    }
-
     async fn removal_cooldowns(
         &self,
         keys: &[DhtKey],
@@ -700,7 +582,9 @@ impl CrawlStore for MemoryStore {
         let mut state = self.lock();
         if state.failing_removals > 0 {
             state.failing_removals = state.failing_removals.saturating_sub(1);
-            return Err(StoreError::Invalid("injected removal_cooldowns failure".into()));
+            return Err(StoreError::Invalid(
+                "injected removal_cooldowns failure".into(),
+            ));
         }
         let now = Instant::now();
         Ok(keys
@@ -742,8 +626,8 @@ impl CrawlStore for MemoryStore {
         let now = Instant::now();
         let mut n = 0u64;
         for key in keys {
-            // Tombstoned and denied rows are gone from `torrents` (only a
-            // fetch revives those), so only live rows refresh.
+            // Tombstoned rows are gone from `torrents` (only a fetch
+            // revives those), so only live rows refresh.
             if state.torrents.contains_key(key)
                 && let Some(sc) = state.scrapes.get_mut(key)
             {
@@ -829,31 +713,8 @@ mod tests {
         s.complete(&key(1), &torrent(key(1))).await.unwrap();
         assert!(s.torrent(&key(1)).is_some());
         assert_eq!(s.observe(&[obs(key(1), false)], 10).await.unwrap().known, 1);
-
-        let d = s
-            .deny(
-                key(3).as_bytes(),
-                DenyReason::CsamAuto,
-                Some("n"),
-                "crawler",
-            )
-            .await
-            .unwrap();
-        assert!(d.newly_denied);
-        assert!(matches!(
-            s.complete(&key(3), &torrent(key(3))).await,
-            Err(StoreError::Denied)
-        ));
-        let d = s
-            .deny(key(1).as_bytes(), DenyReason::Dmca, None, "cli")
-            .await
-            .unwrap();
-        assert_eq!(d.tombstoned, 1);
-        assert!(s.torrent(&key(1)).is_none());
-        assert_eq!(
-            s.denial(key(3).as_bytes()).unwrap().reason,
-            DenyReason::CsamAuto
-        );
+        s.complete(&key(3), &torrent(key(3))).await.unwrap();
+        assert!(s.torrent(&key(3)).is_some());
 
         // Leases expire; failed keys wait for their backoff.
         tokio::time::advance(Duration::from_secs(121)).await;
@@ -1063,48 +924,12 @@ mod scrape_tests {
                 .unwrap()
         );
 
-        // A denied tombstone is never purged.
-        s.preload_denial(k.as_bytes(), DenyReason::Other);
-        assert!(s.is_denied(&[k.as_bytes()]).await.unwrap());
-        assert_eq!(s.purge_tombstoned(Duration::ZERO, 1000).await.unwrap(), 0);
-        // Claiming skips denied rows.
-        s.complete(&k, &torrent(k)).await.unwrap_err();
-        assert!(
-            s.claim_scrape_due(10, Duration::ZERO, Duration::ZERO)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        // A fresh tombstone purges once its grace expires.
+        assert_eq!(s.purge_tombstoned(Duration::ZERO, 1000).await.unwrap(), 1);
 
         // Trimming keeps the newest rows up to the cap.
         assert_eq!(s.trim_removed_keys(10).await.unwrap(), 0);
         assert_eq!(s.trim_removed_keys(0).await.unwrap(), 1);
         assert_eq!(s.removed_keys_count().await.unwrap(), 0);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn denied_mask_reports_each_key_in_one_pass() {
-        let s = MemoryStore::new();
-        // Empty input: empty mask, but the call still counts.
-        assert!(s.denied_mask(&[]).await.unwrap().is_empty());
-        s.preload_denial(key(1).as_bytes(), DenyReason::Other);
-        // A 32-byte v2 key is denied by its 20-byte prefix, same as
-        // `is_denied`.
-        let mut v2 = [0u8; 32];
-        v2[..20].copy_from_slice(key(2).as_bytes());
-        s.preload_denial(&v2, DenyReason::Dmca);
-        let mask = s
-            .denied_mask(&[key(1).as_bytes(), key(9).as_bytes(), &v2])
-            .await
-            .unwrap();
-        assert_eq!(mask, vec![true, false, true]);
-        // Duplicates report per position; unknown keys stay false.
-        let mask = s
-            .denied_mask(&[key(9).as_bytes(), key(1).as_bytes(), key(9).as_bytes()])
-            .await
-            .unwrap();
-        assert_eq!(mask, vec![false, true, false]);
-        assert_eq!(s.deny_mask_calls(), 3);
-        assert_eq!(s.deny_calls(), 0);
     }
 }
