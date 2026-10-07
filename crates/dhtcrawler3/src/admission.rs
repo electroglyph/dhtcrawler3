@@ -615,13 +615,14 @@ impl<S: CrawlStore> Admission<S> {
     /// get the ÷4 shortening from the store — shortening, never bypassing.
     async fn gate_removals(&mut self, strong_evidence: &[DhtKey]) {
         let now = Instant::now();
+        let strong: HashSet<&DhtKey> = strong_evidence.iter().collect();
         let mut misses = Vec::new();
         let mut blocked_keys = Vec::new();
         let mut remembered = Vec::new();
         for key in self.batch.keys().copied().collect::<Vec<_>>() {
             // Seed announces are fresh evidence: always re-check them, so a
             // cached verdict never masks the ÷4 shortening.
-            if strong_evidence.contains(&key) {
+            if strong.contains(&key) {
                 misses.push(key);
                 continue;
             }
@@ -1337,6 +1338,69 @@ mod tests {
         let out = a.flush(None, None).await.unwrap();
         assert_eq!(out.queued, 1);
         assert_eq!(store.pending_keys(), vec![dead]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_rescans_cached_keys_carrying_seed_evidence() {
+        use crate::stores::CrawlStore;
+
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::new(vec![ip("8.8.4.4")], vec![]);
+        // 32 tombstoned keys: even-indexed ones will carry seed evidence.
+        let all: Vec<DhtKey> = (0..32u8).map(|n| key(10 + n)).collect();
+        for k in &all {
+            let id = store.complete(k, &stored_torrent(*k)).await.unwrap();
+            let items = store
+                .claim_scrape_due(100, Duration::ZERO, Duration::ZERO)
+                .await
+                .unwrap();
+            let snap = items.iter().find(|c| c.id == id).unwrap().clone();
+            assert!(
+                store
+                    .tombstone_dead(id, snap.last_seen_at, snap.change_seq)
+                    .await
+                    .unwrap()
+            );
+        }
+        // Two days into the 7d cooldown a first flush blocks everything
+        // and caches the verdicts.
+        tokio::time::advance(Duration::from_secs(2 * 24 * 60 * 60)).await;
+        let t0 = Instant::now();
+        for k in &all {
+            a.handle(event(*k, Source::Announce, "1.2.3.4", None), &own, t0);
+        }
+        let out = a.flush(None, None).await.unwrap();
+        assert_eq!(out.queued, 0);
+        assert!(store.pending_keys().is_empty());
+        // Seed announces for the even half (plus evidence for unknown keys,
+        // which must not error or admit anything): the evidence half must
+        // skip the cached Blocked verdicts, re-check the store, and land
+        // inside the ÷4 shortening window (admitted), while the odd half
+        // stays on its cached verdict (blocked).
+        for k in all.iter().step_by(2) {
+            a.handle(seed_event(*k), &own, Instant::now());
+        }
+        a.handle(seed_event(key(200)), &own, Instant::now());
+        a.handle(seed_event(key(201)), &own, Instant::now());
+        for k in all.iter().skip(1).step_by(2) {
+            a.handle(
+                event(*k, Source::Announce, "5.6.7.8", None),
+                &own,
+                Instant::now(),
+            );
+        }
+        let out = a.flush(None, None).await.unwrap();
+        let mut pending = store.pending_keys();
+        pending.sort();
+        let mut expected: Vec<DhtKey> = all.iter().step_by(2).copied().collect();
+        // The unknown evidence keys are fresh (no removal on record), so
+        // they pass the gate and are admitted like any new key.
+        expected.push(key(200));
+        expected.push(key(201));
+        expected.sort();
+        assert_eq!(out.queued, expected.len() as u64);
+        assert_eq!(pending, expected);
     }
 
     #[tokio::test(start_paused = true)]
