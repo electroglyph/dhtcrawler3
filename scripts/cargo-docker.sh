@@ -12,7 +12,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Pinned like the Dockerfile's RUST_IMAGE: the tag alone floats.
-image="rust:1.98-slim-trixie@sha256:bce1476d4be4d78b83705bc5f428b86d640eeeea33e9dadafbc037b5703a53bf"
+image="rust:1.99-slim-trixie@sha256:24e632c09342c20abf8312cf4f61430a911c01ed3a5e4c02b87292b1c39c5273"
 target="${DC3_TARGET:-docker}"
 network="${DC3_NETWORK:-dc3-dev}"
 

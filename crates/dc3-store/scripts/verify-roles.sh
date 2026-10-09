@@ -76,7 +76,7 @@ docker run --rm --network "$network" \
   -e CARGO_TARGET_DIR="/w/target/$target" \
   -e CARGO_TERM_COLOR=never \
   -w /w \
-  rust:1.98-slim-trixie \
+  rust:1.99-slim-trixie \
   cargo test -p dc3-store --locked --test roles -- --nocapture
 
 # The privilege matrix, read from the catalog as the superuser. Each row is

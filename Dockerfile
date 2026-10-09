@@ -4,7 +4,7 @@
 # Base images are pinned by multi-arch index digest; update them deliberately
 # (Dependabot opens PRs for this file).
 
-ARG RUST_IMAGE=rust:1.98-slim-trixie@sha256:bce1476d4be4d78b83705bc5f428b86d640eeeea33e9dadafbc037b5703a53bf
+ARG RUST_IMAGE=rust:1.99-slim-trixie@sha256:24e632c09342c20abf8312cf4f61430a911c01ed3a5e4c02b87292b1c39c5273
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 
 FROM ${RUST_IMAGE} AS build

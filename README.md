@@ -122,7 +122,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 source "$HOME/.cargo/env"
 git clone https://github.com/electroglyph/dhtcrawler4
 cd dhtcrawler4
-cargo build --release --locked -p dhtcrawler4   # toolchain 1.98.1 auto-installs
+cargo build --release --locked -p dhtcrawler4   # toolchain 1.99.0 auto-installs
 sudo install -m 0755 target/release/dhtcrawler4 /usr/local/bin/dhtcrawler4
 ```
 
