@@ -282,12 +282,12 @@ Minimum that works without OOM kills (these are the compose `mem_limit`s):
 
 | Service    | RAM   | Disk                        |
 | ---------- | ----- | --------------------------- |
-| crawl      | 1 GiB | a few MiB of DHT state      |
+| crawl      | 2 GiB | a few MiB of DHT state      |
 | index      | 1 GiB | grows with the corpus       |
 | web        | 512 MiB | —                         |
 | PostgreSQL | 2 GiB | grows with the corpus       |
 
-Use a host with at least 4 GiB RAM. Disk: tens of GiB to start; the database
+Use a host with at least 6 GiB RAM. Disk: tens of GiB to start; the database
 and the search index grow as torrents are discovered, so leave room (100+ GiB
 is comfortable). One UDP port must be reachable from the internet: **6881**.
 
@@ -481,8 +481,8 @@ torrents at first. That is normal (next step). Set `DC3_WEB__HSTS: "true"`
 
 Expect the first searchable torrents within minutes and a steadily growing
 index over hours to days. The default crawl budget (`max_packets_per_sec =
-250`, 64 fetch workers) is modest enough for a home connection; raise it in
-`deploy/config/dhtcrawler4.toml` on a real server.
+1000`, 192 fetch workers) is sized for a server; lower it in
+`deploy/config/dhtcrawler4.toml` on a home connection.
 
 ### 8. Day-to-day operation
 

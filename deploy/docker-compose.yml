@@ -102,8 +102,8 @@ services:
       start_period: 5m
     # Shutdown waits up to 30 s for fetches, flushes discoveries and saves DHT state.
     stop_grace_period: 60s
-    # Crawl memory: in-flight metadata (256 MiB byte budget) plus routing and caches.
-    mem_limit: 1g
+    # Crawl memory: in-flight metadata (512 MiB byte budget) plus routing and caches.
+    mem_limit: 2g
 
   index:
     <<: *dc3

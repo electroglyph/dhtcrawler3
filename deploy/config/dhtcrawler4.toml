@@ -40,17 +40,18 @@ bootstrap = [
 ]
 # Routing-table state (node ids, a few hundred contacts). Never contains peers.
 state_dir = "/var/lib/dhtcrawler4"
-# Global outbound DHT packet budget. Keep this modest on home connections.
-max_packets_per_sec = 250
-sampler_concurrency = 32
+# Global outbound DHT packet budget. Sized for a server; lower it on a
+# home connection.
+max_packets_per_sec = 1000
+sampler_concurrency = 96
 # Answer no DHT queries and mark ours read-only (BEP 43). Leave false to be a
 # full, reciprocating DHT node.
 read_only = false
-fetch_workers = 64
-max_connections = 256
+fetch_workers = 192
+max_connections = 768
 max_metadata_bytes = 8388608
 # Total metadata bytes held by all fetches at once (memory bound).
-max_inflight_metadata_bytes = 268435456
+max_inflight_metadata_bytes = 536870912
 # Keys waiting for metadata. Above this, only sampled and announced keys are queued.
 max_pending = 5000000
 # BEP 33 seeder scrapes: dedicated workers re-poll stored torrents for their
