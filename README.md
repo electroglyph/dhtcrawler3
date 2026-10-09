@@ -9,11 +9,12 @@ dhtcrawler4 is a fork of [dhtcrawler3](https://github.com/poonasor/dhtcrawler3) 
 - [Running a server on Ubuntu without Docker](#running-a-server-on-ubuntu-without-docker)
 - [Running a server on Ubuntu](#running-a-server-on-ubuntu)
 - [Updating the running server](#updating-the-running-server)
+- [Troubleshooting](#troubleshooting)
 
 ## What changed since the dhtcrawler3 fork
 
 - **Removed content moderation:** report form, CSRF, `dc3-policy` crate, blocked-terms list, denylist/block pages, report/denylist tables, policy fuzz target.
-- **Added seeder scrapes (BEP 33):** the crawler now asks peers how many seeders each torrent has on its own bandwidth budget, shows seeder counts in search with `sort=seeders`, drops dead torrents, and remembers removed keys for 7→30→90 days.
+- **Added seeder scrapes (BEP 33):** the crawler now asks peers how many seeders each torrent has on its own bandwidth budget, shows seeder counts in search with `sort=seeders`, drops dead torrents, and remembers removed keys for 7→28→90 days.
 - **Server-sized crawl throughput:** fetch workers claim 8 keys at a time and record each batch in a single database transaction (falling back to one key at a time when a batch is rejected), with tighter fetch timeouts, a bigger scrape budget, 160 sampler workers, and a larger database connection pool plus gauges to watch it.
 - **Store durability:** deleted torrents stay reported-as-deleted so slow indexers still converge, database permissions repair themselves on migrate, refetched torrents come back to life with their liveness data intact, and counters can't overflow.
 - **Cookie theme switch, still no JavaScript:** header dark/light toggle via `POST /theme` (`theme` cookie, dark default). Removed `/.well-known/security.txt` and the `web.base_url` setting (old configs must drop that key).
@@ -144,12 +145,13 @@ default of 100 leaves little headroom once you raise the crawl pool (the
 Docker deployment sets 200).
 The per-role users and password files come from the environment in each
 systemd unit (step 6), so one file serves all roles. Leave `hsts = false`
-(the default) unless you terminate TLS in front of the site. Keeping
-`trusted_proxies = ["127.0.0.1"]` is harmless without a proxy (only localhost
-can present that header, and localhost is you) and already correct if you
-later put one on the host. The `[crawl]`
+(the default) unless you terminate TLS in front of the site. The `[crawl]`
 `state_dir` and `[index]` `path` defaults already match the directories from
-step 1.
+step 1. One key has no usable default: the example ships
+`trusted_proxies = []`, which only warns on loopback but is rejected when
+the site listens on a real interface (as it does here on port 80) — the
+unit below supplies it via `DC3_WEB__TRUSTED_PROXIES` instead, so the file
+can keep the empty default.
 
 Validate (prints the config back without secrets, plus warnings):
 
@@ -209,7 +211,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/dhtcrawler4
-MemoryMax=1G
+MemoryMax=2G
 Environment=DC3_DATABASE__USER=dc3_crawler
 Environment=DC3_DATABASE__PASSWORD_FILE=/etc/dhtcrawler4/secrets/dc3_crawler_password
 Environment=DC3_LOG__FORMAT=json
@@ -408,9 +410,11 @@ curl -s http://127.0.0.1/healthz        # the HTTP stack answers
 curl -s http://127.0.0.1/ | head -c 300
 ```
 
-`/healthz` means "the process answers HTTP"; `/readyz` (metrics port 9100,
-reachable only inside the backend network) additionally means "the database
-answers". The compose healthchecks use exactly these.
+`/healthz` means "the process answers HTTP". `/readyz` additionally means
+"the database answers" — the web role serves it on the site port and every
+role serves it on its metrics port 9100 (reachable only inside the backend
+network). The compose healthchecks use exactly these (crawl/index poll the
+metrics `/readyz`, web polls `/healthz`).
 
 ### 6. HTTPS via Caddy (optional)
 
@@ -512,10 +516,11 @@ docker compose ps                     # includes healthcheck status
   port).
 - **Database pool pressure:** `dc3_db_pool_size` vs `dc3_db_pool_idle` on the
   crawl role. Idle pinned near zero means the pool is saturated — raise
-  `DC3_DATABASE__MAX_CONNECTIONS` (compose sets 48) and PostgreSQL's
+  `DC3_DATABASE__MAX_CONNECTIONS` (compose sets 96) and PostgreSQL's
   `max_connections` (compose sets 200) together, never just one side.
-- **Totals:** `docker compose exec crawl /usr/local/bin/dhtcrawler4 --config /etc/dhtcrawler4/dhtcrawler4.toml stats`
-- **Config check (prints config without secrets):** same binary with
+- **Totals:** `docker compose exec crawl stats` (the image bakes in the
+  binary and config path, so only the subcommand is needed)
+- **Config check (prints config without secrets):** same with
   `check-config`.
 - **Rebuild the search index from scratch:** stop the index role first, then
   `docker compose run --rm index index --rebuild`.
@@ -553,7 +558,8 @@ docker image prune -f                       # drop the superseded image
 
 What happens, in order: the image rebuilds from the new tree; `migrate`
 runs (a no-op when the schema is current); `crawl`, `index` and `web`
-recreate one at a time behind the same health gates as first install.
+recreate behind the same dependency gates as first install (each waits for
+`migrate`, then starts together).
 `pgdata`, `state` and `index` volumes survive — only containers restart, so
 the web UI is down for seconds. Then verify:
 
@@ -598,16 +604,89 @@ off the host. To restore: `down`, fresh `pgdata` volume, extract the
 tarball into it, `up -d --build`.
 
 Reclaim build disk now and then: `docker builder prune -f` drops the
-superseded build cache (gigabytes per rebuild — yours was 5 GB) and
+superseded build cache (gigabytes per rebuild) and
 `docker image prune -f` drops the superseded images (never prune volumes
 unless you mean to wipe the database and index — that flag is `-v`, keep
 it away from routine cleanup). For hands-free cleanup, run the prune weekly
-from cron:
+from cron (as a user in the `docker` group, or root's crontab):
 
 ```sh
 # weekly sunday 04:00: prune unused build cache and images
 0 4 * * 0 docker builder prune -f && docker image prune -f
 ```
+
+## Troubleshooting
+
+Slow indexing, a full disk, or a role that won't turn healthy — start with
+one command that collects everything worth looking at. Run it from
+`~/dhtcrawler4/deploy` and keep the file it writes (`/tmp/dc3-diag.txt`);
+paste it when asking for help, or hand it to an AI — it contains every
+number the checks below reason about.
+
+```sh
+cd ~/dhtcrawler4/deploy
+{
+  echo '### docker ###'
+  docker system df
+  docker stats --no-stream
+  docker compose ps
+  echo '### disk ###'
+  sudo sh -c 'du -sh /var/lib/docker/volumes/dhtcrawler4_*/_data'
+  # If that path does not exist, the daemon uses another data root; use the
+  # mountpoint it reports instead:
+  # docker volume inspect dhtcrawler4_pgdata --format '{{.Mountpoint}}'
+  echo '### database ###'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT * FROM stats_daily ORDER BY day DESC LIMIT 3;" -c "SELECT count(*) AS torrents FROM torrents;" -c "SELECT count(*) FILTER (WHERE NOT gave_up) AS queued, count(*) FILTER (WHERE gave_up) AS gave_up FROM pending;" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS size FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 6;"'
+  echo '### crawl metrics ###'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_fetch_total|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total)" <&3'
+} 2>&1 | tee /tmp/dc3-diag.txt
+```
+
+Two things in there need explaining. The database lives in a container
+with no published port, so the SQL goes through the `db` service with the
+superuser password from the secrets file. The crawl container is
+distroless (no shell, no curl), so the metrics are fetched by borrowing
+the `db` container's shell to knock on `crawl:9100` over the internal
+network. `sudo` is needed only for the `du` line: the shell must expand
+the `*` as root, hence the quotes. Without Docker, the equivalents are
+plain `psql`, `du` on the data/index directories, and
+`curl localhost:9100/metrics`.
+
+How to read the output:
+
+- **Nothing indexed after a night?** Compare `discovered` vs `fetched`
+  vs `fetch_failed` in `stats_daily`. Failed dwarfing fetched means
+  workers burn attempts on dead peers — normal up to a point (the DHT is
+  mostly graveyards); a success rate near zero with millions queued is
+  the crawler working as designed, just slowly. Then look at
+  `dc3_fetch_total`: `no_peers` dominating means lookups find nobody
+  holding the keys (stale keys); `fetch_failed` dominating means peers
+  exist but TCP connects/handshakes die (firewalled internet, or
+  timeouts too tight).
+- **Is the DHT side healthy?** `good_nodes` in the hundreds with
+  `timeouts_total` a small fraction of `samples_total` is fine, and the
+  table keeps filling for the first days. `queries_received_total`
+  climbing (especially `get_peers`) proves inbound UDP 6881 works — if
+  it sits near zero, the internet cannot reach the node: fix the
+  firewall/security group, no config knob compensates. All-zero `v6`
+  lines just mean no working IPv6 (expected when it is disabled on the
+  host; harmless).
+- **Disk filling up?** `docker system df` first: gigabytes of reclaimable
+  build cache is normal after repeated `--build` updates — `docker
+  builder prune -f` drops it. Of the volumes, `pgdata` is always the
+  big one: the pending queue holds millions of undiscovered keys (that
+  is the `queued` count, not a problem by itself) and constant row
+  updates churn WAL. The `index` volume stays small until the torrent
+  count is large; `state` (DHT routing snapshot) is kilobytes.
+- **Out of headroom?** `docker stats` shows it: crawl CPU/mem near its
+  2 GiB cap, or the DB pool idle gauge pinned at zero, means the crawl
+  budget outgrew the machine — lower `fetch_workers`/`max_connections`
+  or grow the host. Plenty of idle CPU/RAM means the opposite: the
+  knobs, not the hardware, are the limit.
+- **A role unhealthy?** `docker compose ps` names it;
+  `docker compose logs --tail=30 <role>` (JSON lines, query text never
+  logged) usually names the cause: DB unreachable, bad TOML key, port
+  already bound.
 
 ## License
 
