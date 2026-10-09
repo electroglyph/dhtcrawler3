@@ -34,12 +34,12 @@ use sha2::Sha256;
 pub use fetch::fetch_metadata;
 
 /// Default TCP connect timeout.
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Default time allowed, after connecting, to complete the BitTorrent handshake
 /// and receive the peer's extended handshake.
-pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 /// Default bound on a whole fetch, from connect through verification.
-pub const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 /// Default maximum accepted `metadata_size` (8 MiB).
 pub const DEFAULT_MAX_METADATA: usize = 8 * 1024 * 1024;
 

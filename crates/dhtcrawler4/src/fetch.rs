@@ -2,14 +2,15 @@
 //! over BEP 9, verify and parse it, and store the result.
 //!
 //! Each worker:
-//! 1. claims one key with a 120 s lease, renewed every 90 s while it works;
-//! 2. collects peers from the hint map and `get_peers` (15 s), each passing
+//! 1. claims up to 8 keys with a 120 s lease;
+//! 2. collects peers from the hint map and `get_peers` (10 s), each passing
 //!    the address chokepoint and the per-destination limits;
 //! 3. tries up to 8 peers, 3 at a time, inside the global connection limit
-//!    and the metadata byte budget, all within 60 s;
+//!    and the metadata byte budget, all within 45 s;
 //! 4. verifies and parses the metadata;
-//! 5. finishes with `complete`, `fail` or `give_up` (verified metadata that
-//!    cannot be parsed or stored, or a BEP 27 private torrent).
+//! 5. records successes in one transaction and failures and give-ups in one
+//!    each (`complete_batch`, `fail_batch`, `give_up_batch`), falling back
+//!    to one key at a time when a batch is rejected.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -31,7 +32,7 @@ use crate::peers::{OwnAddrs, PeerFilter, PeerSource};
 use crate::stores::CrawlStore;
 
 /// Queue items claimed at a time by one worker.
-pub const CLAIM_BATCH: i64 = 1;
+pub const CLAIM_BATCH: i64 = 8;
 /// Lease on a claimed key.
 pub const CLAIM_LEASE: Duration = Duration::from_secs(120);
 /// How often a lease is renewed while its key is being worked on.
@@ -41,19 +42,19 @@ pub const IDLE_SLEEP_MIN: Duration = Duration::from_secs(1);
 /// Longest pause of an idle worker.
 pub const IDLE_SLEEP_MAX: Duration = Duration::from_secs(3);
 /// Time allowed for the `get_peers` lookup of one key.
-pub const GET_PEERS_TIMEOUT: Duration = Duration::from_secs(15);
+pub const GET_PEERS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time allowed for all fetch attempts of one key.
-pub const KEY_DEADLINE: Duration = Duration::from_secs(60);
+pub const KEY_DEADLINE: Duration = Duration::from_secs(45);
 /// Peers tried per key.
 pub const MAX_PEER_ATTEMPTS: usize = 8;
 /// Peers tried at the same time per key.
 pub const PARALLEL_ATTEMPTS: usize = 3;
 /// TCP connect timeout per peer.
-pub const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Handshake timeout per peer.
-pub const PEER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const PEER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 /// Whole-fetch timeout per peer.
-pub const PEER_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+pub const PEER_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Concurrent connections to one destination IP.
 pub const DEST_MAX_CONCURRENT: u32 = 2;
 /// Connection attempts to one destination IP per window.
@@ -538,6 +539,20 @@ pub struct FetchLimitsConfig {
     pub max_inflight_metadata_bytes: usize,
 }
 
+/// What one claimed key needs from the database, decided without any store
+/// access.
+#[derive(Debug)]
+enum Staged {
+    /// No usable peer was found.
+    Missing,
+    /// Peers were found, but no fetch succeeded in time.
+    Failed,
+    /// Verified metadata that can never be stored, with its outcome.
+    Doomed(FetchOutcome),
+    /// A torrent ready to store.
+    Ready(NewTorrent),
+}
+
 impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
     /// Shared state for the workers.
     pub fn new(
@@ -573,8 +588,9 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         &self.limiter
     }
 
-    /// Fetches, checks and stores one claimed key.
-    pub async fn process(&self, item: &PendingItem) -> FetchOutcome {
+    /// Fetches, verifies and parses one claimed key: the network half of
+    /// [`Fetcher::process`], with no store access and no metrics.
+    async fn fetch_item(&self, item: &PendingItem) -> Staged {
         let key = item.dht_key;
         let renewal = renewal_before_deadline(self.tuning.renew_every, self.tuning.key_deadline)
             .then(|| {
@@ -588,19 +604,54 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         let obtained = tokio::time::timeout(self.tuning.key_deadline, self.obtain(key))
             .await
             .unwrap_or(Obtained::Failed);
-        let outcome = match obtained {
-            Obtained::NoPeers => self.give_back(key, FetchOutcome::NoPeers).await,
-            Obtained::Failed => self.give_back(key, FetchOutcome::FetchFailed).await,
-            Obtained::Metadata(info) => self.store_metadata(key, info).await,
-        };
         drop(renewal);
+        match obtained {
+            Obtained::NoPeers => Staged::Missing,
+            Obtained::Failed => Staged::Failed,
+            Obtained::Metadata(info) => {
+                let key = item.dht_key;
+                let inspection = tokio::task::spawn_blocking(move || inspect(&key, &info))
+                    .await
+                    .unwrap_or(Inspection::Invalid);
+                match inspection {
+                    Inspection::Mismatch => Staged::Failed,
+                    Inspection::Invalid => Staged::Doomed(FetchOutcome::ParseError),
+                    Inspection::Private => Staged::Doomed(FetchOutcome::Private),
+                    Inspection::Valid(meta) => Staged::Ready(new_torrent(key, meta)),
+                }
+            }
+        }
+    }
+
+    /// Records one fetched item.
+    async fn store_one(&self, item: &PendingItem, staged: Staged) -> FetchOutcome {
+        let outcome = match staged {
+            Staged::Missing => self.give_back(item.dht_key, FetchOutcome::NoPeers).await,
+            Staged::Failed => {
+                self.give_back(item.dht_key, FetchOutcome::FetchFailed)
+                    .await
+            }
+            Staged::Doomed(outcome) => self.give_up(item.dht_key, outcome).await,
+            Staged::Ready(t) => self.store_ready(item.dht_key, t).await,
+        };
+        self.emit(item, outcome);
+        outcome
+    }
+
+    /// The outcome counter and debug log, identical for every store path.
+    fn emit(&self, item: &PendingItem, outcome: FetchOutcome) {
         metrics::counter!(METRIC_FETCH, "outcome" => outcome.as_str()).increment(1);
         tracing::debug!(
             outcome = outcome.as_str(),
             earlier_attempts = item.attempts,
             "fetch finished"
         );
-        outcome
+    }
+
+    /// Fetches, checks and stores one claimed key.
+    pub async fn process(&self, item: &PendingItem) -> FetchOutcome {
+        let staged = self.fetch_item(item).await;
+        self.store_one(item, staged).await
     }
 
     async fn obtain(&self, key: DhtKey) -> Obtained {
@@ -709,31 +760,20 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         result
     }
 
-    async fn store_metadata(&self, key: DhtKey, info: Vec<u8>) -> FetchOutcome {
-        let inspection = tokio::task::spawn_blocking(move || inspect(&key, &info))
-            .await
-            .unwrap_or(Inspection::Invalid);
-        match inspection {
-            Inspection::Mismatch => self.give_back(key, FetchOutcome::FetchFailed).await,
-            // Verified metadata that does not parse never will: stop now.
-            Inspection::Invalid => self.give_up(key, FetchOutcome::ParseError).await,
-            // BEP 27 private torrents cannot be fetched by design: stop
-            // now, without keeping any record of the key.
-            Inspection::Private => self.give_up(key, FetchOutcome::Private).await,
-            Inspection::Valid(meta) => {
-                match self.store.complete(&key, &new_torrent(key, meta)).await {
-                    Ok(_) => FetchOutcome::Ok,
-                    // The store can never accept this torrent (e.g. a size
-                    // above i64::MAX); retrying would loop on it forever.
-                    Err(e @ StoreError::Invalid(_)) => {
-                        tracing::warn!(error = %e, "fetched torrent cannot be stored; giving up");
-                        self.give_up(key, FetchOutcome::StoreError).await
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "storing a fetched torrent failed");
-                        self.give_back(key, FetchOutcome::StoreError).await
-                    }
-                }
+    /// Stores one parsed torrent: the transaction half of the old
+    /// `store_metadata`.
+    async fn store_ready(&self, key: DhtKey, t: NewTorrent) -> FetchOutcome {
+        match self.store.complete(&key, &t).await {
+            Ok(_) => FetchOutcome::Ok,
+            // The store can never accept this torrent (e.g. a size
+            // above i64::MAX); retrying would loop on it forever.
+            Err(e @ StoreError::Invalid(_)) => {
+                tracing::warn!(error = %e, "fetched torrent cannot be stored; giving up");
+                self.give_up(key, FetchOutcome::StoreError).await
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "storing a fetched torrent failed");
+                self.give_back(key, FetchOutcome::StoreError).await
             }
         }
     }
@@ -771,9 +811,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                 }
                 Ok(items) => {
                     backoff = base;
-                    for item in &items {
-                        self.process(item).await;
-                    }
+                    self.process_batch(&items).await;
                     continue;
                 }
                 Err(e) => {
@@ -786,6 +824,89 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
             tokio::select! {
                 () = stop.cancelled() => break,
                 () = tokio::time::sleep(pause) => {}
+            }
+        }
+    }
+
+    /// Fetches a claimed batch, then records it in as few transactions as
+    /// the store allows. Outcomes and metrics match one-by-one `process()`.
+    async fn process_batch(&self, items: &[PendingItem]) {
+        let mut staged = Vec::with_capacity(items.len());
+        for item in items {
+            staged.push(self.fetch_item(item).await);
+        }
+        let mut readies: Vec<(usize, NewTorrent)> = Vec::new();
+        let mut faileds: Vec<(usize, FetchOutcome)> = Vec::new();
+        let mut doomeds: Vec<(usize, FetchOutcome)> = Vec::new();
+        for (index, stage) in staged.into_iter().enumerate() {
+            match stage {
+                Staged::Ready(t) => readies.push((index, t)),
+                Staged::Missing => faileds.push((index, FetchOutcome::NoPeers)),
+                Staged::Failed => faileds.push((index, FetchOutcome::FetchFailed)),
+                Staged::Doomed(outcome) => doomeds.push((index, outcome)),
+            }
+        }
+        // Successes share one transaction; a rejected batch falls back to
+        // one key at a time, exactly as `process()` would.
+        if !readies.is_empty() {
+            let pairs: Vec<(DhtKey, NewTorrent)> = readies
+                .iter()
+                .map(|(index, t)| (items[*index].dht_key, t.clone()))
+                .collect();
+            match self.store.complete_batch(&pairs).await {
+                Ok(ids) => {
+                    debug_assert_eq!(ids.len(), readies.len());
+                    for (index, _) in &readies {
+                        self.emit(&items[*index], FetchOutcome::Ok);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "batched completion failed; storing one key at a time");
+                    for (index, t) in readies {
+                        let outcome = self.store_ready(items[index].dht_key, t).await;
+                        self.emit(&items[index], outcome);
+                    }
+                }
+            }
+        }
+        if !faileds.is_empty() {
+            let keys: Vec<DhtKey> = faileds
+                .iter()
+                .map(|(index, _)| items[*index].dht_key)
+                .collect();
+            match self.store.fail_batch(&keys).await {
+                Ok(()) => {
+                    for (index, outcome) in &faileds {
+                        self.emit(&items[*index], *outcome);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "batched failure recording failed; recording one key at a time");
+                    for (index, outcome) in faileds {
+                        let stored = self.give_back(items[index].dht_key, outcome).await;
+                        self.emit(&items[index], stored);
+                    }
+                }
+            }
+        }
+        if !doomeds.is_empty() {
+            let keys: Vec<DhtKey> = doomeds
+                .iter()
+                .map(|(index, _)| items[*index].dht_key)
+                .collect();
+            match self.store.give_up_batch(&keys).await {
+                Ok(()) => {
+                    for (index, outcome) in &doomeds {
+                        self.emit(&items[*index], *outcome);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "batched give-up failed; recording one key at a time");
+                    for (index, outcome) in doomeds {
+                        let stored = self.give_up(items[index].dht_key, outcome).await;
+                        self.emit(&items[index], stored);
+                    }
+                }
             }
         }
     }
@@ -1178,7 +1299,7 @@ mod tests {
     #[test]
     fn renewal_guard_spawns_only_before_the_deadline() {
         // Default tuning: the first tick (90 s) never fires before the
-        // fetch times out (60 s).
+        // fetch times out (45 s).
         assert!(!renewal_before_deadline(
             Duration::from_secs(90),
             Duration::from_secs(60)
@@ -1315,6 +1436,59 @@ mod tests {
                 .unwrap_err(),
             DestDenied::NegativeCache
         );
+    }
+
+    #[tokio::test]
+    async fn process_batch_matches_process() {
+        let first = info_dict("batch one", &["a.txt"], false);
+        let second = info_dict("batch two", &["b.txt"], false);
+        let private = info_dict("batch private", &["c.txt"], true);
+        let seeders = [
+            seeder(&first).await,
+            seeder(&second).await,
+            seeder(&private).await,
+        ];
+        // Every key sees the same peers, in order: each key skips the
+        // seeders holding other torrents (mismatch) until its own. The last
+        // key matches nothing and fails.
+        let peers = FixedPeers(seeders.to_vec());
+        let keys = [
+            key_of(&first),
+            key_of(&second),
+            key_of(&private),
+            DhtKey([77; 20]),
+        ];
+        let expected = [
+            FetchOutcome::Ok,
+            FetchOutcome::Ok,
+            FetchOutcome::Private,
+            FetchOutcome::FetchFailed,
+        ];
+        let store = MemoryStore::new();
+        for k in &keys {
+            store.enqueue(*k);
+        }
+        let f = fetcher(&store, peers);
+        let items: Vec<PendingItem> = keys.iter().map(|k| item(*k)).collect();
+        f.process_batch(&items).await;
+        for (k, name) in [(keys[0], "batch one"), (keys[1], "batch two")] {
+            let stored = store.torrent(&k).unwrap();
+            assert_eq!(stored.name, name);
+        }
+        assert!(store.torrent(&keys[2]).is_none());
+        assert_eq!(store.failures(&keys[3]), 1);
+        // The failed key stays queued for retry; the rest are done.
+        assert_eq!(store.pending_keys(), vec![keys[3]]);
+
+        // One key at a time gives the same outcomes on the same setup.
+        let store = MemoryStore::new();
+        for k in &keys {
+            store.enqueue(*k);
+        }
+        let f = fetcher(&store, FixedPeers(seeders.to_vec()));
+        for (k, outcome) in keys.iter().zip(expected) {
+            assert_eq!(f.process(&item(*k)).await, outcome);
+        }
     }
 
     #[tokio::test]

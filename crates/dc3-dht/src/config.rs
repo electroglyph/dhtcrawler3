@@ -12,7 +12,7 @@ pub const DEFAULT_PORT: u16 = 6881;
 /// Default global send budget in packets per second (design §3).
 pub const DEFAULT_MAX_PACKETS_PER_SEC: u32 = 1000;
 /// Default number of concurrent `sample_infohashes` queries.
-pub const DEFAULT_SAMPLER_CONCURRENCY: usize = 96;
+pub const DEFAULT_SAMPLER_CONCURRENCY: usize = 160;
 /// Default client version sent in `v`: "DC" plus version 0.1.
 pub const DEFAULT_CLIENT_VERSION: [u8; 4] = *b"DC\x00\x01";
 /// Default bootstrap routers (checked live on 2026-09-16; see `docs/00-horismos.md`).
@@ -22,8 +22,9 @@ pub const DEFAULT_BOOTSTRAP: [&str; 4] = [
     "router.bt.ouinet.work:6881",
     "router.bittorrent.com:6881",
 ];
-/// Default BEP 33 scrape budget in packets per second (§2: 1000/s crawl + 25/s scrape).
-pub const DEFAULT_SCRAPE_PACKETS_PER_SEC: u32 = 25;
+/// Default BEP 33 scrape budget in packets per second, kept much smaller
+/// than the crawl bucket so scrapes never starve discovery.
+pub const DEFAULT_SCRAPE_PACKETS_PER_SEC: u32 = 100;
 /// Upper bound on `sampler_concurrency`.
 pub const MAX_SAMPLER_CONCURRENCY: usize = 1024;
 /// Default responder budget in replies per second (design §3).
@@ -329,9 +330,9 @@ mod tests {
         );
         assert_eq!(c.state_file, None);
         assert_eq!(c.max_packets_per_sec, 1000);
-        assert_eq!(c.scrape_packets_per_sec, 25);
+        assert_eq!(c.scrape_packets_per_sec, 100);
         assert!(c.sampler);
-        assert_eq!(c.sampler_concurrency, 96);
+        assert_eq!(c.sampler_concurrency, 160);
         assert!(!c.read_only);
         assert!(!c.allow_private_addrs);
         assert_eq!(&c.client_version, b"DC\x00\x01");
@@ -363,7 +364,7 @@ mod tests {
         // crawl and crawl bursts never starve scrapes (node.rs:
         // `query_scrape` charges `scrape_budget`, `query_gated` charges
         // `budget`; both share per-address spacing).
-        assert_eq!(DEFAULT_SCRAPE_PACKETS_PER_SEC, 25);
+        assert_eq!(DEFAULT_SCRAPE_PACKETS_PER_SEC, 100);
         assert_eq!(DEFAULT_MAX_PACKETS_PER_SEC, 1000);
         let c = DhtConfig::default();
         assert!(c.scrape_packets_per_sec < c.max_packets_per_sec);

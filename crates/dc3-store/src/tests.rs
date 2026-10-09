@@ -2182,3 +2182,187 @@ async fn scrape_claim_returns_oldest_first(pool: PgPool) {
     let claimed = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
     assert_eq!(claimed.iter().map(|c| c.id).collect::<Vec<_>>(), ids);
 }
+
+/// Row content without id/change_seq, for batch-vs-sequential comparison.
+async fn torrent_body(
+    pool: &PgPool,
+    id: i64,
+) -> (
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    String,
+    u64,
+    u64,
+    bool,
+    u64,
+) {
+    let r = raw_torrent(pool, id).await;
+    (
+        r.dht_key.0.to_vec(),
+        r.info_hash_v1.map(|k| k.0.to_vec()),
+        r.info_hash_v2.map(|h| h.0.to_vec()),
+        r.name,
+        r.total_size,
+        r.file_count,
+        r.files_truncated,
+        r.seen_count,
+    )
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn complete_batch_matches_sequential(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // Three unrelated keys through one transaction.
+    let keys = [key(61), key(62), key(63)];
+    for (i, k) in keys.iter().enumerate() {
+        s.observe(&[obs(*k, (i + 1) as u32)], NO_LIMIT)
+            .await
+            .unwrap();
+    }
+    let items: Vec<(DhtKey, NewTorrent)> =
+        keys.iter().map(|k| (*k, torrent(*k, "batched"))).collect();
+    let ids = s.complete_batch(&items).await.unwrap();
+    assert_eq!(ids.len(), 3);
+    for (i, id) in ids.iter().enumerate() {
+        let r = raw_torrent(&pool, *id).await;
+        assert_eq!(r.name, "batched");
+        assert_eq!(r.seen_count, (i + 1) as u64);
+        assert!(r.deleted_at.is_none());
+    }
+    assert_eq!(today(&pool).await.fetched, 3);
+    assert_eq!(s.stats().await.unwrap().pending, 0);
+
+    // The same scenario through sequential completes gives the same bodies.
+    let skeys = [key(71), key(72), key(73)];
+    for (i, k) in skeys.iter().enumerate() {
+        s.observe(&[obs(*k, (i + 1) as u32)], NO_LIMIT)
+            .await
+            .unwrap();
+        s.complete(k, &torrent(*k, "batched")).await.unwrap();
+    }
+    let mut batch_bodies = Vec::new();
+    for id in &ids {
+        batch_bodies.push(torrent_body(&pool, *id).await);
+    }
+    let seq_ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM torrents WHERE dht_key = ANY($1::bytea[]) ORDER BY id")
+            .bind(&skeys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let mut seq_bodies = Vec::new();
+    for id in &seq_ids {
+        seq_bodies.push(torrent_body(&pool, *id).await);
+    }
+    // Bodies differ in dht_key and info_hash_v1 (different key sets by
+    // construction); compare everything else.
+    for (b, q) in batch_bodies.iter().zip(seq_bodies.iter()) {
+        assert_eq!(
+            (&b.2, &b.3, b.4, b.5, b.6, b.7),
+            (&q.2, &q.3, q.4, q.5, q.6, q.7)
+        );
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn complete_batch_merges_aliases_within_the_batch(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // k2's torrent carries k1's v1 hash: the second item must merge into the
+    // row the first item inserted in the same transaction.
+    let k1 = key(64);
+    let k2 = key(65);
+    s.observe(&[obs(k1, 2), obs(k2, 3)], NO_LIMIT)
+        .await
+        .unwrap();
+    let t2 = NewTorrent {
+        name: "second name".into(),
+        ..torrent(k2, "ignored")
+    };
+    let t2 = NewTorrent {
+        info_hash_v1: Some(k1),
+        ..t2
+    };
+    let ids = s
+        .complete_batch(&[(k1, torrent(k1, "first")), (k2, t2)])
+        .await
+        .unwrap();
+    assert_eq!(ids[0], ids[1]);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM torrents")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let r = raw_torrent(&pool, ids[0]).await;
+    assert_eq!(r.name, "second name");
+    assert_eq!(r.seen_count, 5);
+    // The stored v1 hash is kept: the other row already owned it is this
+    // same row, so no conflict strips it.
+    assert_eq!(r.info_hash_v1, Some(k1));
+    assert_eq!(today(&pool).await.fetched, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn complete_batch_is_atomic_on_invalid(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k1 = key(66);
+    let k2 = key(67);
+    s.observe(&[obs(k1, 1), obs(k2, 1)], NO_LIMIT)
+        .await
+        .unwrap();
+    let bad = NewTorrent {
+        name: "x".repeat(MAX_NAME_CHARS + 1),
+        ..torrent(k2, "bad")
+    };
+    let err = s
+        .complete_batch(&[(k1, torrent(k1, "good")), (k2, bad)])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Invalid(_)), "{err:?}");
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM torrents")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(today(&pool).await.fetched, 0);
+    // Nothing was consumed either: both keys are still pending.
+    assert_eq!(s.stats().await.unwrap().pending, 2);
+
+    // An empty batch is a no-op.
+    let empty: Vec<(DhtKey, NewTorrent)> = Vec::new();
+    assert!(s.complete_batch(&empty).await.unwrap().is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn fail_and_give_up_batches(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let keys = [key(68), key(69), key(70)];
+    for k in &keys {
+        s.observe(&[obs(*k, 1)], NO_LIMIT).await.unwrap();
+    }
+    s.fail_batch(&keys[..2]).await.unwrap();
+    let attempts: Vec<i32> = sqlx::query_scalar(
+        "SELECT attempts FROM pending WHERE dht_key = ANY($1::bytea[]) ORDER BY dht_key",
+    )
+    .bind(&keys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(attempts, vec![1, 1, 0]);
+    assert_eq!(today(&pool).await.fetch_failed, 2);
+
+    s.give_up_batch(&keys[1..]).await.unwrap();
+    let gave_up: Vec<bool> = sqlx::query_scalar(
+        "SELECT gave_up FROM pending WHERE dht_key = ANY($1::bytea[]) ORDER BY dht_key",
+    )
+    .bind(&keys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(gave_up, vec![false, true, true]);
+    assert_eq!(today(&pool).await.fetch_failed, 4);
+
+    // Empty batches are no-ops.
+    s.fail_batch(&[]).await.unwrap();
+    s.give_up_batch(&[]).await.unwrap();
+}

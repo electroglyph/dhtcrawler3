@@ -43,7 +43,9 @@ state_dir = "/var/lib/dhtcrawler4"
 # Global outbound DHT packet budget. Sized for a server; lower it on a
 # home connection.
 max_packets_per_sec = 1000
-sampler_concurrency = 96
+# Sampler workers (one query each at a time): timeout-bound mixes sustain
+# roughly concurrency / 4 s sends, so this floors worst-case discovery.
+sampler_concurrency = 160
 # Answer no DHT queries and mark ours read-only (BEP 43). Leave false to be a
 # full, reciprocating DHT node.
 read_only = false
@@ -73,8 +75,9 @@ scrape_query_timeout_secs = 10
 scrape_lookup_timeout_secs = 60
 # In-flight scrape lookups per worker.
 scrape_concurrency = 3
-# Dedicated outbound packet budget for scrapes (burst: 1s).
-scrape_packets_per_sec = 25
+# Dedicated outbound packet budget for scrapes (burst: 1s), kept far below
+# the crawl bucket so scrapes never starve discovery.
+scrape_packets_per_sec = 100
 # Base admission cooldown of a removed key, in days; repeats escalate
 # 7 -> 30 -> 90 days (the cap is not a knob).
 removal_cooldown_days = 7

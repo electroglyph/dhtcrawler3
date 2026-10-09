@@ -36,6 +36,8 @@ pub const READINESS_PING_TIMEOUT: Duration = Duration::from_secs(5);
 pub const SHUTDOWN_FETCH_WAIT: Duration = Duration::from_secs(30);
 
 const METRIC_QUEUE_DEPTH: &str = "dc3_queue_depth";
+const METRIC_DB_POOL_SIZE: &str = "dc3_db_pool_size";
+const METRIC_DB_POOL_IDLE: &str = "dc3_db_pool_idle";
 
 /// Everything the crawl role needs besides the store.
 #[derive(Debug, Clone)]
@@ -391,10 +393,16 @@ async fn export_queue_depth<S: CrawlStore>(store: S, every: Duration, stop: Canc
     loop {
         tokio::select! {
             () = stop.cancelled() => break,
-            _ = ticker.tick() => match store.pending_depth().await {
-                Ok(depth) => metrics::gauge!(METRIC_QUEUE_DEPTH).set(depth as f64),
-                Err(e) => tracing::warn!(error = %e, "reading the queue depth failed"),
-            },
+            _ = ticker.tick() => {
+                match store.pending_depth().await {
+                    Ok(depth) => metrics::gauge!(METRIC_QUEUE_DEPTH).set(depth as f64),
+                    Err(e) => tracing::warn!(error = %e, "reading the queue depth failed"),
+                }
+                if let Some((size, idle)) = store.pool_status() {
+                    metrics::gauge!(METRIC_DB_POOL_SIZE).set(f64::from(size));
+                    metrics::gauge!(METRIC_DB_POOL_IDLE).set(idle as f64);
+                }
+            }
         }
     }
 }
@@ -481,13 +489,13 @@ mod tests {
         );
         assert_eq!(o.dht.bootstrap.len(), 4);
         assert!(o.dht.sampler);
-        assert_eq!(o.dht.sampler_concurrency, 96);
+        assert_eq!(o.dht.sampler_concurrency, 160);
         assert!(!o.dht.allow_private_addrs);
         assert_eq!(o.dht.tuning, DhtTuning::default());
         assert!(o.dht.validate().is_ok());
         assert_eq!(o.filter, PeerFilter::PRODUCTION);
         assert_eq!(o.fetch_workers, 192);
-        assert_eq!(o.dht.scrape_packets_per_sec, 25);
+        assert_eq!(o.dht.scrape_packets_per_sec, 100);
         assert_eq!(o.dht.tuning.scrape_early_exit_quorum, 3);
         assert_eq!(o.dht.tuning.scrape_query_timeout, Duration::from_secs(10));
         assert_eq!(o.dht.tuning.scrape_node_cache_keys, 4096);

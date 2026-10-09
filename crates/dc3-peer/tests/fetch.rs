@@ -116,9 +116,9 @@ async fn v2_truncated_key_verifies() {
 #[tokio::test]
 async fn default_limits_match_design() {
     let d = FetchLimits::default();
-    assert_eq!(d.connect, Duration::from_secs(5));
-    assert_eq!(d.handshake, Duration::from_secs(5));
-    assert_eq!(d.total, Duration::from_secs(30));
+    assert_eq!(d.connect, Duration::from_secs(3));
+    assert_eq!(d.handshake, Duration::from_secs(4));
+    assert_eq!(d.total, Duration::from_secs(20));
     assert_eq!(d.max_metadata, 8 * 1024 * 1024);
     assert!(d.byte_budget.is_none());
 }

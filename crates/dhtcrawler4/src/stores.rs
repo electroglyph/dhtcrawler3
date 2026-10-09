@@ -91,6 +91,44 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
     fn refresh_scraped(&self, keys: &[DhtKey]) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::ping`].
     fn ping(&self) -> impl Future<Output = Result<()>> + Send;
+    /// See [`Store::complete_batch`]: many keys in one transaction.
+    /// The default completes one key at a time; [`Store`] overrides it.
+    fn complete_batch(
+        &self,
+        items: &[(DhtKey, NewTorrent)],
+    ) -> impl Future<Output = Result<Vec<i64>>> + Send {
+        async move {
+            let mut ids = Vec::with_capacity(items.len());
+            for (key, t) in items {
+                ids.push(self.complete(key, t).await?);
+            }
+            Ok(ids)
+        }
+    }
+    /// See [`Store::fail_batch`]: many keys in one transaction.
+    /// The default fails one key at a time; [`Store`] overrides it.
+    fn fail_batch(&self, keys: &[DhtKey]) -> impl Future<Output = Result<()>> + Send {
+        async move {
+            for key in keys {
+                self.fail(key).await?;
+            }
+            Ok(())
+        }
+    }
+    /// See [`Store::give_up_batch`]: many keys in one transaction.
+    /// The default gives up one key at a time; [`Store`] overrides it.
+    fn give_up_batch(&self, keys: &[DhtKey]) -> impl Future<Output = Result<()>> + Send {
+        async move {
+            for key in keys {
+                self.give_up(key).await?;
+            }
+            Ok(())
+        }
+    }
+    /// Pool use, if backed by one: (open connections, idle connections).
+    fn pool_status(&self) -> Option<(u32, usize)> {
+        None
+    }
 }
 
 impl CrawlStore for Store {
@@ -207,6 +245,26 @@ impl CrawlStore for Store {
 
     fn ping(&self) -> impl Future<Output = Result<()>> + Send {
         Store::ping(self)
+    }
+
+    fn complete_batch(
+        &self,
+        items: &[(DhtKey, NewTorrent)],
+    ) -> impl Future<Output = Result<Vec<i64>>> + Send {
+        Store::complete_batch(self, items)
+    }
+
+    fn fail_batch(&self, keys: &[DhtKey]) -> impl Future<Output = Result<()>> + Send {
+        Store::fail_batch(self, keys)
+    }
+
+    fn give_up_batch(&self, keys: &[DhtKey]) -> impl Future<Output = Result<()>> + Send {
+        Store::give_up_batch(self, keys)
+    }
+
+    fn pool_status(&self) -> Option<(u32, usize)> {
+        let pool = self.pool();
+        Some((pool.size(), pool.num_idle()))
     }
 }
 

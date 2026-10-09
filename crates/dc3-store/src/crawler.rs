@@ -137,6 +137,13 @@ UPDATE pending
  WHERE dht_key = $1
 RETURNING gave_up";
 
+/// [`Store::fail_batch`]: one transaction for many keys. The backoff math is
+/// identical to `FAIL_SQL`; matched keys come back for the daily count.
+const FAIL_BATCH_SQL: &str = "UPDATE pending SET attempts = attempts + 1, last_attempt_at = now(), lease_until = NULL, next_attempt_at = now() + least(make_interval(secs => $2) * power(2, least(attempts, 30)), make_interval(secs => $3)), gave_up = attempts + 1 >= $4 WHERE dht_key = ANY($1::bytea[]) RETURNING dht_key";
+
+/// [`Store::give_up_batch`]: one transaction for many keys.
+const GIVE_UP_BATCH_SQL: &str = "UPDATE pending SET attempts = attempts + 1, last_attempt_at = now(), lease_until = NULL, gave_up = true WHERE dht_key = ANY($1::bytea[]) RETURNING dht_key";
+
 const TORRENT_UPDATE_SQL: &str = "\
 UPDATE torrents
    SET info_hash_v1 = CASE WHEN $2 THEN info_hash_v1 ELSE $3 END,
@@ -623,6 +630,240 @@ impl Store {
         }
         tx.commit().await?;
         Ok(found.is_some())
+    }
+
+    /// Completes many fetched torrents in one transaction.
+    ///
+    /// Per-key semantics match [`Store::complete`]: the same pending-delete,
+    /// alias lookup, removal-memory clearing and insert-or-update sequence
+    /// runs for each item in order, so an alias stored earlier in the batch
+    /// is visible to later items exactly as if it had committed first. One
+    /// change-feed lock, one `stats_daily` bump and one commit cover the
+    /// whole batch.
+    ///
+    /// Validation runs up front: any invalid item aborts the batch with
+    /// nothing written. Callers fall back to [`Store::complete`] per key to
+    /// isolate it.
+    pub async fn complete_batch(&self, items: &[(DhtKey, NewTorrent)]) -> Result<Vec<i64>> {
+        /// One validated, serialized torrent awaiting its statements.
+        struct Prepared {
+            key: DhtKey,
+            name: String,
+            files: serde_json::Value,
+            total_size: i64,
+            file_count: i64,
+            files_truncated: bool,
+            piece_length: Option<i64>,
+            v1: Option<Vec<u8>>,
+            v2: Option<Vec<u8>>,
+            v2_prefix: Option<DhtKey>,
+        }
+        let mut prepared = Vec::with_capacity(items.len());
+        for (key, t) in items {
+            validate_torrent(t)?;
+            if t.dht_key != *key {
+                return Err(StoreError::Invalid(
+                    "NewTorrent.dht_key differs from the completed key".into(),
+                ));
+            }
+            prepared.push(Prepared {
+                key: *key,
+                name: t.name.clone(),
+                files: files_to_json(&t.files)?,
+                total_size: to_i64("total_size", t.total_size)?,
+                file_count: to_i64("file_count", t.file_count)?,
+                files_truncated: t.files_truncated,
+                piece_length: t
+                    .piece_length
+                    .map(|p| to_i64("piece_length", p))
+                    .transpose()?,
+                v1: t.info_hash_v1.map(|k| k.0.to_vec()),
+                v2: t.info_hash_v2.map(|h| h.0.to_vec()),
+                v2_prefix: t.info_hash_v2.map(|h| h.truncated()),
+            });
+        }
+
+        let mut tx = self.pool.begin().await?;
+        lock_change_shared(&mut tx).await?;
+        {
+            let mut lock_set: Vec<&[u8]> = Vec::new();
+            for p in &prepared {
+                lock_set.push(p.key.as_bytes().as_slice());
+                if let Some(k) = &p.v1 {
+                    lock_set.push(k.as_slice());
+                }
+                if let Some(k) = &p.v2_prefix {
+                    lock_set.push(k.as_bytes().as_slice());
+                }
+            }
+            lock_keys(&mut tx, &lock_set).await?;
+        }
+
+        let mut ids = Vec::with_capacity(prepared.len());
+        let mut counted = 0i64;
+        for p in &prepared {
+            let pending = sqlx::query(
+                "DELETE FROM pending WHERE dht_key = $1 RETURNING seen_count, discovered_at",
+            )
+            .bind(p.key.as_bytes().as_slice())
+            .fetch_optional(&mut *tx)
+            .await?;
+            let (add_seen, discovered_at) = match &pending {
+                Some(row) => (
+                    get::<i64>(row, "seen_count")?,
+                    Some(get::<chrono::DateTime<chrono::Utc>>(row, "discovered_at")?),
+                ),
+                None => (0, None),
+            };
+
+            let rows = sqlx::query(
+                "SELECT id, dht_key, info_hash_v1, info_hash_v2 FROM torrents WHERE dht_key = $1 OR info_hash_v1 = $2 OR info_hash_v2 = $3 ORDER BY id FOR UPDATE",
+            )
+            .bind(p.key.as_bytes().as_slice())
+            .bind(p.v1.as_deref())
+            .bind(p.v2.as_deref())
+            .fetch_all(&mut *tx)
+            .await?;
+            let mut existing = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let id: i64 = get(row, "id")?;
+                let dk: Vec<u8> = get(row, "dht_key")?;
+                let r1: Option<Vec<u8>> = get(row, "info_hash_v1")?;
+                let r2: Option<Vec<u8>> = get(row, "info_hash_v2")?;
+                existing.push((id, dk, r1, r2));
+            }
+            // A successful fetch is positive liveness proof: clear removal
+            // memory for every name of the torrent (see [`Store::complete`]).
+            {
+                let mut clear: Vec<&[u8]> = vec![p.key.as_bytes().as_slice()];
+                for (_, dk, r1, r2) in &existing {
+                    clear.push(dk.as_slice());
+                    if let Some(r1) = r1 {
+                        clear.push(r1.as_slice());
+                    }
+                    if let Some(r2) = r2 {
+                        clear.push(prefix(r2));
+                    }
+                }
+                if let Some(k) = &p.v1 {
+                    clear.push(k.as_slice());
+                }
+                if let Some(k) = &p.v2_prefix {
+                    clear.push(k.as_bytes().as_slice());
+                }
+                clear.sort_unstable();
+                clear.dedup();
+                sqlx::query("DELETE FROM removed_keys WHERE key = ANY($1::bytea[])")
+                    .bind(&clear)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let target = existing
+                .iter()
+                .find(|(_, dk, _, _)| dk.as_slice() == p.key.as_bytes().as_slice())
+                .or_else(|| existing.first());
+
+            let (id, item_counted) = match target {
+                Some((id, _, _, _)) => {
+                    let id = *id;
+                    // Keep the stored hash if another row already owns the new one.
+                    let conflict_v1 = p.v1.is_some()
+                        && existing.iter().any(|(o, _, r1, _)| *o != id && *r1 == p.v1);
+                    let conflict_v2 = p.v2.is_some()
+                        && existing.iter().any(|(o, _, _, r2)| *o != id && *r2 == p.v2);
+                    sqlx::query(TORRENT_UPDATE_SQL)
+                        .bind(id)
+                        .bind(conflict_v1)
+                        .bind(p.v1.as_deref())
+                        .bind(conflict_v2)
+                        .bind(p.v2.as_deref())
+                        .bind(p.name.as_str())
+                        .bind(p.total_size)
+                        .bind(p.file_count)
+                        .bind(&p.files)
+                        .bind(p.files_truncated)
+                        .bind(p.piece_length)
+                        .bind(add_seen)
+                        .execute(&mut *tx)
+                        .await?;
+                    (id, pending.is_some())
+                }
+                None => {
+                    let id: i64 = sqlx::query_scalar(TORRENT_INSERT_SQL)
+                        .bind(p.key.as_bytes().as_slice())
+                        .bind(p.v1.as_deref())
+                        .bind(p.v2.as_deref())
+                        .bind(p.name.as_str())
+                        .bind(p.total_size)
+                        .bind(p.file_count)
+                        .bind(&p.files)
+                        .bind(p.files_truncated)
+                        .bind(p.piece_length)
+                        .bind(add_seen.max(1))
+                        .bind(discovered_at)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                    (id, true)
+                }
+            };
+            if item_counted {
+                counted = counted.saturating_add(1);
+            }
+            ids.push(id);
+        }
+        bump_daily(&mut tx, DailyCounter::Fetched, counted).await?;
+        tx.commit().await?;
+        Ok(ids)
+    }
+
+    /// Records failed fetches for many keys in one transaction.
+    ///
+    /// The backoff math matches [`Store::fail`]; only the round trips are
+    /// shared. Returns nothing: like [`Store::fail`], callers keep their own
+    /// outcome and only need to know the write succeeded.
+    pub async fn fail_batch(&self, keys: &[DhtKey]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(FAIL_BATCH_SQL)
+            .bind(&raw)
+            .bind(secs(FAIL_BASE_BACKOFF))
+            .bind(secs(FAIL_MAX_BACKOFF))
+            .bind(MAX_FETCH_ATTEMPTS)
+            .fetch_all(&mut *tx)
+            .await?;
+        bump_daily(
+            &mut tx,
+            DailyCounter::FetchFailed,
+            i64::try_from(rows.len()).unwrap_or(i64::MAX),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Records many never-succeed fetches in one transaction.
+    /// See [`Store::give_up`].
+    pub async fn give_up_batch(&self, keys: &[DhtKey]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(GIVE_UP_BATCH_SQL)
+            .bind(&raw)
+            .fetch_all(&mut *tx)
+            .await?;
+        bump_daily(
+            &mut tx,
+            DailyCounter::FetchFailed,
+            i64::try_from(rows.len()).unwrap_or(i64::MAX),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Deletes queue rows that gave up more than `older_than` ago, so their

@@ -1540,7 +1540,7 @@ mod tests {
         assert_eq!(c.scrape_query_timeout_secs, 10);
         assert_eq!(c.scrape_lookup_timeout_secs, 60);
         assert_eq!(c.scrape_concurrency, 3);
-        assert_eq!(c.scrape_packets_per_sec, 25);
+        assert_eq!(c.scrape_packets_per_sec, 100);
         assert_eq!(c.removal_cooldown_days, 7);
         assert_eq!(c.tombstone_purge_hours, 1);
         assert_eq!(c.scrape_sweep_secs, 3600);
