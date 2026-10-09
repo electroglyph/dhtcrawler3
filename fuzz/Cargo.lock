@@ -371,7 +371,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dhtcrawler3-fuzz"
+name = "dhtcrawler4-fuzz"
 version = "0.0.0"
 dependencies = [
  "dc3-bencode",

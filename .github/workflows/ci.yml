@@ -125,4 +125,4 @@ jobs:
           push: false
           provenance: mode=max
           sbom: true
-          tags: dhtcrawler3:ci
+          tags: dhtcrawler4:ci

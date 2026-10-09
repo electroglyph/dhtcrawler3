@@ -1,6 +1,6 @@
 [package]
 name = "dc3-search"
-description = "Tantivy search index for dhtcrawler3 with a dictionary-free CJK bigram tokenizer"
+description = "Tantivy search index for dhtcrawler4 with a dictionary-free CJK bigram tokenizer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

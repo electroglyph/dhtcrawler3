@@ -63,7 +63,7 @@ pub const MAX_PIPELINED_REQUESTS: usize = 4;
 /// Extension message ID we advertise for `ut_metadata`; data arrives with it.
 pub const OUR_UT_METADATA_ID: u8 = 1;
 /// Client version string sent in our extended handshake (`v`).
-pub const CLIENT_VERSION: &str = "dhtcrawler3/0.1";
+pub const CLIENT_VERSION: &str = "dhtcrawler4/0.1";
 /// Request-queue depth we advertise in our extended handshake (`reqq`).
 pub const ADVERTISED_REQQ: i64 = 250;
 /// Prefix of our randomly generated peer IDs (Azureus style).

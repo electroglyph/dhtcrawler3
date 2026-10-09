@@ -20,12 +20,12 @@ pub const EXIT_USAGE: u8 = 2;
 /// How long the runtime waits for blocking tasks at exit.
 pub const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// dhtcrawler3: a BitTorrent DHT search engine.
+/// dhtcrawler4: a BitTorrent DHT search engine.
 #[derive(Debug, Parser)]
-#[command(name = "dhtcrawler3", version, propagate_version = true)]
+#[command(name = "dhtcrawler4", version, propagate_version = true)]
 pub struct Cli {
     /// Configuration file. Without this option,
-    /// /etc/dhtcrawler3/dhtcrawler3.toml is read if it exists.
+    /// /etc/dhtcrawler4/dhtcrawler4.toml is read if it exists.
     #[arg(long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
@@ -96,7 +96,7 @@ pub fn main() -> ExitCode {
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("dhtcrawler3: {}", describe_error(&e));
+            eprintln!("dhtcrawler4: {}", describe_error(&e));
             ExitCode::FAILURE
         }
     }
@@ -127,7 +127,7 @@ pub fn run_to(cli: Cli, out: &mut (dyn Write + Send)) -> anyhow::Result<()> {
     logging::init(cfg.log.format, cfg.log.level)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_name("dhtcrawler3")
+        .thread_name("dhtcrawler4")
         .build()
         .context("cannot start the async runtime")?;
     let result = runtime.block_on(dispatch(cfg, cli.command, out));
@@ -189,7 +189,7 @@ mod tests {
     use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("dhtcrawler3").chain(args.iter().copied()))
+        Cli::try_parse_from(std::iter::once("dhtcrawler4").chain(args.iter().copied()))
     }
 
     #[test]

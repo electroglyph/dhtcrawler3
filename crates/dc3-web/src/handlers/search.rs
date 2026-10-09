@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{DateTime, Utc};
 use dc3_search::{
@@ -29,6 +30,7 @@ use crate::render::{Flavor, error_response, error_with_query, html};
 use crate::search_cache::{CacheKey, Flight, PreSearch};
 use crate::telemetry::metric_names;
 use crate::templates::{ResultRow, SearchPage, SortLink};
+use crate::theme::{Theme, next_from_uri};
 
 /// Raw query-string parameters of the search page and the search API.
 #[derive(Debug, Default, Deserialize)]
@@ -412,15 +414,21 @@ pub(crate) fn search_href(q: &str, page: u32, sort: Sort, per_page: u32) -> Stri
 /// `GET /search?q=&p=&sort=`.
 pub(crate) async fn search_page<B: Backend>(
     State(st): State<Arc<AppState<B>>>,
+    headers: HeaderMap,
+    uri: Uri,
     params: Result<Query<SearchParams>, QueryRejection>,
 ) -> Response {
     let site = &st.site;
+    let theme = Theme::from_headers(&headers);
+    let next = next_from_uri(&uri);
     let Ok(Query(params)) = params else {
         return error_response(
             site,
             Flavor::Html,
             StatusCode::BAD_REQUEST,
             "The search address could not be read.",
+            theme,
+            &next,
         );
     };
     let q = params.q.as_deref().unwrap_or_default().trim();
@@ -435,10 +443,21 @@ pub(crate) async fn search_page<B: Backend>(
             Flavor::Html,
             StatusCode::BAD_REQUEST,
             &too_long_message(),
+            theme,
+            &next,
         );
     }
-    let bad_request =
-        |message: &str| error_with_query(site, Flavor::Html, StatusCode::BAD_REQUEST, message, q);
+    let bad_request = |message: &str| {
+        error_with_query(
+            site,
+            Flavor::Html,
+            StatusCode::BAD_REQUEST,
+            message,
+            q,
+            theme,
+            &next,
+        )
+    };
     let page_number = match parse_page(params.p.as_deref()) {
         Ok(n) => n,
         Err(e) => return bad_request(&e.message()),
@@ -455,14 +474,30 @@ pub(crate) async fn search_page<B: Backend>(
         Ok(parsed) => parsed,
         Err(e) => {
             let failure = Failure::Query(e);
-            return error_with_query(site, Flavor::Html, failure.status(), &failure.message(), q);
+            return error_with_query(
+                site,
+                Flavor::Html,
+                failure.status(),
+                &failure.message(),
+                q,
+                theme,
+                &next,
+            );
         }
     };
 
     let found = match execute(&st, q, &parsed, page_number, per_page, sort).await {
         Ok(found) => found,
         Err(failure) => {
-            return error_with_query(site, Flavor::Html, failure.status(), &failure.message(), q);
+            return error_with_query(
+                site,
+                Flavor::Html,
+                failure.status(),
+                &failure.message(),
+                q,
+                theme,
+                &next,
+            );
         }
     };
 
@@ -490,7 +525,7 @@ pub(crate) async fn search_page<B: Backend>(
         .map(|(record, shown)| result_row(&record, shown, st.seeder_freshness))
         .collect();
     let page = SearchPage {
-        page: site.page(format!("{q} - search"), q, true),
+        page: site.page(format!("{q} - search"), q, true, theme, &next),
         summary,
         sort_links,
         rows,

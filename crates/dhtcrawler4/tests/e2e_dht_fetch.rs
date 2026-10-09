@@ -21,8 +21,8 @@ use common::{
     wait_until,
 };
 use dc3_dht::Dht;
-use dhtcrawler3::crawl::Crawler;
-use dhtcrawler3::memstore::MemoryStore;
+use dhtcrawler4::crawl::Crawler;
+use dhtcrawler4::memstore::MemoryStore;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 

@@ -69,21 +69,21 @@ jobs:
       - name: Build
         env:
           RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=.
-        run: cargo build --release --locked -p dhtcrawler3
+        run: cargo build --release --locked -p dhtcrawler4
       - name: Package
         run: |
           mkdir -p dist
-          cp target/release/dhtcrawler3 "dist/dhtcrawler3-${GITHUB_REF_NAME}-x86_64-linux-gnu"
+          cp target/release/dhtcrawler4 "dist/dhtcrawler4-${GITHUB_REF_NAME}-x86_64-linux-gnu"
           (cd dist && sha256sum -- * > SHA256SUMS)
       - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: .
           format: spdx-json
-          output-file: dist/dhtcrawler3.spdx.json
+          output-file: dist/dhtcrawler4.spdx.json
           upload-artifact: false
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/dhtcrawler3-*
+          subject-path: dist/dhtcrawler4-*
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

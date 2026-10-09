@@ -1,4 +1,4 @@
-Copyright 2026 dhtcrawler3 contributors
+Copyright 2026 dhtcrawler4 contributors
 Copyright 2013 Kevin Lynx (dhtcrawler2, https://github.com/kevinlynx/dhtcrawler2)
 
 Permission is hereby granted, free of charge, to any person obtaining

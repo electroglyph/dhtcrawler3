@@ -1,5 +1,5 @@
 [package]
-name = "dhtcrawler3"
+name = "dhtcrawler4"
 description = "A secure, standards-compliant BitTorrent DHT search engine"
 version.workspace = true
 edition.workspace = true
@@ -11,11 +11,11 @@ publish.workspace = true
 workspace = true
 
 [lib]
-name = "dhtcrawler3"
+name = "dhtcrawler4"
 path = "src/lib.rs"
 
 [[bin]]
-name = "dhtcrawler3"
+name = "dhtcrawler4"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,4 +1,4 @@
-//! `dhtcrawler3 healthcheck URL`: a minimal HTTP/1.1 GET for container
+//! `dhtcrawler4 healthcheck URL`: a minimal HTTP/1.1 GET for container
 //! health checks (the runtime image has no curl). Succeeds only on a
 //! `HTTP/1.x 2xx` status line.
 

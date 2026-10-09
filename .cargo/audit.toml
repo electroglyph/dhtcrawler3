@@ -4,7 +4,7 @@
 [advisories]
 ignore = [
   # lru < 0.18.2: LruCache::pop() is not panic-safe if a key's Drop panics
-  # under catch_unwind. dhtcrawler3's own code uses lru >= 0.18.2. The remaining
+  # under catch_unwind. dhtcrawler4's own code uses lru >= 0.18.2. The remaining
   # 0.16 copy comes from tantivy 0.26.2, whose only cache is keyed by `usize`
   # (store/reader.rs), whose Drop cannot panic, and release builds use
   # panic = "abort", so the unsound path is unreachable. Remove this entry when

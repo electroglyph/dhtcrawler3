@@ -2,7 +2,9 @@
 {% block content %}
 <article class="prose" aria-labelledby="privacy-heading">
 <h1 id="privacy-heading">Privacy</h1>
-<p>This site is built to know as little about you as possible. It sets no cookies, runs no JavaScript, has no analytics or advertising, and loads nothing from other sites.</p>
+<p>This site is built to know as little about you as possible. It runs no JavaScript, has no analytics or advertising, and loads nothing from other sites. The only cookie it ever sets is a <code>theme</code> preference, and only when you use the dark/light mode switch in the header; if you never use the switch, no cookie is set.</p>
+<h2>Theme preference</h2>
+<p>The header switch sends your choice (<code>dark</code> or <code>light</code>) to this site, which stores it in a <code>theme</code> cookie (<code>Path=/</code>, <code>SameSite=Lax</code>, kept for one year) so the server can render pages in that theme without JavaScript. It contains nothing else and is never used for tracking.</p>
 <h2>What is stored</h2>
 <ul>
 <li>For each torrent: its DHT key and info hashes (v1 and v2), its name after cleaning, the paths and sizes of its first {{ stored_files }} files, its total size and number of files, when it was first and last seen, and how many times it was seen.</li>

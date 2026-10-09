@@ -60,6 +60,12 @@ mod tests {
     fn stylesheet_has_no_external_references() {
         assert!(!STYLE_CSS.contains("url("));
         assert!(!STYLE_CSS.contains("@import"));
-        assert!(STYLE_CSS.contains("prefers-color-scheme: dark"));
+        // Dark by default; the server-rendered `data-theme="light"`
+        // selects light without JavaScript.
+        assert!(STYLE_CSS.contains("--bg: #0f1216"));
+        assert!(STYLE_CSS.contains(":root[data-theme=\"light\"]"));
+        assert!(STYLE_CSS.contains("--bg: #ffffff"));
+        assert!(!STYLE_CSS.contains("prefers-color-scheme"));
+        assert!(!STYLE_CSS.contains(":has(#theme-toggle"));
     }
 }

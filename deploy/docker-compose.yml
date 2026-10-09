@@ -1,4 +1,4 @@
-# dhtcrawler3 — hardened single-host deployment.
+# dhtcrawler4 — hardened single-host deployment.
 #
 #   cd deploy && ../scripts/gen-secrets.sh && docker compose up -d --build
 #
@@ -8,13 +8,13 @@
 #   * PostgreSQL has no published port and sits on an internal network.
 # Every service runs non-root, read-only, with all capabilities dropped.
 
-name: dhtcrawler3
+name: dhtcrawler4
 
 x-dc3: &dc3
   build:
     context: ..
     dockerfile: Dockerfile
-  image: dhtcrawler3:local
+  image: dhtcrawler4:local
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
@@ -89,13 +89,13 @@ services:
     ports:
       - "6881:6881/udp"   # IPv4 and IPv6
     volumes:
-      - state:/var/lib/dhtcrawler3
+      - state:/var/lib/dhtcrawler4
     networks: [backend, egress]
     depends_on:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "/usr/local/bin/dhtcrawler3", "healthcheck", "http://127.0.0.1:9100/readyz"]
+      test: ["CMD", "/usr/local/bin/dhtcrawler4", "healthcheck", "http://127.0.0.1:9100/readyz"]
       interval: 30s
       timeout: 5s
       retries: 10
@@ -116,13 +116,13 @@ services:
       - source: dc3_indexer_password
         target: db_password
     volumes:
-      - index:/var/lib/dhtcrawler3/index
+      - index:/var/lib/dhtcrawler4/index
     networks: [backend]
     depends_on:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "/usr/local/bin/dhtcrawler3", "healthcheck", "http://127.0.0.1:9100/readyz"]
+      test: ["CMD", "/usr/local/bin/dhtcrawler4", "healthcheck", "http://127.0.0.1:9100/readyz"]
       interval: 30s
       timeout: 5s
       retries: 10
@@ -147,13 +147,13 @@ services:
       - "127.0.0.1:8080:8080"
     # Tantivy readers take a short-lived lock file, so the index volume is writable here.
     volumes:
-      - index:/var/lib/dhtcrawler3/index
+      - index:/var/lib/dhtcrawler4/index
     networks: [backend, frontend]
     depends_on:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "/usr/local/bin/dhtcrawler3", "healthcheck", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "/usr/local/bin/dhtcrawler4", "healthcheck", "http://127.0.0.1:8080/healthz"]
       interval: 15s
       timeout: 5s
       retries: 3

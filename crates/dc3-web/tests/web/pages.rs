@@ -31,13 +31,40 @@ async fn home_page_has_a_labelled_search_box_and_no_script() {
     assert!(!r.body.contains(SITE_NAME));
     // Without serve() no statistics have been loaded.
     assert!(r.body.contains("Index statistics are not available yet."));
-    // Footer links.
-    for link in [
-        r#"<a href="/about">About</a>"#,
-        r#"<a href="/privacy">Privacy</a>"#,
-    ] {
-        assert!(r.body.contains(link), "{link}");
-    }
+    // Footer: only the source link.
+    assert!(
+        r.body.contains(
+            r#"Source code available at <a href="https://github.com/electroglyph/dhtcrawler4">https://github.com/electroglyph/dhtcrawler4</a>"#
+        )
+    );
+    assert!(!r.body.contains(r#"<a href="/about">About</a>"#));
+    assert!(!r.body.contains(r#"<a href="/privacy">Privacy</a>"#));
+    // Dark by default; the header form stores the light choice in a
+    // cookie (POST /theme) without JavaScript.
+    assert!(r.body.contains(r#"<html lang="en" data-theme="dark">"#));
+    assert!(
+        r.body
+            .contains(r#"<meta name="color-scheme" content="dark">"#)
+    );
+    assert!(
+        r.body
+            .contains(r#"<form class="theme-switch" action="/theme" method="post">"#)
+    );
+    assert!(
+        r.body
+            .contains(r#"<input type="hidden" name="theme" value="light">"#)
+    );
+    assert!(
+        r.body
+            .contains(r#"<input type="hidden" name="next" value="/">"#)
+    );
+    assert!(
+        r.body
+            .contains(r#"<button type="submit">Light mode</button>"#)
+    );
+    // Themed pages vary by cookie and set no cookie unasked.
+    assert_eq!(r.header("vary"), "Cookie");
+    assert!(r.headers.get("set-cookie").is_none());
     // The stylesheet link carries a content hash and is served immutable.
     let start = r.body.find("/static/style.").unwrap();
     let end = start + r.body[start..].find('"').unwrap();
@@ -50,7 +77,11 @@ async fn home_page_has_a_labelled_search_box_and_no_script() {
         css.header("cache-control"),
         "public, max-age=31536000, immutable"
     );
-    assert!(css.body.contains("prefers-color-scheme: dark"));
+    assert!(css.body.contains("--bg: #0f1216"));
+    assert!(css.body.contains(":root[data-theme=\"light\"]"));
+    assert!(css.body.contains("--bg: #ffffff"));
+    assert!(!css.body.contains("prefers-color-scheme"));
+    assert!(!css.body.contains(":has(#theme-toggle"));
     assert_security_headers(&css, true);
     let plain = send(&app.router, get("/static/style.css")).await;
     assert_eq!(plain.status, StatusCode::OK);
@@ -70,6 +101,7 @@ async fn information_pages() {
         assert_eq!(r.status, StatusCode::OK, "{path}");
         assert!(r.body.contains(needle), "{path}");
         assert_eq!(r.header("cache-control"), "public, max-age=300");
+        assert_eq!(r.header("vary"), "Cookie");
         assert_security_headers(&r, true);
         assert_safe_html(&r.body);
     }
@@ -82,6 +114,8 @@ async fn information_pages() {
         "IP addresses of BitTorrent peers",
         "forgotten after 10 minutes",
         "at most 45 minutes",
+        "only cookie",
+        "theme",
     ] {
         assert!(privacy.body.contains(needle), "{needle}");
     }
@@ -165,7 +199,11 @@ async fn unknown_routes_get_a_404_page_with_headers() {
         assert_eq!(r.status, StatusCode::NOT_FOUND, "{path}");
         assert_eq!(r.header("content-type"), "text/html; charset=utf-8");
         assert!(r.body.contains("<h1 id=\"error-heading\">Not found</h1>"));
-        assert!(r.body.contains(r#"<a href="/privacy">Privacy</a>"#));
+        assert!(
+            r.body.contains(
+                r#"Source code available at <a href="https://github.com/electroglyph/dhtcrawler4">https://github.com/electroglyph/dhtcrawler4</a>"#
+            )
+        );
         assert_security_headers(&r, true);
         assert_safe_html(&r.body);
     }

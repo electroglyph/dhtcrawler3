@@ -1,6 +1,6 @@
 [package]
 name = "dc3-core"
-description = "Shared types for dhtcrawler3: DHT keys, info hashes, magnet links, text sanitising"
+description = "Shared types for dhtcrawler4: DHT keys, info hashes, magnet links, text sanitising"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

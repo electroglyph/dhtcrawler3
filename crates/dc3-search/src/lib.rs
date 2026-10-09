@@ -1,4 +1,4 @@
-//! Tantivy search index for dhtcrawler3 (design §11; R16, R17).
+//! Tantivy search index for dhtcrawler4 (design §11; R16, R17).
 //!
 //! * [`Dc3Tokenizer`] / [`Cjk1Tokenizer`]: dictionary-free tokenizers with
 //!   CJK bigrams and CJK unigrams.

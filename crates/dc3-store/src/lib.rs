@@ -1,4 +1,4 @@
-//! PostgreSQL storage for dhtcrawler3 (`docs/03-design.md` §10; R15, R18).
+//! PostgreSQL storage for dhtcrawler4 (`docs/03-design.md` §10; R15, R18).
 //!
 //! The migrations in `migrations/` are the specification of the schema. This
 //! crate wraps a [`sqlx::PgPool`] in [`Store`] and exposes one method per

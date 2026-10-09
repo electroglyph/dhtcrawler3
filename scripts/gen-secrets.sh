@@ -4,7 +4,7 @@
 #
 # Permissions: the directory is 0700 (only the host user can list or reach the
 # files). The files themselves are 0644 because Compose bind-mounts them into
-# containers that run as other users (65532 for dhtcrawler3, 999 for
+# containers that run as other users (65532 for dhtcrawler4, 999 for
 # PostgreSQL), which must be able to read them. Keep the directory private.
 set -euo pipefail
 

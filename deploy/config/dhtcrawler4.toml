@@ -1,4 +1,4 @@
-# dhtcrawler3 configuration.
+# dhtcrawler4 configuration.
 #
 # Every key can be overridden with an environment variable named
 #   DC3_<SECTION>__<KEY>        e.g.  DC3_DATABASE__USER=dc3_web
@@ -14,7 +14,7 @@ user = "dc3_crawler"
 password_file = "/run/secrets/db_password"
 max_connections = 16
 
-# Optional per-role credentials, used by `dhtcrawler3 all` (one pool per role).
+# Optional per-role credentials, used by `dhtcrawler4 all` (one pool per role).
 # [database.crawler]
 # user = "dc3_crawler"
 # password_file = "/run/secrets/dc3_crawler_password"
@@ -26,7 +26,7 @@ max_connections = 16
 # password_file = "/run/secrets/dc3_web_password"
 
 [crawl]
-# UDP port for the DHT. dhtcrawler3 never listens on TCP: it only dials peers.
+# UDP port for the DHT. dhtcrawler4 never listens on TCP: it only dials peers.
 dht_port = 6881
 bind_v4 = "0.0.0.0"
 # IPv6 DHT (BEP 32). Disabled automatically, with a warning, when the host has no
@@ -39,7 +39,7 @@ bootstrap = [
   "router.bittorrent.com:6881",
 ]
 # Routing-table state (node ids, a few hundred contacts). Never contains peers.
-state_dir = "/var/lib/dhtcrawler3"
+state_dir = "/var/lib/dhtcrawler4"
 # Global outbound DHT packet budget. Keep this modest on home connections.
 max_packets_per_sec = 250
 sampler_concurrency = 32
@@ -92,7 +92,7 @@ scrape_node_cache_keys = 4096
 scrape_early_exit_quorum = 3
 
 [index]
-path = "/var/lib/dhtcrawler3/index"
+path = "/var/lib/dhtcrawler4/index"
 writer_heap_bytes = 134217728
 batch_size = 1000
 poll_interval_ms = 1000
@@ -101,7 +101,7 @@ poll_interval_ms = 1000
 listen = "127.0.0.1:8080"
 # Public origin, used for CSRF checks on forms and in security.txt.
 base_url = "http://127.0.0.1:8080"
-site_name = "dhtcrawler3"
+site_name = "dhtcrawler4"
 # Send Strict-Transport-Security. Only enable when served exclusively over HTTPS.
 hsts = false
 # Reverse proxies whose X-Forwarded-For header is trusted (CIDR list). Behind

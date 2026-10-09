@@ -65,7 +65,15 @@ async fn detail_page_shows_everything() {
     // The same torrent by its v2 hash, and by its key in upper case and base32.
     let by_v2 = send(&app.router, get(&format!("/t/{v2}"))).await;
     assert_eq!(by_v2.status, StatusCode::OK);
-    assert_eq!(by_v2.body, r.body);
+    // Identical apart from the theme switch's return address, which echoes
+    // the requested URL (`/t/{v2}` only appears there).
+    assert!(by_v2.body.contains(&format!(
+        r#"<input type="hidden" name="next" value="/t/{v2}">"#
+    )));
+    assert_eq!(
+        by_v2.body.replace(&format!("/t/{v2}"), &format!("/t/{v1}")),
+        r.body
+    );
     let upper = send(&app.router, get(&format!("/t/{}", v1.to_uppercase()))).await;
     assert_eq!(upper.status, StatusCode::OK);
     let b32 = data_encoding_base32(&key_for(5).0);

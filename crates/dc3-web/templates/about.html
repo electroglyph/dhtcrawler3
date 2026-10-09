@@ -2,7 +2,7 @@
 {% block content %}
 <article class="prose" aria-labelledby="about-heading">
 <h1 id="about-heading">About {{ page.site_name }}</h1>
-<p>{{ page.site_name }} is a search engine for torrents that are shared through the BitTorrent distributed hash table (DHT). It runs dhtcrawler3, free software whose source anyone can read and run.</p>
+<p>{{ page.site_name }} is a search engine for torrents that are shared through the BitTorrent distributed hash table (DHT). It runs dhtcrawler4, free software whose source anyone can read and run.</p>
 <h2>How it works</h2>
 <ol>
 <li>A crawler takes part in the DHT as an ordinary node that answers other nodes' requests, and learns the keys (info hashes) of torrents that are being shared.</li>
@@ -12,7 +12,7 @@
 <h2>What this site does not do</h2>
 <ul>
 <li>It does not host, download or distribute the content of any torrent. It stores only names, file lists, sizes and dates, and shows magnet links that a BitTorrent client can use to find a torrent in the DHT.</li>
-<li>It does not track you: no cookies, no JavaScript, no analytics, no advertising and nothing loaded from other sites. See the <a href="/privacy">privacy page</a>.</li>
+<li>It does not track you: no JavaScript, no analytics, no advertising and nothing loaded from other sites. The only cookie is an optional <code>theme</code> preference, set only when you use the dark/light mode switch. See the <a href="/privacy">privacy page</a>.</li>
 </ul>
 <h2>Searching</h2>
 <ul>

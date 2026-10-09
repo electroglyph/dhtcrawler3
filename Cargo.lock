@@ -791,7 +791,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dhtcrawler3"
+name = "dhtcrawler4"
 version = "0.1.0"
 dependencies = [
  "anyhow",

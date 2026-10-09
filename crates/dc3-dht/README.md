@@ -1,6 +1,6 @@
 # dc3-dht
 
-The Mainline DHT node of dhtcrawler3 (design [§7](../../docs/03-design.md#7-dc3-dht-r1r4),
+The Mainline DHT node of dhtcrawler4 (design [§7](../../docs/03-design.md#7-dc3-dht-r1r4),
 limits in [§3](../../docs/03-design.md#3-hard-limits-r7-r17-a6)). It joins the DHT on IPv4 and IPv6, answers
 every standard query, and reports the keys it sees as `Discovered` events.
 

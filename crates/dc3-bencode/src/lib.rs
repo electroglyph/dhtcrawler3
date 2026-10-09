@@ -1,6 +1,6 @@
 //! Bounded, strict bencode (BEP 3).
 //!
-//! Every byte dhtcrawler3 receives from the network passes through this
+//! Every byte dhtcrawler4 receives from the network passes through this
 //! decoder first, so it is written to three rules (R7 in
 //! `docs/01-first-principles.md`):
 //!

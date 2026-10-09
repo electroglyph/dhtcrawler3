@@ -30,9 +30,9 @@ use dc3_store::sqlx::postgres::PgConnection;
 use dc3_store::sqlx::{self, AssertSqlSafe, Connection};
 use dc3_store::{PgConnectOptions, Store};
 use dc3_web::{WebConfig, WebDeps};
-use dhtcrawler3::admin;
-use dhtcrawler3::crawl::Crawler;
-use dhtcrawler3::index::{self, IndexOptions, READY_MAX_LAG};
+use dhtcrawler4::admin;
+use dhtcrawler4::crawl::Crawler;
+use dhtcrawler4::index::{self, IndexOptions, READY_MAX_LAG};
 use tokio::net::TcpListener;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -245,7 +245,7 @@ async fn scenario(options: PgConnectOptions) {
         Arc::clone(&index_ready),
         cancel.clone(),
     ));
-    let search = dhtcrawler3::web::open_search(index_dir.path())
+    let search = dhtcrawler4::web::open_search(index_dir.path())
         .await
         .unwrap();
     let record_id = record.id;
@@ -265,7 +265,7 @@ async fn scenario(options: PgConnectOptions) {
     let web_cfg = WebConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         base_url: BASE_URL.into(),
-        site_name: "dhtcrawler3 e2e".into(),
+        site_name: "dhtcrawler4 e2e".into(),
         hsts: false,
         trusted_proxies: Vec::new(),
         seeder_freshness: Duration::from_secs(7 * 24 * 60 * 60),

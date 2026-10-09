@@ -25,6 +25,7 @@ use crate::client_ip::client_ip;
 use crate::ratelimit::{RateClass, Verdict};
 use crate::render::{Flavor, NO_STORE, error_response};
 use crate::telemetry::metric_names;
+use crate::theme::Theme;
 use crate::{Backend, static_files};
 
 /// The Content-Security-Policy of every response.
@@ -108,6 +109,9 @@ async fn admit<B: Backend>(
     next: Next,
 ) -> Response {
     let site = &st.site;
+    // The error pages below render the themed layout; the current address
+    // is not echoed back (it may be the over-long one being refused).
+    let theme = Theme::from_headers(req.headers());
     let uri_len = req.uri().path_and_query().map_or(0, |pq| pq.as_str().len());
     if uri_len > MAX_URI_BYTES {
         return error_response(
@@ -115,6 +119,8 @@ async fn admit<B: Backend>(
             flavor,
             StatusCode::URI_TOO_LONG,
             "The address is too long.",
+            theme,
+            "/",
         );
     }
 
@@ -125,6 +131,8 @@ async fn admit<B: Backend>(
             flavor,
             StatusCode::PAYLOAD_TOO_LARGE,
             "The request is too large.",
+            theme,
+            "/",
         );
     }
 
@@ -140,6 +148,8 @@ async fn admit<B: Backend>(
             flavor,
             StatusCode::INTERNAL_SERVER_ERROR,
             "The server is not configured correctly.",
+            theme,
+            "/",
         );
     };
     let ip = client_ip(peer, req.headers(), &site.trusted_proxies);
@@ -155,6 +165,8 @@ async fn admit<B: Backend>(
             flavor,
             StatusCode::TOO_MANY_REQUESTS,
             "Too many requests. Please wait a moment and try again.",
+            theme,
+            "/",
         );
         response
             .headers_mut()
@@ -174,6 +186,8 @@ async fn admit<B: Backend>(
                     flavor,
                     StatusCode::SERVICE_UNAVAILABLE,
                     "The server is busy. Please try again in a moment.",
+                    theme,
+                    "/",
                 );
                 response
                     .headers_mut()
@@ -190,6 +204,8 @@ async fn admit<B: Backend>(
             flavor,
             StatusCode::SERVICE_UNAVAILABLE,
             "The request took too long. Please try again.",
+            theme,
+            "/",
         ),
     }
 }

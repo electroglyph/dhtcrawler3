@@ -3,7 +3,7 @@
 //! These are opt-in and never run in CI:
 //!
 //! ```sh
-//! DHTCRAWLER_LIVE=1 cargo test -p dhtcrawler3 --test live -- --ignored --test-threads=1
+//! DHTCRAWLER_LIVE=1 cargo test -p dhtcrawler4 --test live -- --ignored --test-threads=1
 //! ```
 //!
 //! Rules the suite enforces on itself:

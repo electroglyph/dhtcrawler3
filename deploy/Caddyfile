@@ -1,4 +1,4 @@
-# Example TLS reverse proxy for dhtcrawler3.
+# Example TLS reverse proxy for dhtcrawler4.
 #
 # Caddy obtains and renews certificates automatically. There is deliberately no
 # `log` directive: search text is part of the URL, so an access log would store

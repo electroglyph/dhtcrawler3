@@ -111,7 +111,7 @@ mod tests {
         let w = web_config(&cfg).unwrap();
         assert_eq!(w.listen, cfg.web.listen);
         assert_eq!(w.base_url, "http://127.0.0.1:8080");
-        assert_eq!(w.site_name, "dhtcrawler3");
+        assert_eq!(w.site_name, "dhtcrawler4");
         assert!(w.hsts);
         assert_eq!(
             w.search_cache_entries,

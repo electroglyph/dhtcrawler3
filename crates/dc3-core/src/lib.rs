@@ -1,4 +1,4 @@
-//! Shared types for dhtcrawler3.
+//! Shared types for dhtcrawler4.
 //!
 //! * [`DhtKey`]: the 20-byte key under which a torrent is found in the DHT
 //!   (a v1 infohash or a truncated v2 infohash; see `docs/00-horismos.md` §3).

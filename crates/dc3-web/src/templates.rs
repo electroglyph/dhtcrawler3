@@ -17,6 +17,14 @@ pub(crate) struct PageMeta<'a> {
     pub header_search: bool,
     /// `maxlength` of search boxes.
     pub max_query_chars: usize,
+    /// The rendered theme (`"dark"` or `"light"`).
+    pub theme: &'static str,
+    /// What the theme switch offers (`theme`'s opposite).
+    pub opposite_theme: &'static str,
+    /// The switch button text.
+    pub theme_label: &'static str,
+    /// Where the theme switch returns to (the current local path).
+    pub next: String,
 }
 
 /// Home-page totals, already formatted.

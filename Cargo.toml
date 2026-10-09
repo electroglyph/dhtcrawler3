@@ -10,7 +10,7 @@ members = [
     "crates/dc3-store",
     "crates/dc3-search",
     "crates/dc3-web",
-    "crates/dhtcrawler3",
+    "crates/dhtcrawler4",
 ]
 
 [workspace.package]
@@ -18,7 +18,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-repository = "https://github.com/poonasor/dhtcrawler3"
+repository = "https://github.com/electroglyph/dhtcrawler4"
 publish = false
 
 [workspace.lints.rust]

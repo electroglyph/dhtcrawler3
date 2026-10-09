@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::http::{HeaderMap, Uri};
 use axum::response::Response;
 
 use super::{Lookup, fresh_seeders, lookup, parse_key};
@@ -13,6 +14,7 @@ use crate::app::AppState;
 use crate::format::{date, grouped, human_size, rfc3339};
 use crate::render::{Flavor, error_response, html};
 use crate::templates::{FileView, TorrentPage, TorrentView};
+use crate::theme::{Theme, next_from_uri};
 
 /// The message for a malformed key.
 pub(crate) const BAD_KEY_MESSAGE: &str = "That is not a valid torrent key. A key is 40 \
@@ -21,11 +23,22 @@ hexadecimal or 32 base32 characters, or 64 hexadecimal characters for a v2 info 
 /// `GET /t/{key}`.
 pub(crate) async fn torrent_page<B: Backend>(
     State(st): State<Arc<AppState<B>>>,
+    headers: HeaderMap,
+    uri: Uri,
     key: Result<Path<String>, PathRejection>,
 ) -> Response {
     let site = &st.site;
+    let theme = Theme::from_headers(&headers);
+    let next = next_from_uri(&uri);
     let Some(key) = parse_key(key) else {
-        return error_response(site, Flavor::Html, StatusCode::BAD_REQUEST, BAD_KEY_MESSAGE);
+        return error_response(
+            site,
+            Flavor::Html,
+            StatusCode::BAD_REQUEST,
+            BAD_KEY_MESSAGE,
+            theme,
+            &next,
+        );
     };
     let found = lookup(&st, key).await;
     let (record, shown, _permit) = match found {
@@ -40,6 +53,8 @@ pub(crate) async fn torrent_page<B: Backend>(
                 Flavor::Html,
                 StatusCode::NOT_FOUND,
                 "No torrent with this key is available.",
+                theme,
+                &next,
             );
         }
         Lookup::Unavailable => {
@@ -48,6 +63,8 @@ pub(crate) async fn torrent_page<B: Backend>(
                 Flavor::Html,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The database is not available right now. Please try again later.",
+                theme,
+                &next,
             );
         }
     };
@@ -91,7 +108,7 @@ pub(crate) async fn torrent_page<B: Backend>(
         })
         .collect();
     let page = TorrentPage {
-        page: site.page(view.name.clone(), "", true),
+        page: site.page(view.name.clone(), "", true, theme, &next),
         t: view,
         files,
         files_note,

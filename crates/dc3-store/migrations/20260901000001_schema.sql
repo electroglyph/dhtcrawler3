@@ -1,4 +1,4 @@
--- dhtcrawler3 schema (docs/03-design.md §10). This file is the specification.
+-- dhtcrawler4 schema (docs/03-design.md §10). This file is the specification.
 --
 -- Keys are raw bytes: a DHT key and a v1 infohash are 20 bytes, a v2 infohash is
 -- 32 bytes. A 32-byte v2 infohash is found in the DHT under its first 20 bytes,

@@ -1,8 +1,37 @@
-/* dhtcrawler3 stylesheet. Served from the binary; no fonts, images or other
-   external resources. Light and dark themes follow the visitor's setting. */
+/* dhtcrawler4 stylesheet. Served from the binary; no fonts, images or other
+   external resources. Dark by default; the light theme applies when the
+   server renders `data-theme="light"` (stored from POST /theme in a
+   cookie). No JavaScript. */
 
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
+  --bg: #0f1216;
+  --surface: #181c22;
+  --text: #e4e7eb;
+  --muted: #9ba5b0;
+  --border: #343b44;
+  --link: #8ab4f8;
+  --link-visited: #c9a2f7;
+  --accent: #8ab4f8;
+  --accent-text: #0b1220;
+  --focus: #ffb454;
+  --notice-bg: #2a2410;
+  --notice-border: #8a6d00;
+  --error: #f2b8b5;
+  --radius: 0.5rem;
+  --measure: 60rem;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans",
+    "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans", "Microsoft YaHei",
+    sans-serif;
+  font-size: 100%;
+  line-height: 1.5;
+}
+
+/* The light theme applies when the server renders `data-theme="light"`
+   on the document element (the visitor's stored choice). Without it the
+   dark values from `:root` apply, so the page is dark with no JavaScript. */
+:root[data-theme="light"] {
+  color-scheme: light;
   --bg: #ffffff;
   --surface: #f4f6f8;
   --text: #1a1e23;
@@ -16,31 +45,6 @@
   --notice-bg: #fff8e1;
   --notice-border: #e0b000;
   --error: #b3261e;
-  --radius: 0.5rem;
-  --measure: 60rem;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans",
-    "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans", "Microsoft YaHei",
-    sans-serif;
-  font-size: 100%;
-  line-height: 1.5;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0f1216;
-    --surface: #181c22;
-    --text: #e4e7eb;
-    --muted: #9ba5b0;
-    --border: #343b44;
-    --link: #8ab4f8;
-    --link-visited: #c9a2f7;
-    --accent: #8ab4f8;
-    --accent-text: #0b1220;
-    --focus: #ffb454;
-    --notice-bg: #2a2410;
-    --notice-border: #8a6d00;
-    --error: #f2b8b5;
-  }
 }
 
 *,
@@ -185,6 +189,16 @@ bdi {
   text-decoration: none;
 }
 
+.theme-switch {
+  margin-left: auto;
+}
+
+.theme-switch button {
+  padding: 0.35rem 0.8rem;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
 .site-footer {
   flex-shrink: 0;
   background: var(--surface);
@@ -192,13 +206,10 @@ bdi {
   font-size: 0.95rem;
 }
 
-.footer-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem 1.5rem;
-  list-style: none;
+.site-footer p {
   margin: 0;
   padding: 1rem 0;
+  text-align: center;
 }
 
 /* Search forms */
@@ -525,6 +536,7 @@ button,
   .site-header,
   .site-footer,
   .search-form,
+  .theme-switch,
   .pager,
   .sort {
     display: none;

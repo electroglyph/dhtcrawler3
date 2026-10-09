@@ -1,4 +1,4 @@
-//! Web front end for dhtcrawler3 (`docs/03-design.md` §12; R9–R12).
+//! Web front end for dhtcrawler4 (`docs/03-design.md` §12; R9–R12).
 //!
 //! * [`router`] builds the axum application: the pages, the JSON API and the
 //!   security middleware (headers, rate limits, body, size and time limits).
@@ -9,7 +9,9 @@
 //!   `dc3_web` database user is granted.
 //!
 //! Pages are askama templates with HTML auto-escaping and contain no
-//! JavaScript. JSON is built with `serde_json` from this crate's own types.
+//! JavaScript. The only cookie is the optional `theme` preference stored by
+//! `POST /theme` when the visitor uses the dark/light mode switch. JSON is
+//! built with `serde_json` from this crate's own types.
 //!
 //! Nothing here logs a visitor's address or search text (R11). Each request
 //! is logged at `info` under the target `dc3_web::access` with its method,
@@ -34,6 +36,7 @@ mod serve;
 mod static_files;
 mod telemetry;
 mod templates;
+mod theme;
 
 use std::net::SocketAddr;
 use std::time::Duration;

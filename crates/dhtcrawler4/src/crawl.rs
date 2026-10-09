@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(o.dht.bind_v6, Some("[::]:6881".parse().unwrap()));
         assert_eq!(
             o.dht.state_file,
-            Some("/var/lib/dhtcrawler3/dht-state.json".into())
+            Some("/var/lib/dhtcrawler4/dht-state.json".into())
         );
         assert_eq!(o.dht.bootstrap.len(), 4);
         assert!(o.dht.sampler);

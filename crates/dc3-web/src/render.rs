@@ -2,13 +2,14 @@
 
 use askama::Template;
 use axum::body::Body;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, VARY};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use serde::Serialize;
 
 use crate::app::{Site, routes};
 use crate::templates::ErrorPage;
+use crate::theme::Theme;
 
 pub(crate) const HTML: HeaderValue = HeaderValue::from_static("text/html; charset=utf-8");
 pub(crate) const JSON: HeaderValue = HeaderValue::from_static("application/json");
@@ -24,6 +25,10 @@ pub(crate) const HOME_CACHE: HeaderValue = HeaderValue::from_static("public, max
 /// The stylesheet whose name carries its hash.
 pub(crate) const IMMUTABLE_CACHE: HeaderValue =
     HeaderValue::from_static("public, max-age=31536000, immutable");
+
+/// Every HTML page depends on the `theme` cookie, so shared caches must
+/// keep the dark and light variants apart.
+pub(crate) const VARY_COOKIE: HeaderValue = HeaderValue::from_static("Cookie");
 
 /// A fallback body if serialising an error message ever failed.
 const JSON_INTERNAL_ERROR: &[u8] = br#"{"error":"internal error"}"#;
@@ -56,7 +61,11 @@ struct ErrorBody<'a> {
 /// cause) becomes a plain 500.
 pub(crate) fn html<T: Template>(status: StatusCode, page: &T) -> Response {
     match page.render() {
-        Ok(body) => with_type(status, HTML, body),
+        Ok(body) => {
+            let mut response = with_type(status, HTML, body);
+            response.headers_mut().insert(VARY, VARY_COOKIE);
+            response
+        }
         Err(e) => {
             tracing::error!(error = %e, "page rendering failed");
             with_type(
@@ -115,8 +124,10 @@ pub(crate) fn error_response(
     flavor: Flavor,
     status: StatusCode,
     message: &str,
+    theme: Theme,
+    next: &str,
 ) -> Response {
-    error_with_query(site, flavor, status, message, "")
+    error_with_query(site, flavor, status, message, "", theme, next)
 }
 
 /// Like [`error_response`], with the header search box prefilled.
@@ -126,13 +137,15 @@ pub(crate) fn error_with_query(
     status: StatusCode,
     message: &str,
     query: &str,
+    theme: Theme,
+    next: &str,
 ) -> Response {
     match flavor {
         Flavor::Json => json_error(status, message),
         Flavor::Html => {
             let heading = heading(status);
             let page = ErrorPage {
-                page: site.page(heading, query, true),
+                page: site.page(heading, query, true, theme, next),
                 heading,
                 message,
             };

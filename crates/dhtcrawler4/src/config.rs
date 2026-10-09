@@ -1,4 +1,4 @@
-//! Configuration (design §13): the file `deploy/config/dhtcrawler3.toml`,
+//! Configuration (design §13): the file `deploy/config/dhtcrawler4.toml`,
 //! environment overrides and validation.
 //!
 //! Every key has a default equal to the shipped example file, so a missing
@@ -29,7 +29,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 /// The config file read when `--config` is not given.
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/dhtcrawler3/dhtcrawler3.toml";
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/dhtcrawler4/dhtcrawler4.toml";
 /// Prefix of environment overrides.
 pub const ENV_PREFIX: &str = "DC3_";
 /// Separator between section, role and key in an override name.
@@ -228,7 +228,7 @@ impl Default for CrawlConfig {
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),
-            state_dir: PathBuf::from("/var/lib/dhtcrawler3"),
+            state_dir: PathBuf::from("/var/lib/dhtcrawler4"),
             max_packets_per_sec: dc3_dht::DEFAULT_MAX_PACKETS_PER_SEC,
             sampler_concurrency: dc3_dht::DEFAULT_SAMPLER_CONCURRENCY,
             read_only: false,
@@ -269,7 +269,7 @@ pub struct IndexConfig {
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
-            path: PathBuf::from("/var/lib/dhtcrawler3/index"),
+            path: PathBuf::from("/var/lib/dhtcrawler4/index"),
             writer_heap_bytes: dc3_search::DEFAULT_WRITER_HEAP_BYTES,
             batch_size: 1000,
             poll_interval_ms: 1000,
@@ -301,7 +301,7 @@ impl Default for WebSettings {
         Self {
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)),
             base_url: "http://127.0.0.1:8080".into(),
-            site_name: "dhtcrawler3".into(),
+            site_name: "dhtcrawler4".into(),
             hsts: false,
             trusted_proxies: Vec::new(),
             search_cache_size: dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES,
@@ -1180,7 +1180,7 @@ fn is_host_port(s: &str) -> bool {
 mod tests {
     use super::*;
 
-    const EXAMPLE: &str = include_str!("../../../deploy/config/dhtcrawler3.toml");
+    const EXAMPLE: &str = include_str!("../../../deploy/config/dhtcrawler4.toml");
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         pairs
@@ -1741,7 +1741,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(
             c.dht_state_file(),
-            Some(PathBuf::from("/var/lib/dhtcrawler3/dht-state.json"))
+            Some(PathBuf::from("/var/lib/dhtcrawler4/dht-state.json"))
         );
         let (v4, v6) = c.dht_binds().unwrap();
         assert_eq!(v4, Some("0.0.0.0:6881".parse().unwrap()));

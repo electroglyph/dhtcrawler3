@@ -1,4 +1,4 @@
-//! dhtcrawler3: a BitTorrent DHT search engine (design §13; R19, R20).
+//! dhtcrawler4: a BitTorrent DHT search engine (design §13; R19, R20).
 //!
 //! The binary is a thin wrapper around [`cli::main`]. The library holds
 //! everything else, so the end-to-end tests drive the same code:

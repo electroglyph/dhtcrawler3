@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Creates the dhtcrawler3 roles and database (docs/03-design.md §10, R12).
+# Creates the dhtcrawler4 roles and database (docs/03-design.md §10, R12).
 #
 # Runs once, from /docker-entrypoint-initdb.d of the official postgres image,
 # when the data directory is first initialised. Required environment:

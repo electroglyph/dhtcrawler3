@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="{{ page.theme }}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="{{ page.theme }}">
 <meta name="referrer" content="no-referrer">
 <title>{{ page.title }} · {{ page.site_name }}</title>
 <link rel="stylesheet" href="{{ page.style_path }}">
@@ -13,6 +13,11 @@
 <header class="site-header">
 <div class="wrap header-inner">
 <a class="brand" href="/">{{ page.site_name }}</a>
+<form class="theme-switch" action="/theme" method="post">
+<input type="hidden" name="theme" value="{{ page.opposite_theme }}">
+<input type="hidden" name="next" value="{{ page.next }}">
+<button type="submit">{{ page.theme_label }}</button>
+</form>
 {%- if page.header_search %}
 <form class="search-form compact" action="/search" method="get" role="search">
 <label class="visually-hidden" for="header-q">Search torrents</label>
@@ -26,12 +31,7 @@
 {% block content %}{% endblock %}
 </main>
 <footer class="site-footer">
-<nav class="wrap" aria-label="Site information">
-<ul class="footer-links">
-<li><a href="/about">About</a></li>
-<li><a href="/privacy">Privacy</a></li>
-</ul>
-</nav>
+<p class="wrap">Source code available at <a href="https://github.com/electroglyph/dhtcrawler4">https://github.com/electroglyph/dhtcrawler4</a></p>
 </footer>
 </body>
 </html>

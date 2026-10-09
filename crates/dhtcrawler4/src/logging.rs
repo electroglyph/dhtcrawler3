@@ -97,14 +97,14 @@ mod tests {
         assert_eq!(effective_level(LogLevel::Trace), Level::DEBUG);
 
         let f = filter(LogLevel::Debug);
-        assert!(f.would_enable("dhtcrawler3::crawl", &Level::DEBUG));
+        assert!(f.would_enable("dhtcrawler4::crawl", &Level::DEBUG));
         assert!(!f.would_enable("tantivy::indexer", &Level::INFO));
         assert!(f.would_enable("tantivy::indexer", &Level::WARN));
         assert!(!f.would_enable("sqlx::query", &Level::INFO));
         assert!(!f.would_enable("hyper::proto", &Level::DEBUG));
 
         let f = filter(LogLevel::Error);
-        assert!(!f.would_enable("dhtcrawler3", &Level::WARN));
+        assert!(!f.would_enable("dhtcrawler4", &Level::WARN));
         assert!(!f.would_enable("tantivy", &Level::WARN));
         assert!(f.would_enable("tantivy", &Level::ERROR));
     }

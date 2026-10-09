@@ -1,4 +1,4 @@
-//! A Mainline DHT node for dhtcrawler3 (BEP 5, 32, 42, 43, 51).
+//! A Mainline DHT node for dhtcrawler4 (BEP 5, 32, 42, 43, 51).
 //!
 //! [`Dht::start`] binds one UDP socket per address family and runs:
 //! * a compliant responder (`ping`, `find_node`, `get_peers`,

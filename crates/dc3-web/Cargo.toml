@@ -1,6 +1,6 @@
 [package]
 name = "dc3-web"
-description = "Web front end for dhtcrawler3: axum, auto-escaping templates, strict security headers"
+description = "Web front end for dhtcrawler4: axum, auto-escaping templates, strict security headers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

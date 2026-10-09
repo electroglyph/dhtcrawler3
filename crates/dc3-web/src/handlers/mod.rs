@@ -4,6 +4,7 @@ pub(crate) mod api;
 pub(crate) mod health;
 pub(crate) mod pages;
 pub(crate) mod search;
+pub(crate) mod theme;
 pub(crate) mod torrent;
 
 use std::time::Duration;

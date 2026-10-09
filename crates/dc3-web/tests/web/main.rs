@@ -15,4 +15,5 @@ mod search;
 mod security;
 mod serve;
 mod store_db;
+mod theme;
 mod torrent;

@@ -6,18 +6,19 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::routing::get;
+use axum::routing::{get, post};
 use chrono::{DateTime, TimeDelta, Utc};
 use dc3_search::{MAX_QUERY_CHARS, SearchHandle};
 use dc3_store::PublicStats;
 use ipnet::IpNet;
 use tokio::sync::Semaphore;
 
-use crate::handlers::{api, health, pages, search, torrent};
+use crate::handlers::{api, health, pages, search, theme, torrent};
 use crate::middleware::{MAX_BODY_BYTES, MAX_CONCURRENT_REQUESTS, guard};
 use crate::ratelimit::{RATE_LIMIT_IDLE_EXPIRY, RATE_LIMIT_MAX_KEYS, RateLimiter};
 use crate::search_cache::{SearchCache, SearchCacheConfig};
 use crate::templates::PageMeta;
+use crate::theme::Theme;
 use crate::{
     Backend, MAX_CONCURRENT_DETAILS, SECURITY_TXT_VALIDITY, WebConfig, WebDeps, format,
     static_files,
@@ -32,6 +33,7 @@ pub(crate) mod routes {
     pub const API_TORRENT: &str = "/api/v1/torrents/{key}";
     pub const ABOUT: &str = "/about";
     pub const PRIVACY: &str = "/privacy";
+    pub const THEME: &str = "/theme";
     pub const ROBOTS: &str = "/robots.txt";
     pub const SECURITY_TXT: &str = "/.well-known/security.txt";
     pub const STYLE: &str = "/static/style.css";
@@ -43,7 +45,7 @@ pub(crate) mod routes {
     pub const UNMATCHED: &str = "unmatched";
 
     /// Every fixed route template.
-    pub const ALL: [&str; 12] = [
+    pub const ALL: [&str; 13] = [
         HOME,
         SEARCH,
         TORRENT,
@@ -51,6 +53,7 @@ pub(crate) mod routes {
         API_TORRENT,
         ABOUT,
         PRIVACY,
+        THEME,
         ROBOTS,
         SECURITY_TXT,
         STYLE,
@@ -65,7 +68,7 @@ pub(crate) mod routes {
 }
 
 /// Site name used when the configured one is blank.
-const DEFAULT_SITE_NAME: &str = "dhtcrawler3";
+const DEFAULT_SITE_NAME: &str = "dhtcrawler4";
 
 /// The configuration, cleaned up for use in pages and headers.
 pub(crate) struct Site {
@@ -93,12 +96,15 @@ impl Site {
     }
 
     /// Layout data for a page titled `title`; `query` prefills the header
-    /// search box.
+    /// search box. `theme` is the visitor's theme and `next` is the current
+    /// local path the theme switch returns to.
     pub(crate) fn page<'a>(
         &'a self,
         title: impl Into<String>,
         query: &'a str,
         header_search: bool,
+        theme: Theme,
+        next: &str,
     ) -> PageMeta<'a> {
         PageMeta {
             site_name: &self.site_name,
@@ -107,6 +113,10 @@ impl Site {
             query,
             header_search,
             max_query_chars: MAX_QUERY_CHARS,
+            theme: theme.as_str(),
+            opposite_theme: theme.opposite().as_str(),
+            theme_label: theme.label(),
+            next: Theme::sanitize_next(next),
         }
     }
 }
@@ -192,6 +202,7 @@ pub(crate) fn build<B: Backend>(cfg: WebConfig, deps: WebDeps<B>) -> (Router, Ar
         .route(routes::API_TORRENT, get(api::torrent::<B>))
         .route(routes::ABOUT, get(pages::about::<B>))
         .route(routes::PRIVACY, get(pages::privacy::<B>))
+        .route(routes::THEME, post(theme::set_theme::<B>))
         .route(routes::ROBOTS, get(pages::robots))
         .route(routes::SECURITY_TXT, get(pages::security_txt::<B>))
         .route(routes::STYLE, get(pages::style))
@@ -317,6 +328,6 @@ mod tests {
         );
         assert!(site.security_txt.contains("Canonical: https://s.example/"));
         assert_eq!(site.site_name, DEFAULT_SITE_NAME);
-        assert_eq!(routes::ALL.len(), 12);
+        assert_eq!(routes::ALL.len(), 13);
     }
 }
