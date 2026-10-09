@@ -131,9 +131,10 @@ sudoedit /etc/dhtcrawler4/dhtcrawler4.toml
 Change in `[database]`: `host = "127.0.0.1"` (leave port 5432, name `dc3`).
 The per-role users and password files come from the environment in each
 systemd unit (step 6), so one file serves all roles. Leave `hsts = false`
-(the default) unless you terminate TLS in front of the site, and set
-`trusted_proxies = ["127.0.0.1"]` only if you do proxy it, so the proxy's
-`X-Forwarded-For` is honoured for client IPs and rate limits. The `[crawl]`
+(the default) unless you terminate TLS in front of the site. Keeping
+`trusted_proxies = ["127.0.0.1"]` is harmless without a proxy (only localhost
+can present that header, and localhost is you) and already correct if you
+later put one on the host. The `[crawl]`
 `state_dir` and `[index]` `path` defaults already match the directories from
 step 1.
 
