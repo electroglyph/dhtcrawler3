@@ -119,7 +119,7 @@ pub const FAIL_BASE_BACKOFF: Duration = Duration::from_secs(5 * 60);
 /// Upper bound of the retry delay.
 pub const FAIL_MAX_BACKOFF: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// A key gives up after this many failed attempts.
-pub const MAX_FETCH_ATTEMPTS: i32 = 6;
+pub const MAX_FETCH_ATTEMPTS: i32 = 2;
 
 /// Row counts are exact up to this many rows. Above it, [`Store::stats`],
 /// [`Store::public_stats`] and [`Store::pending_depth`] report the planner's

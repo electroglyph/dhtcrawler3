@@ -275,28 +275,30 @@ impl CrawlStore for MemoryStore {
         let mut state = self.lock();
         let now = Instant::now();
         let limit = usize::try_from(n.max(0)).unwrap_or(0);
-        // Liveness first (known-live keys), then oldest attempt: mirrors
-        // CLAIM_SQL's ORDER BY seeders_est DESC NULLS LAST, next_attempt_at.
-        let mut due: Vec<(Option<u32>, Instant, DhtKey)> = state
+        // Fresh keys first, then liveness (known-live keys), then oldest
+        // attempt: mirrors CLAIM_SQL's ORDER BY attempts ASC,
+        // seeders_est DESC NULLS LAST, next_attempt_at.
+        let mut due: Vec<(u32, Option<u32>, Instant, DhtKey)> = state
             .pending
             .iter()
             .filter(|(_, p)| {
                 !p.gave_up && p.next_attempt <= now && p.lease_until.is_none_or(|l| l < now)
             })
-            .map(|(k, p)| (p.seeders, p.next_attempt, *k))
+            .map(|(k, p)| (p.attempts, p.seeders, p.next_attempt, *k))
             .collect();
         due.sort_by(|a, b| {
-            match (a.0, b.0) {
-                (Some(x), Some(y)) => y.cmp(&x),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-            .then_with(|| a.1.cmp(&b.1))
-            .then_with(|| a.2.cmp(&b.2))
+            a.0.cmp(&b.0)
+                .then_with(|| match (a.1, b.1) {
+                    (Some(x), Some(y)) => y.cmp(&x),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
         });
         let mut out = Vec::new();
-        for (_, _, key) in due.into_iter().take(limit) {
+        for (_, _, _, key) in due.into_iter().take(limit) {
             if let Some(p) = state.pending.get_mut(&key) {
                 p.lease_until = Some(now + lease);
                 out.push(PendingItem {
@@ -823,6 +825,21 @@ mod tests {
         assert_eq!(out.queued, 1);
         assert_eq!(out.dropped, 0);
         assert_eq!(s.pending_depth().await.unwrap(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_prefers_fresh_keys_over_retried() {
+        let s = MemoryStore::with_fail_backoff(Duration::from_secs(1));
+        s.observe(&[obs(key(1), false), obs(key(2), false)], 10)
+            .await
+            .unwrap();
+        // Key 2 failed once but carries a seeder estimate; key 1 is fresh.
+        s.note_fetch_estimate(&key(2), 50).await.unwrap();
+        s.fail(&key(2)).await.unwrap();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let one = s.claim(1, Duration::from_secs(60)).await.unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].dht_key, key(1));
     }
 }
 

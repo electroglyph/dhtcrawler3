@@ -85,8 +85,8 @@ services:
     environment:
       <<: *dc3-env
       DC3_DATABASE__USER: dc3_crawler
-      # 192 fetch workers plus admission and scrapes share this pool.
-      DC3_DATABASE__MAX_CONNECTIONS: "48"
+      # 512 fetch workers plus admission and scrapes share this pool.
+      DC3_DATABASE__MAX_CONNECTIONS: "96"
     secrets:
       - source: dc3_crawler_password
         target: db_password

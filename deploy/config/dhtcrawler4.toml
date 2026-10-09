@@ -49,8 +49,8 @@ sampler_concurrency = 160
 # Answer no DHT queries and mark ours read-only (BEP 43). Leave false to be a
 # full, reciprocating DHT node.
 read_only = false
-fetch_workers = 192
-max_connections = 768
+fetch_workers = 512
+max_connections = 2048
 max_metadata_bytes = 8388608
 # Total metadata bytes held by all fetches at once (memory bound).
 max_inflight_metadata_bytes = 536870912

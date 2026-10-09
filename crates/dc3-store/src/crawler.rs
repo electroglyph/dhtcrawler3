@@ -104,7 +104,7 @@ UPDATE pending p
         WHERE NOT q.gave_up
           AND q.next_attempt_at <= now()
           AND (q.lease_until IS NULL OR q.lease_until < now())
-        ORDER BY q.seeders_est DESC NULLS LAST, q.next_attempt_at
+        ORDER BY q.attempts ASC, q.seeders_est DESC NULLS LAST, q.next_attempt_at
         LIMIT $1
           FOR UPDATE SKIP LOCKED)
 RETURNING p.dht_key, p.attempts, p.seen_count";

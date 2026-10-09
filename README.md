@@ -137,8 +137,8 @@ sudoedit /etc/dhtcrawler4/dhtcrawler4.toml
 
 Change in `[database]`: `host = "127.0.0.1"` (leave port 5432, name `dc3`).
 On a server, also raise `max_connections`: it sizes each role's database
-pool and the default 16 is lean for 192 fetch workers (the Docker deployment
-runs crawl at 48 via `DC3_DATABASE__MAX_CONNECTIONS`). Keep the sum across
+pool and the default 16 is lean for 512 fetch workers (the Docker deployment
+runs crawl at 96 via `DC3_DATABASE__MAX_CONNECTIONS`). Keep the sum across
 roles comfortably under PostgreSQL's own `max_connections` — the stock
 default of 100 leaves little headroom once you raise the crawl pool (the
 Docker deployment sets 200).
@@ -494,7 +494,7 @@ torrents at first. That is normal (next step). Set `DC3_WEB__HSTS: "true"`
 
 Expect the first searchable torrents within minutes and a steadily growing
 index over hours to days. The default crawl budget (`max_packets_per_sec =
-1000`, 192 fetch workers) is sized for a server; lower it in
+1000`, 512 fetch workers) is sized for a server; lower it in
 `deploy/config/dhtcrawler4.toml` on a home connection.
 
 ### 8. Day-to-day operation

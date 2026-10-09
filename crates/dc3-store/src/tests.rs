@@ -530,10 +530,10 @@ async fn fail_backs_off_and_gives_up(pool: PgPool) {
     s.observe(&[obs(k, 1)], NO_LIMIT).await.unwrap();
     assert!(!s.fail(&key(99)).await.unwrap(), "no queue row");
 
-    for attempt in 1..=6i32 {
+    for attempt in 1..=MAX_FETCH_ATTEMPTS {
         assert_eq!(s.claim(1, Duration::from_secs(60)).await.unwrap().len(), 1);
         let gave_up = s.fail(&k).await.unwrap();
-        assert_eq!(gave_up, attempt >= 6);
+        assert_eq!(gave_up, attempt >= MAX_FETCH_ATTEMPTS);
         let row = sqlx::query(
             "SELECT attempts, gave_up, lease_until, \
              extract(epoch FROM next_attempt_at - last_attempt_at)::float8 AS delay FROM pending WHERE dht_key = $1",
@@ -543,7 +543,7 @@ async fn fail_backs_off_and_gives_up(pool: PgPool) {
         .await
         .unwrap();
         assert_eq!(row.get::<i32, _>("attempts"), attempt);
-        assert_eq!(row.get::<bool, _>("gave_up"), attempt >= 6);
+        assert_eq!(row.get::<bool, _>("gave_up"), attempt >= MAX_FETCH_ATTEMPTS);
         assert!(
             row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("lease_until")
                 .is_none()
@@ -569,7 +569,7 @@ async fn fail_backs_off_and_gives_up(pool: PgPool) {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(today(&pool).await.fetch_failed, 6);
+    assert_eq!(today(&pool).await.fetch_failed, MAX_FETCH_ATTEMPTS as u64);
     let st = s.stats().await.unwrap();
     assert_eq!((st.pending, st.gave_up), (0, 1));
     assert_eq!(s.pending_depth().await.unwrap(), 1);
@@ -1839,6 +1839,41 @@ async fn fetch_queue_prefers_lively_keys(pool: PgPool) {
     let rest = s.claim(3, Duration::from_secs(120)).await.unwrap();
     assert_eq!(rest.len(), 2);
     assert!(rest.iter().all(|i| i.dht_key != ka));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn fetch_queue_prefers_fresh_keys_over_retried(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    for n in [81u8, 82] {
+        s.observe(
+            &[Observation {
+                key: key(n),
+                sightings: 1,
+                priority: false,
+            }],
+            NO_LIMIT,
+        )
+        .await
+        .unwrap();
+    }
+    // Key 82 failed once but carries a seeder estimate; key 81 is fresh.
+    // Freshness beats liveness: retries must not starve new keys.
+    s.note_fetch_estimate(&key(82), 50).await.unwrap();
+    sqlx::query(
+        "UPDATE pending SET attempts = 1, \
+         next_attempt_at = now() - interval '1 second', lease_until = NULL \
+         WHERE dht_key = $1",
+    )
+    .bind(key(82).0.as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let one = s.claim(1, Duration::from_secs(120)).await.unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].dht_key, key(81));
+    let rest = s.claim(1, Duration::from_secs(120)).await.unwrap();
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].dht_key, key(82));
 }
 
 #[sqlx::test(migrations = "./migrations")]
