@@ -114,7 +114,7 @@ trusted_proxies = []
 search_cache_size = 100
 # How long a search cache entry lives, in seconds, fixed from insert
 # (0 disables it).
-search_cache_ttl_secs = 3600
+search_cache_ttl_secs = 900
 
 [metrics]
 # Prometheus endpoint for whichever role is running. Keep it off the public network.

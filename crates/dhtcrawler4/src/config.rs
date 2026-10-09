@@ -1507,7 +1507,7 @@ mod tests {
         let w = Config::default().web;
         assert_eq!(w.search_cache_size, 100);
         assert_eq!(w.search_cache_size, dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES);
-        assert_eq!(w.search_cache_ttl_secs, 3600);
+        assert_eq!(w.search_cache_ttl_secs, 900);
         assert_eq!(
             w.search_cache_ttl_secs,
             dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS

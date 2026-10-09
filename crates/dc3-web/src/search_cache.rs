@@ -29,8 +29,8 @@ use crate::telemetry::metric_names;
 pub const DEFAULT_SEARCH_CACHE_ENTRIES: usize = 100;
 /// Largest configurable number of cache entries (`0` disables).
 pub const MAX_SEARCH_CACHE_ENTRIES: usize = 10_000;
-/// Default time-to-live of a cache entry, in seconds.
-pub const DEFAULT_SEARCH_CACHE_TTL_SECS: u64 = 3_600;
+/// Default time-to-live of a cache entry, in seconds (15 minutes).
+pub const DEFAULT_SEARCH_CACHE_TTL_SECS: u64 = 900;
 /// Largest configurable entry TTL, in seconds (7 days; `0` disables).
 pub const MAX_SEARCH_CACHE_TTL_SECS: u64 = 604_800;
 
