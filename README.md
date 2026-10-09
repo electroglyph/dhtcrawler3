@@ -6,6 +6,11 @@ It joins Mainline DHT as a well-behaved node (BEP 5/32/42/43/51), discovers torr
 
 dhtcrawler4 is a fork of [dhtcrawler3](https://github.com/poonasor/dhtcrawler3) (itself a Rust rewrite of Kevin Lynx's 2013 Erlang dhtcrawler2, not a port). See [CHANGELOG.md](CHANGELOG.md) for the full fork diff.
 
+- [Running a server on Ubuntu without Docker](#running-a-server-on-ubuntu-without-docker)
+- [Running a server on Ubuntu](#running-a-server-on-ubuntu)
+- [Updating the running server](#updating-the-running-server)
+- [License](#license)
+
 ## What changed since the dhtcrawler3 fork
 
 - **Removed content moderation:** report form, CSRF, `dc3-policy` crate, blocked-terms list, denylist/block pages, report/denylist tables, policy fuzz target.
