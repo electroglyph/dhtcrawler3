@@ -558,8 +558,7 @@ git stash push -- deploy/docker-compose.yml 2>/dev/null || true  # park local ed
 git pull
 git stash pop 2>/dev/null || true                                # re-apply them
 cd deploy
-df -h / | tail -1              # the build needs several GB free; prune first if tight
-docker builder prune -f        # drop the previous build's cache (safe: it only slows this build)
+df -h / | tail -1              # the build needs several GB free
 docker compose up -d --build
 docker image prune -f          # drop the superseded image
 ```
