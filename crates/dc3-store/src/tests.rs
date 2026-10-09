@@ -2441,3 +2441,61 @@ async fn complete_batch_matches_sequential_on_duplicates_and_missing_pending(poo
     }
     assert_eq!(today(&pool).await.fetched, 4);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn complete_batch_revives_tombstoned_rows_like_complete(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // Two identical torrents, both scraped dead; one revived by batch, one
+    // sequentially.
+    let bk = key(80);
+    let sk = key(81);
+    let bid = s.complete(&bk, &torrent(bk, "doomed")).await.unwrap();
+    let sid = s.complete(&sk, &torrent(sk, "doomed")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    assert_eq!(snap.len(), 2);
+    for c in &snap {
+        assert!(
+            s.tombstone_dead(c.id, c.last_seen_at, c.change_seq)
+                .await
+                .unwrap()
+        );
+    }
+    let tombstoned_bid = change_seq_of(&pool, bid).await;
+    let tombstoned_sid = change_seq_of(&pool, sid).await;
+    assert!(!raw_torrent(&pool, bid).await.is_live());
+    assert_eq!(raw_torrent(&pool, bid).await.name, "");
+    assert_eq!(s.removed_keys_count().await.unwrap(), 2);
+
+    // A refetch re-queues both keys, like admission after new sightings.
+    s.observe(&[obs(bk, 4), obs(sk, 6)], NO_LIMIT)
+        .await
+        .unwrap();
+
+    // Revival reuses the row (no second insert): same id, content restored,
+    // seen_count accumulated, removal memory cleared.
+    let ids = s
+        .complete_batch(&[(bk, torrent(bk, "revived"))])
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![bid]);
+    let sid2 = s.complete(&sk, &torrent(sk, "revived")).await.unwrap();
+    assert_eq!(sid2, sid);
+    for (id, seen) in [(bid, 5), (sid, 7)] {
+        let r = raw_torrent(&pool, id).await;
+        assert!(r.is_live());
+        assert_eq!(r.name, "revived");
+        assert_eq!(r.files, torrent(bk, "revived").files);
+        assert_eq!(r.seen_count, seen);
+    }
+    assert_ne!(change_seq_of(&pool, bid).await, tombstoned_bid);
+    assert_ne!(change_seq_of(&pool, sid).await, tombstoned_sid);
+    assert_eq!(s.removed_keys_count().await.unwrap(), 0);
+    assert_eq!(today(&pool).await.fetched, 4);
+
+    // Revived bodies match except for the key-owned fields and seen_count.
+    let (b, q) = (
+        torrent_body(&pool, bid).await,
+        torrent_body(&pool, sid).await,
+    );
+    assert_eq!((&b.2, &b.3, b.4, b.5, b.6), (&q.2, &q.3, q.4, q.5, q.6));
+}

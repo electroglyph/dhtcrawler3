@@ -387,6 +387,20 @@ async fn export_dht_stats(dht: dc3_dht::Dht, every: Duration, stop: Cancellation
     }
 }
 
+/// One export tick: the queue depth (`None` when unreadable) and the pool
+/// use. Split out for tests; [`export_queue_depth`] only moves these into
+/// gauges.
+async fn snapshot_queue_depth<S: CrawlStore>(store: &S) -> (Option<i64>, Option<(u32, usize)>) {
+    let depth = match store.pending_depth().await {
+        Ok(depth) => Some(depth),
+        Err(e) => {
+            tracing::warn!(error = %e, "reading the queue depth failed");
+            None
+        }
+    };
+    (depth, store.pool_status())
+}
+
 async fn export_queue_depth<S: CrawlStore>(store: S, every: Duration, stop: CancellationToken) {
     let mut ticker = tokio::time::interval(every.max(Duration::from_millis(1)));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -394,11 +408,11 @@ async fn export_queue_depth<S: CrawlStore>(store: S, every: Duration, stop: Canc
         tokio::select! {
             () = stop.cancelled() => break,
             _ = ticker.tick() => {
-                match store.pending_depth().await {
-                    Ok(depth) => metrics::gauge!(METRIC_QUEUE_DEPTH).set(depth as f64),
-                    Err(e) => tracing::warn!(error = %e, "reading the queue depth failed"),
+                let (depth, pool) = snapshot_queue_depth(&store).await;
+                if let Some(depth) = depth {
+                    metrics::gauge!(METRIC_QUEUE_DEPTH).set(depth as f64);
                 }
-                if let Some((size, idle)) = store.pool_status() {
+                if let Some((size, idle)) = pool {
                     metrics::gauge!(METRIC_DB_POOL_SIZE).set(f64::from(size));
                     metrics::gauge!(METRIC_DB_POOL_IDLE).set(idle as f64);
                 }
@@ -549,5 +563,77 @@ mod tests {
     #[test]
     fn snapshot_export_does_not_need_a_recorder() {
         export_snapshot(&DhtStatsSnapshot::default());
+    }
+
+    #[tokio::test]
+    async fn queue_snapshot_reports_depth_without_pool() {
+        use crate::memstore::MemoryStore;
+
+        let store = MemoryStore::new();
+        assert_eq!(snapshot_queue_depth(&store).await, (Some(0), None));
+        store.enqueue(dc3_core::DhtKey([21; 20]));
+        store.enqueue(dc3_core::DhtKey([22; 20]));
+        assert_eq!(snapshot_queue_depth(&store).await, (Some(2), None));
+    }
+
+    /// A pool that never connected: size/idle are observable with no
+    /// database, and depth reads fail deterministically (the pool is
+    /// closed, so nothing is even dialled).
+    async fn dead_store() -> dc3_store::Store {
+        let pool =
+            dc3_store::sqlx::PgPool::connect_lazy("postgres://dc3:secret@127.0.0.1:1/unused")
+                .unwrap();
+        pool.close().await;
+        dc3_store::Store::from_pool(pool)
+    }
+
+    #[tokio::test]
+    async fn store_pool_status_reports_pool_size() {
+        let pool =
+            dc3_store::sqlx::PgPool::connect_lazy("postgres://dc3:secret@127.0.0.1:1/unused")
+                .unwrap();
+        let store = dc3_store::Store::from_pool(pool);
+        assert_eq!(store.pool_status(), Some((0, 0)));
+    }
+
+    #[tokio::test]
+    async fn queue_snapshot_survives_a_dead_database() {
+        let store = dead_store().await;
+        // The depth error degrades to None (and a warning) instead of taking
+        // down the exporter; the pool gauges still report.
+        assert_eq!(snapshot_queue_depth(&store).await, (None, Some((0, 0))));
+    }
+
+    #[tokio::test]
+    async fn export_queue_depth_ticks_then_exits_on_cancel() {
+        use crate::memstore::MemoryStore;
+
+        // Both pool branches of the loop: the stand-in (no pool) and a dead
+        // pool (pool gauges, failing depth reads).
+        let stop = CancellationToken::new();
+        let run = tokio::spawn(export_queue_depth(
+            MemoryStore::new(),
+            Duration::from_millis(10),
+            stop.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let stop = CancellationToken::new();
+        let run = tokio::spawn(export_queue_depth(
+            dead_store().await,
+            Duration::from_millis(10),
+            stop.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
