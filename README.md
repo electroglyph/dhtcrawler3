@@ -637,9 +637,9 @@ cd ~/dhtcrawler4/deploy
   # mountpoint it reports instead:
   # docker volume inspect dhtcrawler4_pgdata --format '{{.Mountpoint}}'
   echo '### database ###'
-  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT * FROM stats_daily ORDER BY day DESC LIMIT 3;" -c "SELECT count(*) AS torrents FROM torrents;" -c "SELECT count(*) FILTER (WHERE NOT gave_up) AS queued, count(*) FILTER (WHERE gave_up) AS gave_up FROM pending;" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS size FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 6;"'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT * FROM stats_daily ORDER BY day DESC LIMIT 3;" -c "SELECT count(*) AS torrents FROM torrents;" -c "SELECT count(*) FILTER (WHERE NOT gave_up) AS queued, count(*) FILTER (WHERE gave_up) AS gave_up FROM pending;" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS size FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 6;" -c "\di pending*'
   echo '### crawl metrics ###'
-  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_fetch_total|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total)" <&3'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_(fetch_total|queue_depth|db_pool_size|db_pool_idle)|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total)" <&3'
 } 2>&1 | tee /tmp/dc3-diag.txt
 ```
 
@@ -663,7 +663,18 @@ How to read the output:
   `dc3_fetch_total`: `no_peers` dominating means lookups find nobody
   holding the keys (stale keys); `fetch_failed` dominating means peers
   exist but TCP connects/handshakes die (firewalled internet, or
-  timeouts too tight).
+  timeouts too tight). If `dc3_fetch_total` is missing entirely a while
+  after a restart, workers have not finished a single key — the stall is
+  upstream of fetching (pool, DB), not the DHT; see the pool bullet.
+- **Crawl logs full of `pool timed out`?** The DB cannot serve the pool:
+  `dc3_db_pool_idle` pinned at zero confirms it. Usual cause is one slow
+  query holding every connection — historically the fetch claim sorting
+  millions of rows for want of its index (fixed by migration
+  `000010_pending_claim`; the `\di pending*` leg proves it is applied).
+  Confirm with what the backends are doing:
+  `... -c "SELECT count(*), state, wait_event FROM pg_stat_activity
+  GROUP BY 2,3 ORDER BY 1 DESC;"` — a wall of `active` on the same query
+  means fix the query/plan, not the knobs.
 - **Is the DHT side healthy?** `good_nodes` in the hundreds with
   `timeouts_total` a small fraction of `samples_total` is fine, and the
   table keeps filling for the first days. `queries_received_total`
@@ -677,13 +688,20 @@ How to read the output:
   builder prune -f` drops it. Of the volumes, `pgdata` is always the
   big one: the pending queue holds millions of undiscovered keys (that
   is the `queued` count, not a problem by itself) and constant row
-  updates churn WAL. The `index` volume stays small until the torrent
+  updates churn WAL. Cross-check `du` against the SQL `db_size`: a large
+  gap (tens of GB on disk for a ~1 GB database) is WAL piled up or dead
+  tuples, not data — look at `pg_wal` inside the volume
+  (`du -sh .../pgdata/_data/pg_wal`), `n_dead_tup`/`last_autovacuum` in
+  `pg_stat_user_tables`, and run `CHECKPOINT` to let recycled WAL go.
+  The `index` volume stays small until the torrent
   count is large; `state` (DHT routing snapshot) is kilobytes.
 - **Out of headroom?** `docker stats` shows it: crawl CPU/mem near its
-  2 GiB cap, or the DB pool idle gauge pinned at zero, means the crawl
-  budget outgrew the machine — lower `fetch_workers`/`max_connections`
-  or grow the host. Plenty of idle CPU/RAM means the opposite: the
-  knobs, not the hardware, are the limit.
+  3 GiB cap, the DB near its 4 GiB cap, or the DB pool idle gauge pinned
+  at zero, means the crawl budget outgrew the machine — lower
+  `fetch_workers`/`max_connections` or grow the host. Plenty of idle
+  CPU/RAM means the opposite: the knobs, not the hardware, are the
+  limit. (Pool pinned at zero with idle hardware is a slow-query
+  problem, not a size problem — see the pool bullet.)
 - **A role unhealthy?** `docker compose ps` names it;
   `docker compose logs --tail=30 <role>` (JSON lines, query text never
   logged) usually names the cause: DB unreachable, bad TOML key, port
