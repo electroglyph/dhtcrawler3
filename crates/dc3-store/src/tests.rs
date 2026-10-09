@@ -1407,7 +1407,7 @@ async fn schema_constraints(pool: PgPool) {
         "torrents_info_hash_v2_key",
         "pending_ready",
         "pending_gave_up",
-        "pending_seeders",
+        "pending_claim",
         "audit_log_at",
         "audit_log_action_at",
         "settings_pkey",
@@ -1416,6 +1416,30 @@ async fn schema_constraints(pool: PgPool) {
         "removed_keys_pkey",
     ] {
         assert!(indexes.contains(name), "missing index {name}");
+    }
+    assert!(
+        !indexes.contains("pending_seeders"),
+        "pending_seeders was replaced by pending_claim"
+    );
+
+    // `pending_claim` must keep matching the claim's ORDER BY exactly
+    // (`attempts, seeders_est DESC NULLS LAST, next_attempt_at` over rows
+    // that have not given up), or every claim sorts millions of rows.
+    let claim_def: String =
+        sqlx::query_scalar("SELECT pg_get_indexdef('pending_claim'::regclass)::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for part in [
+        "attempts",
+        "seeders_est DESC NULLS LAST",
+        "next_attempt_at",
+        "(NOT gave_up)",
+    ] {
+        assert!(
+            claim_def.contains(part),
+            "pending_claim drifted: {claim_def}"
+        );
     }
 }
 

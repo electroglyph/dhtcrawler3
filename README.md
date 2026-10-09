@@ -297,12 +297,13 @@ Minimum that works without OOM kills (these are the compose `mem_limit`s):
 
 | Service    | RAM   | Disk                        |
 | ---------- | ----- | --------------------------- |
-| crawl      | 2 GiB | a few MiB of DHT state      |
+| crawl      | 3 GiB | a few MiB of DHT state      |
 | index      | 1 GiB | grows with the corpus       |
 | web        | 512 MiB | —                         |
-| PostgreSQL | 2 GiB | grows with the corpus       |
+| PostgreSQL | 4 GiB | grows with the corpus       |
 
-Use a host with at least 6 GiB RAM. Disk: tens of GiB to start; the database
+Use a host with at least 10 GiB RAM (about 8.75 GiB of caps plus room for
+the OS and Docker itself). Disk: tens of GiB to start; the database
 and the search index grow as torrents are discovered, so leave room (100+ GiB
 is comfortable). One UDP port must be reachable from the internet: **6881**.
 
