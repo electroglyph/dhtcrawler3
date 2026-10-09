@@ -9,7 +9,6 @@ dhtcrawler4 is a fork of [dhtcrawler3](https://github.com/poonasor/dhtcrawler3) 
 - [Running a server on Ubuntu without Docker](#running-a-server-on-ubuntu-without-docker)
 - [Running a server on Ubuntu](#running-a-server-on-ubuntu)
 - [Updating the running server](#updating-the-running-server)
-- [License](#license)
 
 ## What changed since the dhtcrawler3 fork
 
