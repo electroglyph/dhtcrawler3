@@ -44,6 +44,7 @@ struct State {
     failing_observes: usize,
     failing_completes: usize,
     failing_removals: usize,
+    failing_batches: usize,
     renewals: usize,
     fails: HashMap<DhtKey, u32>,
     /// `None` means [`MEMORY_FAIL_BACKOFF`].
@@ -193,6 +194,14 @@ impl MemoryStore {
     /// database hiccuped mid-read).
     pub fn fail_next_removals(&self, n: usize) {
         self.lock().failing_removals = n;
+    }
+
+    /// Makes the next `n` batched writes (`complete_batch`, `fail_batch`,
+    /// `give_up_batch`) fail atomically (as if one multi-key transaction
+    /// hit a transient database error). Per-key fallbacks still succeed,
+    /// so workers exercise their one-key-at-a-time path.
+    pub fn fail_next_batches(&self, n: usize) {
+        self.lock().failing_batches = n;
     }
 
     /// Number of successful lease renewals.
@@ -652,6 +661,49 @@ impl CrawlStore for MemoryStore {
     async fn ping(&self) -> Result<()> {
         Ok(())
     }
+
+    async fn complete_batch(&self, items: &[(DhtKey, NewTorrent)]) -> Result<Vec<i64>> {
+        {
+            let mut state = self.lock();
+            if state.failing_batches > 0 {
+                state.failing_batches = state.failing_batches.saturating_sub(1);
+                return Err(StoreError::Corrupt("injected batch failure".into()));
+            }
+        }
+        let mut ids = Vec::with_capacity(items.len());
+        for (key, t) in items {
+            ids.push(self.complete(key, t).await?);
+        }
+        Ok(ids)
+    }
+
+    async fn fail_batch(&self, keys: &[DhtKey]) -> Result<()> {
+        {
+            let mut state = self.lock();
+            if state.failing_batches > 0 {
+                state.failing_batches = state.failing_batches.saturating_sub(1);
+                return Err(StoreError::Corrupt("injected batch failure".into()));
+            }
+        }
+        for key in keys {
+            self.fail(key).await?;
+        }
+        Ok(())
+    }
+
+    async fn give_up_batch(&self, keys: &[DhtKey]) -> Result<()> {
+        {
+            let mut state = self.lock();
+            if state.failing_batches > 0 {
+                state.failing_batches = state.failing_batches.saturating_sub(1);
+                return Err(StoreError::Corrupt("injected batch failure".into()));
+            }
+        }
+        for key in keys {
+            self.give_up(key).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -692,6 +744,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn queue_lifecycle() {
         let s = MemoryStore::new();
+        // No pool behind the stand-in, so no pool gauges to export.
+        assert!(s.pool_status().is_none());
         let out = s
             .observe(
                 &[obs(key(1), false), obs(key(1), true), obs(key(2), false)],

@@ -658,6 +658,9 @@ impl Store {
             v2: Option<Vec<u8>>,
             v2_prefix: Option<DhtKey>,
         }
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut prepared = Vec::with_capacity(items.len());
         for (key, t) in items {
             validate_torrent(t)?;
@@ -819,13 +822,19 @@ impl Store {
     /// Records failed fetches for many keys in one transaction.
     ///
     /// The backoff math matches [`Store::fail`]; only the round trips are
-    /// shared. Returns nothing: like [`Store::fail`], callers keep their own
-    /// outcome and only need to know the write succeeded.
+    /// shared. Duplicate keys are merged: each distinct queued key gets one
+    /// attempt bump (sequential [`Store::fail`] calls would bump once per
+    /// call). Callers pass distinct claimed keys, so this never triggers in
+    /// the pipeline. Returns nothing: like [`Store::fail`], callers keep
+    /// their own outcome and only need to know the write succeeded.
     pub async fn fail_batch(&self, keys: &[DhtKey]) -> Result<()> {
         if keys.is_empty() {
             return Ok(());
         }
-        let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
+        let mut distinct: Vec<DhtKey> = keys.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let raw: Vec<&[u8]> = distinct.iter().map(|k| k.as_bytes().as_slice()).collect();
         let mut tx = self.pool.begin().await?;
         let rows = sqlx::query(FAIL_BATCH_SQL)
             .bind(&raw)
@@ -845,12 +854,16 @@ impl Store {
     }
 
     /// Records many never-succeed fetches in one transaction.
-    /// See [`Store::give_up`].
+    /// See [`Store::give_up`]. Duplicate keys are merged, as in
+    /// [`Store::fail_batch`]: one attempt bump per distinct key.
     pub async fn give_up_batch(&self, keys: &[DhtKey]) -> Result<()> {
         if keys.is_empty() {
             return Ok(());
         }
-        let raw: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes().as_slice()).collect();
+        let mut distinct: Vec<DhtKey> = keys.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let raw: Vec<&[u8]> = distinct.iter().map(|k| k.as_bytes().as_slice()).collect();
         let mut tx = self.pool.begin().await?;
         let rows = sqlx::query(GIVE_UP_BATCH_SQL)
             .bind(&raw)

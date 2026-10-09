@@ -516,6 +516,72 @@ docker compose ps                     # includes healthcheck status
 See [Running a server on Ubuntu without Docker](#running-a-server-on-ubuntu-without-docker)
 above for the full bare-metal setup.
 
+## Updating the running server
+
+Code changes (and the TOML baked into the image) take effect on a rebuild.
+Database migrations run themselves; your data lives in volumes and is never
+touched by a rebuild.
+
+### Standard update (Docker)
+
+```sh
+git stash push -- deploy/docker-compose.yml   # park your local edits, if any
+git pull
+git stash pop                                 # re-apply them
+cd deploy
+docker compose up -d --build
+```
+
+What happens, in order: the image rebuilds from the new tree; `migrate`
+runs (a no-op when the schema is current); `crawl`, `index` and `web`
+recreate one at a time behind the same health gates as first install.
+`pgdata`, `state` and `index` volumes survive — only containers restart, so
+the web UI is down for seconds. Then verify:
+
+```sh
+docker compose ps                             # all healthy, migrate exited 0
+docker compose logs --tail=20 crawl web
+curl -s http://127.0.0.1/healthz
+```
+
+Rules of thumb for what needs a rebuild:
+
+- **Code or `deploy/config/dhtcrawler4.toml` changed** → `--build` (the TOML
+  is copied into the image).
+- **Only `deploy/docker-compose.yml` env changed** (knobs, secrets
+  rotation) → plain `docker compose up -d` recreates with the new
+  environment, no build.
+- **Only secrets rotated** → replace the files in `deploy/secrets/` and
+  `up -d` (containers read them at startup).
+
+If `git stash pop` reports a conflict (upstream touched the same lines you
+edited), open `deploy/docker-compose.yml`, keep your values for the
+conflicted hunks, then `up -d --build` as usual.
+
+### Before you upgrade: back up
+
+Migrations run forward only — there is no downgrade path for the schema.
+If a release ever misbehaves, rolling the *code* back is easy but the
+*database* stays migrated, so snapshot first when the CHANGELOG mentions
+migrations:
+
+```sh
+cd deploy
+docker compose stop crawl index web   # quiesce writers; db keeps running
+docker run --rm -v dhtcrawler4_pgdata:/data -v "$PWD":/backup ubuntu \
+  tar czf /backup/pgdata-backup.tar.gz -C /data .
+docker compose start crawl index web
+```
+
+(The volume is named `<project>_<name>`; confirm with
+`docker volume ls | grep pgdata`.) Copy the tarball and `deploy/secrets/`
+off the host. To restore: `down`, fresh `pgdata` volume, extract the
+tarball into it, `up -d --build`.
+
+Reclaim build disk now and then: `docker image prune` drops the superseded
+images (never prune volumes unless you mean to wipe the database and
+index — that flag is `-v`, keep it away from routine cleanup).
+
 ## License
 
 MIT. dhtcrawler4 follows the design of Kevin Lynx's dhtcrawler2, and his copyright notice is kept in [LICENSE.txt](LICENSE.txt).

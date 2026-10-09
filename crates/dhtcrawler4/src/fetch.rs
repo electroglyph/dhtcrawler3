@@ -2,7 +2,8 @@
 //! over BEP 9, verify and parse it, and store the result.
 //!
 //! Each worker:
-//! 1. claims up to 8 keys with a 120 s lease;
+//! 1. claims up to 8 keys with a 120 s lease, renewed in the background
+//!    while the batch is worked (a full batch can outlive the lease);
 //! 2. collects peers from the hint map and `get_peers` (10 s), each passing
 //!    the address chokepoint and the per-destination limits;
 //! 3. tries up to 8 peers, 3 at a time, inside the global connection limit
@@ -471,7 +472,7 @@ struct RenewalGuard(tokio::task::JoinHandle<()>);
 
 /// True when a background lease renewal could act before the fetch's own
 /// deadline: the first tick fires at `renew_every`, and past `key_deadline`
-/// the fetch is already timed out. With default tuning (90 s vs 60 s) the
+/// the fetch is already timed out. With default tuning (90 s vs 45 s) the
 /// tick never fires, so spawning the guard is pure overhead (a task plus a
 /// timer per key across all workers).
 fn renewal_before_deadline(renew_every: Duration, key_deadline: Duration) -> bool {
@@ -492,6 +493,45 @@ impl RenewalGuard {
                 }
             }
         }))
+    }
+
+    /// Renews every key of a claimed batch until dropped. A batch holds its
+    /// leases for the whole sequential fetch run plus the batched store: up
+    /// to `CLAIM_BATCH` × `key_deadline` (8 × 45 s = 360 s by default), far
+    /// past the 120 s lease — even though one key alone (45 s) never needs
+    /// renewal. Without this, early keys' leases expire mid-batch and another
+    /// worker can claim and re-fetch them (wasted work, double attempts).
+    /// Returns `None` when renewal cannot help (no keys, or the first tick
+    /// would fire after the lease already expired).
+    fn spawn_all<S: CrawlStore>(
+        store: S,
+        keys: &[DhtKey],
+        lease: Duration,
+        every: Duration,
+    ) -> Option<Self> {
+        if keys.is_empty() {
+            return None;
+        }
+        let every = every.max(MIN_RENEW_INTERVAL);
+        if every >= lease {
+            return None;
+        }
+        let keys = keys.to_vec();
+        Some(Self(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval_at(after(Instant::now(), every), every);
+            loop {
+                ticker.tick().await;
+                for key in &keys {
+                    match store.renew(key, lease).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::debug!("a queue lease was lost during a fetch");
+                        }
+                        Err(e) => tracing::warn!(error = %e, "renewing a queue lease failed"),
+                    }
+                }
+            }
+        })))
     }
 }
 
@@ -591,16 +631,25 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
     /// Fetches, verifies and parses one claimed key: the network half of
     /// [`Fetcher::process`], with no store access and no metrics.
     async fn fetch_item(&self, item: &PendingItem) -> Staged {
+        self.fetch_item_inner(item, true).await
+    }
+
+    /// [`Fetcher::fetch_item`], with the per-key renewal guard optional.
+    /// [`Fetcher::process_batch`] disables it: the batch guard (one task for
+    /// all keys, held for the whole batch) covers every key, so per-key
+    /// tasks would only duplicate renewals.
+    async fn fetch_item_inner(&self, item: &PendingItem, renew: bool) -> Staged {
         let key = item.dht_key;
-        let renewal = renewal_before_deadline(self.tuning.renew_every, self.tuning.key_deadline)
-            .then(|| {
-                RenewalGuard::spawn(
-                    self.store.clone(),
-                    key,
-                    self.tuning.lease,
-                    self.tuning.renew_every,
-                )
-            });
+        let renewal = (renew
+            && renewal_before_deadline(self.tuning.renew_every, self.tuning.key_deadline))
+        .then(|| {
+            RenewalGuard::spawn(
+                self.store.clone(),
+                key,
+                self.tuning.lease,
+                self.tuning.renew_every,
+            )
+        });
         let obtained = tokio::time::timeout(self.tuning.key_deadline, self.obtain(key))
             .await
             .unwrap_or(Obtained::Failed);
@@ -830,20 +879,29 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
 
     /// Fetches a claimed batch, then records it in as few transactions as
     /// the store allows. Outcomes and metrics match one-by-one `process()`.
+    /// One renewal task covers all keys for the whole batch (sequential
+    /// fetches plus the batched store can outlive the lease).
     async fn process_batch(&self, items: &[PendingItem]) {
+        let keys: Vec<DhtKey> = items.iter().map(|item| item.dht_key).collect();
+        let _batch_renewals = RenewalGuard::spawn_all(
+            self.store.clone(),
+            &keys,
+            self.tuning.lease,
+            self.tuning.renew_every,
+        );
         let mut staged = Vec::with_capacity(items.len());
         for item in items {
-            staged.push(self.fetch_item(item).await);
+            staged.push(self.fetch_item_inner(item, false).await);
         }
-        let mut readies: Vec<(usize, NewTorrent)> = Vec::new();
-        let mut faileds: Vec<(usize, FetchOutcome)> = Vec::new();
-        let mut doomeds: Vec<(usize, FetchOutcome)> = Vec::new();
-        for (index, stage) in staged.into_iter().enumerate() {
+        let mut readies: Vec<(&PendingItem, NewTorrent)> = Vec::new();
+        let mut faileds: Vec<(&PendingItem, FetchOutcome)> = Vec::new();
+        let mut doomeds: Vec<(&PendingItem, FetchOutcome)> = Vec::new();
+        for (item, stage) in items.iter().zip(staged) {
             match stage {
-                Staged::Ready(t) => readies.push((index, t)),
-                Staged::Missing => faileds.push((index, FetchOutcome::NoPeers)),
-                Staged::Failed => faileds.push((index, FetchOutcome::FetchFailed)),
-                Staged::Doomed(outcome) => doomeds.push((index, outcome)),
+                Staged::Ready(t) => readies.push((item, t)),
+                Staged::Missing => faileds.push((item, FetchOutcome::NoPeers)),
+                Staged::Failed => faileds.push((item, FetchOutcome::FetchFailed)),
+                Staged::Doomed(outcome) => doomeds.push((item, outcome)),
             }
         }
         // Successes share one transaction; a rejected batch falls back to
@@ -851,60 +909,54 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         if !readies.is_empty() {
             let pairs: Vec<(DhtKey, NewTorrent)> = readies
                 .iter()
-                .map(|(index, t)| (items[*index].dht_key, t.clone()))
+                .map(|(item, t)| (item.dht_key, t.clone()))
                 .collect();
             match self.store.complete_batch(&pairs).await {
                 Ok(ids) => {
                     debug_assert_eq!(ids.len(), readies.len());
-                    for (index, _) in &readies {
-                        self.emit(&items[*index], FetchOutcome::Ok);
+                    for (item, _) in &readies {
+                        self.emit(item, FetchOutcome::Ok);
                     }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "batched completion failed; storing one key at a time");
-                    for (index, t) in readies {
-                        let outcome = self.store_ready(items[index].dht_key, t).await;
-                        self.emit(&items[index], outcome);
+                    for (item, t) in readies {
+                        let outcome = self.store_ready(item.dht_key, t).await;
+                        self.emit(item, outcome);
                     }
                 }
             }
         }
         if !faileds.is_empty() {
-            let keys: Vec<DhtKey> = faileds
-                .iter()
-                .map(|(index, _)| items[*index].dht_key)
-                .collect();
+            let keys: Vec<DhtKey> = faileds.iter().map(|(item, _)| item.dht_key).collect();
             match self.store.fail_batch(&keys).await {
                 Ok(()) => {
-                    for (index, outcome) in &faileds {
-                        self.emit(&items[*index], *outcome);
+                    for (item, outcome) in &faileds {
+                        self.emit(item, *outcome);
                     }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "batched failure recording failed; recording one key at a time");
-                    for (index, outcome) in faileds {
-                        let stored = self.give_back(items[index].dht_key, outcome).await;
-                        self.emit(&items[index], stored);
+                    for (item, outcome) in faileds {
+                        let stored = self.give_back(item.dht_key, outcome).await;
+                        self.emit(item, stored);
                     }
                 }
             }
         }
         if !doomeds.is_empty() {
-            let keys: Vec<DhtKey> = doomeds
-                .iter()
-                .map(|(index, _)| items[*index].dht_key)
-                .collect();
+            let keys: Vec<DhtKey> = doomeds.iter().map(|(item, _)| item.dht_key).collect();
             match self.store.give_up_batch(&keys).await {
                 Ok(()) => {
-                    for (index, outcome) in &doomeds {
-                        self.emit(&items[*index], *outcome);
+                    for (item, outcome) in &doomeds {
+                        self.emit(item, *outcome);
                     }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "batched give-up failed; recording one key at a time");
-                    for (index, outcome) in doomeds {
-                        let stored = self.give_up(items[index].dht_key, outcome).await;
-                        self.emit(&items[index], stored);
+                    for (item, outcome) in doomeds {
+                        let stored = self.give_up(item.dht_key, outcome).await;
+                        self.emit(item, stored);
                     }
                 }
             }
@@ -1298,8 +1350,9 @@ mod tests {
 
     #[test]
     fn renewal_guard_spawns_only_before_the_deadline() {
-        // Default tuning: the first tick (90 s) never fires before the
+        // Production tuning: the first tick (90 s) never fires before the
         // fetch times out (45 s).
+        assert!(!renewal_before_deadline(LEASE_RENEW_INTERVAL, KEY_DEADLINE));
         assert!(!renewal_before_deadline(
             Duration::from_secs(90),
             Duration::from_secs(60)
@@ -1318,6 +1371,112 @@ mod tests {
             Duration::ZERO,
             Duration::from_secs(10)
         ));
+    }
+
+    #[tokio::test]
+    async fn batch_renewals_spawn_only_when_useful() {
+        let store = MemoryStore::new();
+        let one = [DhtKey([1; 20])];
+        // Production tuning: a full batch (8 x 45 s) far outlives the lease.
+        assert!(
+            RenewalGuard::spawn_all(store.clone(), &one, CLAIM_LEASE, LEASE_RENEW_INTERVAL)
+                .is_some()
+        );
+        // Nothing to renew, or the first tick would fire after expiry.
+        assert!(
+            RenewalGuard::spawn_all(store.clone(), &[], CLAIM_LEASE, LEASE_RENEW_INTERVAL)
+                .is_none()
+        );
+        assert!(
+            RenewalGuard::spawn_all(
+                store.clone(),
+                &one,
+                Duration::from_secs(120),
+                Duration::from_secs(120)
+            )
+            .is_none()
+        );
+        assert!(
+            RenewalGuard::spawn_all(
+                store.clone(),
+                &one,
+                Duration::from_secs(120),
+                Duration::from_secs(300)
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_renewals_cover_slow_batches() {
+        // Per-key renewal is off here (the first tick would race the key
+        // deadline), so any renewal must come from the batch guard.
+        let tuning = FetchTuning {
+            key_deadline: Duration::from_millis(200),
+            renew_every: Duration::from_millis(200),
+            ..test_tuning()
+        };
+        assert!(!renewal_before_deadline(
+            tuning.renew_every,
+            tuning.key_deadline
+        ));
+        let store = MemoryStore::new();
+        let slow = holding_listener().await;
+        let keys = [DhtKey([11; 20]), DhtKey([12; 20])];
+        for k in &keys {
+            store.enqueue(*k);
+        }
+        // Leases must exist for renewals to count.
+        let claimed = store.claim(2, Duration::from_secs(120)).await.unwrap();
+        assert_eq!(claimed.len(), 2);
+        let f = fetcher_with(&store, FixedPeers(vec![slow]), tuning);
+        let items: Vec<PendingItem> = keys.iter().map(|k| item(*k)).collect();
+        // Each fetch runs the 200 ms key deadline; the batch guard ticks at
+        // 200 ms and renews both leases mid-batch.
+        f.process_batch(&items).await;
+        assert!(
+            store.renewals() >= 1,
+            "the batch guard should have renewed, got {}",
+            store.renewals()
+        );
+        for k in &keys {
+            assert_eq!(store.failures(k), 1);
+        }
+
+        // Contrast: one key at a time spawns no guard under this tuning.
+        let before = store.renewals();
+        let k = DhtKey([13; 20]);
+        store.enqueue(k);
+        let claimed = store.claim(1, Duration::from_secs(120)).await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(f.process(&item(k)).await, FetchOutcome::FetchFailed);
+        assert_eq!(store.renewals(), before);
+    }
+
+    #[tokio::test]
+    async fn process_batch_falls_back_to_one_key_at_a_time() {
+        let first = info_dict("fallback one", &["a.txt"], false);
+        let second = info_dict("fallback two", &["b.txt"], false);
+        let good = seeder(&first).await;
+        let good2 = seeder(&second).await;
+        let store = MemoryStore::new();
+        let k1 = key_of(&first);
+        let k2 = key_of(&second);
+        let missing = DhtKey([77; 20]);
+        for k in [k1, k2, missing] {
+            store.enqueue(k);
+        }
+        // Both batched writes fail atomically; the per-key fallbacks still
+        // succeed, with the same outcomes as one-by-one process().
+        store.fail_next_batches(2);
+        let f = fetcher(&store, FixedPeers(vec![good, good2]));
+        let items: Vec<PendingItem> = [k1, k2, missing].iter().map(|k| item(*k)).collect();
+        f.process_batch(&items).await;
+        assert_eq!(store.torrent(&k1).unwrap().name, "fallback one");
+        assert_eq!(store.torrent(&k2).unwrap().name, "fallback two");
+        assert_eq!(store.failures(&missing), 1);
+        // The failed key stays queued for retry; the rest are done.
+        assert_eq!(store.pending_keys(), vec![missing]);
     }
 
     /// A peer that accepts connections and then never speaks, so the

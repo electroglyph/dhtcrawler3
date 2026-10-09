@@ -2247,7 +2247,7 @@ async fn complete_batch_matches_sequential(pool: PgPool) {
     }
     let seq_ids: Vec<i64> =
         sqlx::query_scalar("SELECT id FROM torrents WHERE dht_key = ANY($1::bytea[]) ORDER BY id")
-            .bind(&skeys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
+            .bind(skeys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
             .fetch_all(&pool)
             .await
             .unwrap();
@@ -2344,7 +2344,7 @@ async fn fail_and_give_up_batches(pool: PgPool) {
     let attempts: Vec<i32> = sqlx::query_scalar(
         "SELECT attempts FROM pending WHERE dht_key = ANY($1::bytea[]) ORDER BY dht_key",
     )
-    .bind(&keys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
+    .bind(keys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
     .fetch_all(&pool)
     .await
     .unwrap();
@@ -2355,7 +2355,7 @@ async fn fail_and_give_up_batches(pool: PgPool) {
     let gave_up: Vec<bool> = sqlx::query_scalar(
         "SELECT gave_up FROM pending WHERE dht_key = ANY($1::bytea[]) ORDER BY dht_key",
     )
-    .bind(&keys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
+    .bind(keys.iter().map(|k| k.0.as_slice()).collect::<Vec<_>>())
     .fetch_all(&pool)
     .await
     .unwrap();
@@ -2365,4 +2365,79 @@ async fn fail_and_give_up_batches(pool: PgPool) {
     // Empty batches are no-ops.
     s.fail_batch(&[]).await.unwrap();
     s.give_up_batch(&[]).await.unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn fail_and_give_up_batches_merge_duplicates(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(74);
+    s.observe(&[obs(k, 1)], NO_LIMIT).await.unwrap();
+    // One bump per distinct key, not per call: sequential fail() twice would
+    // give attempts 2 and two daily counts.
+    s.fail_batch(&[k, k, k]).await.unwrap();
+    let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM pending WHERE dht_key = $1")
+        .bind(k.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1);
+    assert_eq!(today(&pool).await.fetch_failed, 1);
+
+    s.give_up_batch(&[k, k]).await.unwrap();
+    let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM pending WHERE dht_key = $1")
+        .bind(k.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(today(&pool).await.fetch_failed, 2);
+
+    // Missing keys match nothing and count nothing, like sequential calls.
+    let missing = key(75);
+    s.fail_batch(&[missing]).await.unwrap();
+    s.give_up_batch(&[missing]).await.unwrap();
+    assert_eq!(today(&pool).await.fetch_failed, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn complete_batch_matches_sequential_on_duplicates_and_missing_pending(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    // A repeated key in one batch behaves like two sequential completes:
+    // one row, second write wins, counted once.
+    let k = key(76);
+    s.observe(&[obs(k, 2)], NO_LIMIT).await.unwrap();
+    let ids = s
+        .complete_batch(&[(k, torrent(k, "first")), (k, torrent(k, "second"))])
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0], ids[1]);
+    let r = raw_torrent(&pool, ids[0]).await;
+    assert_eq!(r.name, "second");
+    assert_eq!(today(&pool).await.fetched, 1);
+
+    let seq = key(77);
+    s.observe(&[obs(seq, 2)], NO_LIMIT).await.unwrap();
+    let id1 = s.complete(&seq, &torrent(seq, "first")).await.unwrap();
+    let id2 = s.complete(&seq, &torrent(seq, "second")).await.unwrap();
+    assert_eq!(id1, id2);
+    assert_eq!(raw_torrent(&pool, id1).await.name, "second");
+
+    // A key with no pending row still stores (seen_count floors at 1) and
+    // counts, exactly like sequential complete().
+    let bare = key(78);
+    let bare_seq = key(79);
+    let sequential_id = s
+        .complete(&bare_seq, &torrent(bare_seq, "bare"))
+        .await
+        .unwrap();
+    let batch_ids = s
+        .complete_batch(&[(bare, torrent(bare, "bare"))])
+        .await
+        .unwrap();
+    for id in [sequential_id, batch_ids[0]] {
+        let r = raw_torrent(&pool, id).await;
+        assert_eq!(r.seen_count, 1);
+    }
+    assert_eq!(today(&pool).await.fetched, 4);
 }

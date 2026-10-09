@@ -106,7 +106,8 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
         }
     }
     /// See [`Store::fail_batch`]: many keys in one transaction.
-    /// The default fails one key at a time; [`Store`] overrides it.
+    /// The default fails one key at a time (so duplicates bump once per
+    /// call); [`Store`] merges duplicates to one bump per distinct key.
     fn fail_batch(&self, keys: &[DhtKey]) -> impl Future<Output = Result<()>> + Send {
         async move {
             for key in keys {
@@ -116,7 +117,7 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
         }
     }
     /// See [`Store::give_up_batch`]: many keys in one transaction.
-    /// The default gives up one key at a time; [`Store`] overrides it.
+    /// Duplicate semantics match [`CrawlStore::fail_batch`].
     fn give_up_batch(&self, keys: &[DhtKey]) -> impl Future<Output = Result<()>> + Send {
         async move {
             for key in keys {
