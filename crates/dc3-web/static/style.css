@@ -208,8 +208,9 @@ bdi {
 
 .site-footer p {
   margin: 0;
-  padding: 1rem 0;
+  padding: 1rem;
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 /* Search forms */

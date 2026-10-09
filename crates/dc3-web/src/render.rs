@@ -18,7 +18,7 @@ pub(crate) const CSS: HeaderValue = HeaderValue::from_static("text/css; charset=
 
 /// Dynamic responses and form posts.
 pub(crate) const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
-/// Information pages, robots.txt, security.txt and the unhashed stylesheet.
+/// Information pages, robots.txt and the unhashed stylesheet.
 pub(crate) const STATIC_PAGE_CACHE: HeaderValue = HeaderValue::from_static("public, max-age=300");
 /// The home page, whose statistics change at most once a minute.
 pub(crate) const HOME_CACHE: HeaderValue = HeaderValue::from_static("public, max-age=60");

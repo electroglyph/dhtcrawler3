@@ -136,7 +136,6 @@ services:
       <<: *dc3-env
       DC3_DATABASE__USER: dc3_web
       DC3_WEB__LISTEN: "0.0.0.0:8080"
-      DC3_WEB__BASE_URL: "http://127.0.0.1:8080"
       # Connections to the published port arrive from the frontend network's
       # gateway (docker-proxy), so that subnet is the trusted proxy.
       DC3_WEB__TRUSTED_PROXIES: "172.30.80.0/24"

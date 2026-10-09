@@ -5,7 +5,7 @@
 # visitors' IP addresses next to their queries (requirement R11).
 #
 # Run on the host:   caddy run --config deploy/Caddyfile
-# Then set web.base_url = "https://search.example.org" and web.hsts = true.
+# Then set web.hsts = true.
 
 search.example.org {
 	encode zstd gzip

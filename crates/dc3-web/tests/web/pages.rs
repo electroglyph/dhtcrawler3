@@ -122,7 +122,7 @@ async fn information_pages() {
 }
 
 #[tokio::test]
-async fn robots_and_security_txt() {
+async fn robots() {
     let _serial = serial().await;
     let app = app(Vec::new());
     let robots = send(&app.router, get("/robots.txt")).await;
@@ -133,22 +133,6 @@ async fn robots_and_security_txt() {
         "User-agent: *\nDisallow: /search\nDisallow: /api/\nDisallow: /t/\n"
     );
     assert_security_headers(&robots, true);
-
-    let txt = send(&app.router, get("/.well-known/security.txt")).await;
-    assert_eq!(txt.status, StatusCode::OK);
-    assert_eq!(txt.header("content-type"), "text/plain; charset=utf-8");
-    let lines: Vec<&str> = txt.body.lines().collect();
-    assert_eq!(lines[0], "Contact: https://search.example.org/");
-    let expires = lines[1].strip_prefix("Expires: ").unwrap();
-    let expires = chrono::DateTime::parse_from_rfc3339(expires).unwrap();
-    let days = (expires.to_utc() - chrono::Utc::now()).num_days();
-    assert!((363..=365).contains(&days), "{days}");
-    assert!(lines[1].ends_with('Z'));
-    assert_eq!(
-        lines[2],
-        "Canonical: https://search.example.org/.well-known/security.txt"
-    );
-    assert_security_headers(&txt, true);
 }
 
 #[tokio::test]

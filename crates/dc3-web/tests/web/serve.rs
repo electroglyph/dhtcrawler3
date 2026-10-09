@@ -159,13 +159,6 @@ async fn serve_configuration_and_bind_errors() {
         search: index.search.clone(),
     };
 
-    let mut bad = config();
-    bad.base_url = "search.example.org/path".into();
-    let err = serve(bad, deps(), std::future::pending())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, WebError::Config(_)), "{err}");
-
     let mut unnamed = config();
     unnamed.site_name = " ".into();
     let err = serve(unnamed, deps(), std::future::pending())

@@ -99,8 +99,6 @@ poll_interval_ms = 1000
 
 [web]
 listen = "127.0.0.1:8080"
-# Public origin, used for CSRF checks on forms and in security.txt.
-base_url = "http://127.0.0.1:8080"
 site_name = "dhtcrawler4"
 # Send Strict-Transport-Security. Only enable when served exclusively over HTTPS.
 hsts = false

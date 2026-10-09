@@ -41,8 +41,6 @@ use tokio_util::sync::CancellationToken;
 const TEST_LIMIT: Duration = Duration::from_secs(100);
 /// Pool size for the test store.
 const POOL_SIZE: u32 = 16;
-/// The web's public origin in this test.
-const BASE_URL: &str = "http://127.0.0.1:8080";
 
 fn database_url() -> Option<String> {
     std::env::var("DATABASE_URL").ok().filter(|u| !u.is_empty())
@@ -264,7 +262,6 @@ async fn scenario(options: PgConnectOptions) {
     // --- Web ---
     let web_cfg = WebConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
-        base_url: BASE_URL.into(),
         site_name: "dhtcrawler4 e2e".into(),
         hsts: false,
         trusted_proxies: Vec::new(),

@@ -23,7 +23,6 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-pub const BASE_URL: &str = "https://search.example.org";
 pub const SITE_NAME: &str = "Test <Search> & Co";
 pub const CLIENT: &str = "198.51.100.23:50000";
 pub const CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; \
@@ -351,7 +350,6 @@ impl TestIndex {
 pub fn config() -> WebConfig {
     WebConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
-        base_url: BASE_URL.into(),
         site_name: SITE_NAME.into(),
         hsts: true,
         trusted_proxies: Vec::new(),

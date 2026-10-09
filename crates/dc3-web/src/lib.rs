@@ -75,17 +75,12 @@ pub const MAX_CONCURRENT_DETAILS: usize = 16;
 pub const MAX_LISTED_PATH_CHARS: usize = 128_000;
 /// How long `/readyz` waits for the database.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(2);
-/// `Expires` in `security.txt` lies this far after process start.
-pub const SECURITY_TXT_VALIDITY: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 /// Settings of the web role (the `[web]` configuration section).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebConfig {
     /// Address to listen on.
     pub listen: SocketAddr,
-    /// Public origin without a trailing slash, e.g. `https://search.example.org`.
-    /// Used for the CSRF `Origin` check and in `security.txt`.
-    pub base_url: String,
     /// Shown in page titles and headers.
     pub site_name: String,
     /// Send `Strict-Transport-Security`.
@@ -105,10 +100,8 @@ pub struct WebConfig {
 }
 
 impl WebConfig {
-    /// Checks the values [`serve`] relies on: `base_url` must be an
-    /// `http://` or `https://` origin, and `site_name` must not be empty.
+    /// Checks the values [`serve`] relies on: `site_name` must not be empty.
     pub fn validate(&self) -> Result<(), WebError> {
-        app::validate_base_url(&self.base_url).map_err(WebError::Config)?;
         if self.site_name.trim().is_empty() {
             return Err(WebError::Config("web.site_name must not be empty".into()));
         }

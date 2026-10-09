@@ -241,7 +241,6 @@ mod tests {
         let backend = StatsBackend::default();
         let cfg = WebConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
-            base_url: "https://s.example".into(),
             site_name: "s".into(),
             hsts: false,
             trusted_proxies: Vec::new(),
@@ -322,7 +321,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = WebConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
-            base_url: "https://s.example".into(),
             site_name: "s".into(),
             hsts: false,
             trusted_proxies: Vec::new(),

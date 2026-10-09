@@ -79,14 +79,6 @@ pub(crate) async fn robots() -> Response {
     )
 }
 
-/// `GET /.well-known/security.txt` (RFC 9116).
-pub(crate) async fn security_txt<B: Backend>(State(st): State<Arc<AppState<B>>>) -> Response {
-    cached(
-        with_type(StatusCode::OK, TEXT, st.site.security_txt.clone()),
-        STATIC_PAGE_CACHE,
-    )
-}
-
 /// `GET /static/style.css`, for anything that links the plain name.
 pub(crate) async fn style() -> Response {
     cached(with_type(StatusCode::OK, CSS, STYLE_CSS), STATIC_PAGE_CACHE)

@@ -23,7 +23,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use dc3_core::validate_base_url;
 use dc3_store::PgConnectOptions;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -66,8 +65,6 @@ pub const MAX_INDEX_BATCH: i64 = dc3_store::MAX_FEED_PAGE;
 pub const MAX_POLL_INTERVAL_MS: u64 = 3_600_000;
 /// Largest `web.site_name`, in characters.
 pub const MAX_SITE_NAME_CHARS: usize = 200;
-/// Largest `web.base_url`, in characters.
-pub use dc3_core::MAX_BASE_URL_CHARS;
 /// Most entries in `web.trusted_proxies`.
 pub const MAX_TRUSTED_PROXIES: usize = 1024;
 /// Name of the DHT state file inside `crawl.state_dir`.
@@ -282,8 +279,6 @@ impl Default for IndexConfig {
 #[serde(deny_unknown_fields, default)]
 pub struct WebSettings {
     pub listen: SocketAddr,
-    /// Public origin, without a trailing slash.
-    pub base_url: String,
     pub site_name: String,
     pub hsts: bool,
     /// CIDR networks (or single addresses) whose `X-Forwarded-For` is trusted.
@@ -300,7 +295,6 @@ impl Default for WebSettings {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)),
-            base_url: "http://127.0.0.1:8080".into(),
             site_name: "dhtcrawler4".into(),
             hsts: false,
             trusted_proxies: Vec::new(),
@@ -876,8 +870,6 @@ impl Config {
 
     fn validate_web(&self) -> Result<(), ConfigError> {
         let w = &self.web;
-        validate_base_url(&w.base_url, MAX_BASE_URL_CHARS)
-            .map_err(|reason| invalid(format!("web.base_url {reason}")))?;
         let name_chars = w.site_name.chars().count();
         if w.site_name.trim().is_empty()
             || name_chars > MAX_SITE_NAME_CHARS
@@ -908,9 +900,6 @@ impl Config {
                  reverse proxy every visitor shares the proxy's rate limits"
                     .to_owned(),
             );
-        }
-        if w.hsts && w.base_url.starts_with("http://") {
-            out.push("web.hsts is true but web.base_url is not an https:// origin".to_owned());
         }
         if !w.listen.ip().is_loopback() && w.trusted_proxies.is_empty() {
             out.push(
@@ -1446,16 +1435,6 @@ mod tests {
             ("DC3_INDEX__BATCH_SIZE", "1001"),
             ("DC3_INDEX__WRITER_HEAP_BYTES", "1000"),
             ("DC3_INDEX__POLL_INTERVAL_MS", "0"),
-            ("DC3_WEB__BASE_URL", "http://example.com/"),
-            ("DC3_WEB__BASE_URL", "http://example.com/path"),
-            ("DC3_WEB__BASE_URL", "ftp://example.com"),
-            ("DC3_WEB__BASE_URL", "https://"),
-            ("DC3_WEB__BASE_URL", "https://Example.com"),
-            ("DC3_WEB__BASE_URL", "https://example.com:443"),
-            ("DC3_WEB__BASE_URL", "https://u@example.com"),
-            ("DC3_WEB__BASE_URL", "https://example.com?x"),
-            ("DC3_WEB__BASE_URL", "https://[::1"),
-            ("DC3_WEB__BASE_URL", "https://exa mple.com"),
             ("DC3_WEB__SITE_NAME", ""),
             ("DC3_WEB__TRUSTED_PROXIES", "not-a-net"),
             ("DC3_WEB__SEARCH_CACHE_SIZE", "10001"),
@@ -1482,17 +1461,6 @@ mod tests {
         }
         let both_off = with_env(&[("DC3_CRAWL__BIND_V4", ""), ("DC3_CRAWL__BIND_V6", "")]);
         assert!(both_off.is_err());
-        for good in [
-            "https://example.com",
-            "http://127.0.0.1:8080",
-            "https://[2001:db8::1]:8443",
-            "http://my-host.example",
-        ] {
-            assert!(
-                with_env(&[("DC3_WEB__BASE_URL", good)]).is_ok(),
-                "{good} should be accepted"
-            );
-        }
         // With a URL, host and name may be empty.
         assert!(
             with_env(&[
@@ -1594,13 +1562,12 @@ mod tests {
         ])
         .unwrap();
         let w = c.warnings();
-        assert_eq!(w.len(), 3, "{w:?}");
-        assert!(w[1].contains("hsts"));
-        assert!(w[2].contains("loopback"));
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("trusted_proxies"));
+        assert!(w[1].contains("loopback"));
 
         let c = with_env(&[
             ("DC3_WEB__HSTS", "true"),
-            ("DC3_WEB__BASE_URL", "https://example.org"),
             ("DC3_WEB__TRUSTED_PROXIES", "172.30.80.0/24"),
             ("DC3_WEB__LISTEN", "0.0.0.0:8080"),
         ])
