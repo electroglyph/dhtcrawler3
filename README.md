@@ -547,6 +547,8 @@ git pull
 git stash pop                                 # re-apply them
 cd deploy
 docker compose up -d --build
+docker builder prune -f                     # drop the superseded build cache
+docker image prune -f                       # drop the superseded image
 ```
 
 What happens, in order: the image rebuilds from the new tree; `migrate`
@@ -595,9 +597,17 @@ docker compose start crawl index web
 off the host. To restore: `down`, fresh `pgdata` volume, extract the
 tarball into it, `up -d --build`.
 
-Reclaim build disk now and then: `docker image prune` drops the superseded
-images (never prune volumes unless you mean to wipe the database and
-index — that flag is `-v`, keep it away from routine cleanup).
+Reclaim build disk now and then: `docker builder prune -f` drops the
+superseded build cache (gigabytes per rebuild — yours was 5 GB) and
+`docker image prune -f` drops the superseded images (never prune volumes
+unless you mean to wipe the database and index — that flag is `-v`, keep
+it away from routine cleanup). For hands-free cleanup, run the prune weekly
+from cron:
+
+```sh
+# weekly sunday 04:00: prune unused build cache and images
+0 4 * * 0 docker builder prune -f && docker image prune -f
+```
 
 ## License
 
