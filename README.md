@@ -129,6 +129,12 @@ sudoedit /etc/dhtcrawler4/dhtcrawler4.toml
 ```
 
 Change in `[database]`: `host = "127.0.0.1"` (leave port 5432, name `dc3`).
+On a server, also raise `max_connections`: it sizes each role's database
+pool and the default 16 is lean for 192 fetch workers (the Docker deployment
+runs crawl at 48 via `DC3_DATABASE__MAX_CONNECTIONS`). Keep the sum across
+roles comfortably under PostgreSQL's own `max_connections` — the stock
+default of 100 leaves little headroom once you raise the crawl pool (the
+Docker deployment sets 200).
 The per-role users and password files come from the environment in each
 systemd unit (step 6), so one file serves all roles. Leave `hsts = false`
 (the default) unless you terminate TLS in front of the site. Keeping
@@ -497,6 +503,10 @@ docker compose ps                     # includes healthcheck status
   container (the compose file publishes none of them — scrape via an SSH
   tunnel, e.g. `ssh -L 9100:localhost:9100 host`, never by publishing the
   port).
+- **Database pool pressure:** `dc3_db_pool_size` vs `dc3_db_pool_idle` on the
+  crawl role. Idle pinned near zero means the pool is saturated — raise
+  `DC3_DATABASE__MAX_CONNECTIONS` (compose sets 48) and PostgreSQL's
+  `max_connections` (compose sets 200) together, never just one side.
 - **Totals:** `docker compose exec crawl /usr/local/bin/dhtcrawler4 --config /etc/dhtcrawler4/dhtcrawler4.toml stats`
 - **Config check (prints config without secrets):** same binary with
   `check-config`.
