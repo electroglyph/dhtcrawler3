@@ -10,10 +10,13 @@ dhtcrawler4 is a fork of [dhtcrawler3](https://github.com/poonasor/dhtcrawler3) 
 
 - **Removed content moderation:** report form, CSRF, `dc3-policy` crate, blocked-terms list, denylist/block pages, report/denylist tables, policy fuzz target.
 - **Added BEP 33 seeder scrapes:** bloom filter + estimator, `scrape=1` traversals on a dedicated budget, scrape worker with conditional tombstones, liveness-ordered fetch queue, seeder counts in web/API with `sort=seeders`, 7→30→90-day removal memory.
+- **Server-sized crawl throughput:** fetch claim batch 1→8 with one transaction per batch (`complete_batch`/`fail_batch`/`give_up_batch`, per-key fallbacks), tighter fetch timeouts, scrape budget 25→100/s, sampler concurrency 96→160, 192 fetch workers, crawler DB pool 48 (Postgres 200), `dc3_db_pool_size`/`dc3_db_pool_idle` gauges, batch lease renewal.
+- **Store durability:** tombstone purge feed (lagging indexers still converge on deletes), re-applied service-role grants, alias-aware removal clearing and tombstone revival, saturated `seen_count` math, deterministic oldest-first scrape claims.
+- **Cookie theme switch, still no JavaScript:** header dark/light toggle via `POST /theme` (`theme` cookie, dark default, `Vary: Cookie`). Removed `/.well-known/security.txt` and the `web.base_url` setting (old configs must drop that key).
 - **Hardened DHT / parsing / fetch:** stricter BEP 42 and routing-table rules, IPv6 `/48` rate limits, bounded iterative bencode, stricter torrent validation (padding, v2 tree, `pieces`), deadline + retry handling for metadata fetch.
-- **Fixed search / store / web:** prefix-expansion budgets, index-total pagination, leased-queue and admission fail-closed fixes, stricter config validation, secret redaction, least-privilege DB roles.
+- **Fixed search / store / web:** prefix-expansion budgets, index-total pagination, leased-queue and admission fail-closed fixes, panicked workers fail the role, bounded shutdown reap, stricter config validation, secret redaction, least-privilege DB roles.
 - **Added search query cache:** `GET /search` and `GET /api/v1/search` share a server-side cache of raw index results keyed by `(text, sort, page, per_page)` (`web.search_cache_size = 100`, `web.search_cache_ttl_secs = 3600`; either zero disables). Only non-empty successes are stored, entries expire on a fixed TTL, evict least-recently-used past capacity, and clear on any index commit; concurrent identical misses share one index search.
-- **Perf + tests:** ~35 alloc/scan eliminations, `cargo fmt`, opt-in live-network tests, BEP 33 vectors, updated e2e coverage.
+- **Perf + tests:** ~35 alloc/scan eliminations, `cargo fmt`, opt-in live-network tests, BEP 33 vectors, live-Postgres batch-equivalence tests, updated e2e coverage.
 
 ## Running a server on Ubuntu without Docker
 
