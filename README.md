@@ -545,16 +545,23 @@ Code changes (and the TOML baked into the image) take effect on a rebuild.
 Database migrations run themselves; your data lives in volumes and is never
 touched by a rebuild.
 
+Every `docker compose` command in this section runs from `deploy/` — the
+directory holding `docker-compose.yml`. The build context (`..`) and the
+`./secrets` mounts only resolve from there, so `cd ~/dhtcrawler4/deploy`
+first and stay there.
+
 ### Standard update (Docker)
 
 ```sh
-git stash push -- deploy/docker-compose.yml   # park your local edits, if any
+cd ~/dhtcrawler4
+git stash push -- deploy/docker-compose.yml 2>/dev/null || true  # park local edits, if any
 git pull
-git stash pop                                 # re-apply them
+git stash pop 2>/dev/null || true                                # re-apply them
 cd deploy
+df -h / | tail -1              # the build needs several GB free; prune first if tight
+docker builder prune -f        # drop the previous build's cache (safe: it only slows this build)
 docker compose up -d --build
-docker builder prune -f                     # drop the superseded build cache
-docker image prune -f                       # drop the superseded image
+docker image prune -f          # drop the superseded image
 ```
 
 What happens, in order: the image rebuilds from the new tree; `migrate`
@@ -566,9 +573,14 @@ the web UI is down for seconds. Then verify:
 
 ```sh
 docker compose ps                             # all healthy, migrate exited 0
+docker compose logs --tail=5 migrate          # migrations applied (quiet when none pending)
 docker compose logs --tail=20 crawl web
 curl -s http://127.0.0.1/healthz
 ```
+
+If crawl is still `(unhealthy)` after ~10 minutes, or its logs repeat
+`pool timed out while waiting for an open connection`, do not rebuild
+again — see [Troubleshooting](#troubleshooting).
 
 Rules of thumb for what needs a rebuild:
 
@@ -592,7 +604,7 @@ If a release ever misbehaves, rolling the *code* back is easy but the
 migrations:
 
 ```sh
-cd deploy
+cd ~/dhtcrawler4/deploy
 docker compose stop crawl index web   # quiesce writers; db keeps running
 docker run --rm -v dhtcrawler4_pgdata:/data -v "$PWD":/backup ubuntu \
   tar czf /backup/pgdata-backup.tar.gz -C /data .
