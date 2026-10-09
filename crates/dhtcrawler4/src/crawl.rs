@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(o.dht.tuning, DhtTuning::default());
         assert!(o.dht.validate().is_ok());
         assert_eq!(o.filter, PeerFilter::PRODUCTION);
-        assert_eq!(o.fetch_workers, 512);
+        assert_eq!(o.fetch_workers, 768);
         assert_eq!(o.dht.scrape_packets_per_sec, 100);
         assert_eq!(o.dht.tuning.scrape_early_exit_quorum, 3);
         assert_eq!(o.dht.tuning.scrape_query_timeout, Duration::from_secs(10));
@@ -517,7 +517,7 @@ mod tests {
         assert_eq!(o.scrape_workers, 1);
         assert_eq!(o.scrape.threshold, 0);
         assert_eq!(o.max_pending, 5_000_000);
-        assert_eq!(o.limits.max_connections, 2048);
+        assert_eq!(o.limits.max_connections, 3072);
         assert_eq!(o.limits.max_inflight_metadata_bytes, 536_870_912);
         assert_eq!(o.min_good_nodes, MIN_GOOD_NODES);
 

@@ -4,7 +4,7 @@
 //! Each worker:
 //! 1. claims up to 8 keys with a 120 s lease, renewed in the background
 //!    while the batch is worked (a full batch can outlive the lease);
-//! 2. collects peers from the hint map and `get_peers` (10 s), each passing
+//! 2. collects peers from the hint map and `get_peers` (6 s), each passing
 //!    the address chokepoint and the per-destination limits;
 //! 3. tries up to 8 peers, 3 at a time, inside the global connection limit
 //!    and the metadata byte budget, all within 45 s;
@@ -43,7 +43,7 @@ pub const IDLE_SLEEP_MIN: Duration = Duration::from_secs(1);
 /// Longest pause of an idle worker.
 pub const IDLE_SLEEP_MAX: Duration = Duration::from_secs(3);
 /// Time allowed for the `get_peers` lookup of one key.
-pub const GET_PEERS_TIMEOUT: Duration = Duration::from_secs(10);
+pub const GET_PEERS_TIMEOUT: Duration = Duration::from_secs(6);
 /// Time allowed for all fetch attempts of one key.
 pub const KEY_DEADLINE: Duration = Duration::from_secs(45);
 /// Peers tried per key.
