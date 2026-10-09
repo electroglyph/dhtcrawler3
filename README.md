@@ -130,9 +130,9 @@ sudoedit /etc/dhtcrawler4/dhtcrawler4.toml
 
 Change in `[database]`: `host = "127.0.0.1"` (leave port 5432, name `dc3`).
 The per-role users and password files come from the environment in each
-systemd unit (step 6), so one file serves all roles. Set in `[web]`:
-`hsts = true` (once Caddy serves HTTPS —
-step 6 of the Docker path below), and `trusted_proxies = ["127.0.0.1"]` so the host-local proxy's
+systemd unit (step 6), so one file serves all roles. Leave `hsts = false`
+(the default) unless you terminate TLS in front of the site, and set
+`trusted_proxies = ["127.0.0.1"]` only if you do proxy it, so the proxy's
 `X-Forwarded-For` is honoured for client IPs and rate limits. The `[crawl]`
 `state_dir` and `[index]` `path` defaults already match the directories from
 step 1.
@@ -214,12 +214,14 @@ WantedBy=multi-user.target
 as the command.
 
 `/etc/systemd/system/dhtcrawler4-web.service` — same, with `MemoryMax=512M`,
-`DC3_DATABASE__USER=dc3_web`, the web password file, and these (they
-override the TOML, so the file can keep defaults):
+`DC3_DATABASE__USER=dc3_web`, the web password file, the bind privilege for
+port 80 (everything still runs as the unprivileged user — no root, no
+`setcap` on the binary, which would be wiped by every rebuild), and these
+(they override the TOML, so the file can keep defaults):
 
 ```ini
-Environment=DC3_WEB__LISTEN=127.0.0.1:8080
-Environment=DC3_WEB__HSTS=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=DC3_WEB__LISTEN=0.0.0.0:80
 Environment=DC3_WEB__TRUSTED_PROXIES=127.0.0.1
 ```
 
@@ -229,7 +231,7 @@ Enable and start (migrations were already applied by hand in step 5):
 sudo systemctl daemon-reload
 sudo systemctl enable --now dhtcrawler4-crawl dhtcrawler4-index dhtcrawler4-web
 systemctl status dhtcrawler4-crawl dhtcrawler4-index dhtcrawler4-web
-curl -s http://127.0.0.1:8080/healthz
+curl -s http://127.0.0.1/healthz
 ```
 
 Unlike Compose nothing health-gates the startup order — the units start after
@@ -267,8 +269,9 @@ systemctl restart dhtcrawler4-web
 ## Running a server on Ubuntu
 
 The fastest deployment is Docker Compose on Ubuntu 24.04: PostgreSQL plus
-three `dhtcrawler4` roles (crawl, index, web) on isolated networks, with Caddy
-on the host terminating TLS. Everything below assumes a fresh Ubuntu 24.04
+three `dhtcrawler4` roles (crawl, index, web) on isolated networks. The site
+serves plain HTTP on host port 80 by default; Caddy on the host for HTTPS is
+optional (step 6). Everything below assumes a fresh Ubuntu 24.04
 machine with a public IPv4 address (IPv6 optional but recommended) and a DNS
 name pointing at it, e.g. `search.example.org`.
 
@@ -325,17 +328,19 @@ the Postgres superuser, one for each of the `dc3_owner`, `dc3_crawler`,
 git. Re-running the script is safe: existing files are kept. Back this
 directory up — losing the passwords means losing the database.
 
-### 3. Enable HSTS
+### 3. Enable HSTS (only with HTTPS)
 
-Edit `deploy/docker-compose.yml`, service `web`, environment:
+Skip this step for the default plain-HTTP setup. If you terminate TLS in
+front of the site yourself, set:
 
 ```yaml
 DC3_WEB__HSTS: "true"                             # HTTPS only
 ```
 
-`hsts` makes the site send `Strict-Transport-Security`, so
-only enable it once HTTPS actually works. Everything else already has sane
-defaults: the web UI listens on `127.0.0.1:8080` (localhost only), PostgreSQL
+`hsts` makes the site send `Strict-Transport-Security`, so only enable it
+once HTTPS actually works — over plaintext it does nothing at best, and at
+worst tells browsers to refuse the site. Everything else already has sane
+defaults: the web UI serves host port 80 (plain HTTP), PostgreSQL
 has no published port at all, and each role connects with its own
 least-privilege database user (table privileges are granted by the
 migrations, which run as `dc3_owner`).
@@ -350,8 +355,8 @@ out:
 sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 sudo iptables -A INPUT -i lo -j ACCEPT
 sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT    # SSH: keep this
-sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT    # Caddy (ACME + redirect)
-sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT   # Caddy (HTTPS)
+sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT    # web UI
+sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT   # only needed for HTTPS
 sudo iptables -A INPUT -p udp --dport 6881 -j ACCEPT  # DHT
 sudo iptables -P INPUT DROP
 ```
@@ -363,8 +368,7 @@ sudo apt-get install -y iptables-persistent
 sudo netfilter-persistent save
 ```
 
-Port 8080 must stay unreachable from the outside; compose binds it to
-`127.0.0.1`, so a default-deny firewall plus that binding is two layers.
+Port 80 is intentionally public now; everything else stays closed.
 (Docker forwards published ports through its own chains, so the rules above
 guard the host's own ports; container traffic is unaffected.)
 
@@ -379,25 +383,39 @@ Startup order is enforced with health gates: `db` (Postgres 18 initialises
 the data directory, creates the `dc3` database and the four roles via
 `postgres/init/10-roles.sh`) → `migrate` (applies the SQL migrations in
 `crates/dc3-store`) → `crawl`, `index`, `web`. The crawl role publishes
-UDP 6881; the web role publishes `127.0.0.1:8080`.
+UDP 6881; the web role publishes host port 80 (plain HTTP).
 
 Check it came up:
 
 ```sh
 docker compose ps
 docker compose logs --tail=30 migrate   # should end with success, then exit
-curl -s http://127.0.0.1:8080/healthz   # the HTTP stack answers
-curl -s http://127.0.0.1:8080/ | head -c 300
+curl -s http://127.0.0.1/healthz        # the HTTP stack answers
+curl -s http://127.0.0.1/ | head -c 300
 ```
 
 `/healthz` means "the process answers HTTP"; `/readyz` (metrics port 9100,
 reachable only inside the backend network) additionally means "the database
 answers". The compose healthchecks use exactly these.
 
-### 6. Put Caddy in front for HTTPS
+### 6. HTTPS via Caddy (optional)
 
-Install Caddy on the host (not in Compose, so certificate state survives
-container rebuilds):
+The default is plain HTTP on port 80. For HTTPS instead, free host port 80
+and 443 for Caddy by reverting the web service to localhost-only:
+
+```yaml
+# deploy/docker-compose.yml, service `web`
+ports:
+  - "127.0.0.1:8080:8080"
+```
+
+```sh
+cd deploy
+docker compose up -d
+```
+
+Then install Caddy on the host (not in Compose, so certificate state
+survives container rebuilds):
 
 ```sh
 sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
@@ -409,18 +427,45 @@ sudo apt-get update
 sudo apt-get install -y caddy
 ```
 
-Edit `deploy/Caddyfile`: replace `search.example.org` with your domain, then
-run it (the file has no access log on purpose — query text is part of the
-URL, so logging requests would store visitors' IPs next to their searches):
+Copy `deploy/Caddyfile` to the system location with your domain in it, and
+check it parses (the file has no access log on purpose — query text is part
+of the URL, so logging requests would store visitors' IPs next to their
+searches; do not add a `log` directive):
 
 ```sh
-sudo caddy run --config deploy/Caddyfile --adapter caddyfile
+sed 's/search\.example\.org/your.domain/' deploy/Caddyfile | sudo tee /etc/caddy/Caddyfile > /dev/null
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
-For persistence across reboots, save it as a systemd unit or `caddy
-start`. Caddy fetches the certificate automatically once DNS points at the
-host and ports 80/443 are open. Browse to `https://your.domain` — the home
-page shows zero torrents at first. That is normal (next step).
+The apt package already ships a systemd unit (`caddy.service`) that runs
+Caddy as the unprivileged `caddy` user (it gets only the bind privilege for
+ports 80/443), so there is no unit to write — just enable it:
+
+```sh
+sudo systemctl enable --now caddy
+systemctl status caddy --no-pager
+journalctl -u caddy --since '5 min ago' --no-pager   # expect "certificate obtained successfully"
+```
+
+Caddy fetches the certificate automatically on first start, provided DNS
+already points at the host and ports 80/443 are open (step 4). If it fails,
+the journal shows the ACME error — usually DNS not propagated yet or port 80
+blocked; fix the cause and `sudo systemctl restart caddy`. Certificate files
+and ACME state live in `/var/lib/caddy` on the host (no container to wipe
+them); include that directory in backups alongside the database.
+
+Verify end to end, then turn on HSTS:
+
+```sh
+curl -sI https://your.domain | head -5      # HTTP/2 200, no Server header
+curl -s http://your.domain/ -o /dev/null -w '%{redirect_url}\n'   # → https://
+```
+
+Future config changes: edit `/etc/caddy/Caddyfile`, re-run `caddy validate`
+as above, then `sudo systemctl reload caddy` (zero-downtime; `restart` only
+if reload fails). Browse to `https://your.domain` — the home page shows zero
+torrents at first. That is normal (next step). Set `DC3_WEB__HSTS: "true"`
+(step 3) once HTTPS works.
 
 ### 7. What happens next (be patient)
 

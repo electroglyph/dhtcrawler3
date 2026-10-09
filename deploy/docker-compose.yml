@@ -143,7 +143,7 @@ services:
       - source: dc3_web_password
         target: db_password
     ports:
-      - "127.0.0.1:8080:8080"
+      - "80:8080"
     # Tantivy readers take a short-lived lock file, so the index volume is writable here.
     volumes:
       - index:/var/lib/dhtcrawler4/index
