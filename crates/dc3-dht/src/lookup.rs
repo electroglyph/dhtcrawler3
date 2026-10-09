@@ -86,28 +86,6 @@ pub(crate) struct ScrapeOutcome {
     pub(crate) unaware: usize,
 }
 
-impl ScrapeOutcome {
-    /// OR-union of all `BFsd` filters; `None` when no response was aware
-    /// (UNKNOWN, §3) or the union is saturated (UNKNOWN, §0).
-    fn seeders_union(&self) -> Option<crate::bloom::ScrapeBloom> {
-        if self.aware == 0 {
-            return None;
-        }
-        let mut union = crate::bloom::ScrapeBloom::empty();
-        for f in &self.seed_filters {
-            union.union_into_array(f);
-        }
-        Some(union)
-    }
-
-    /// Estimated seeders from the OR-union of all aware `BFsd` filters:
-    /// `None` means UNKNOWN (no aware response, or a saturated union).
-    /// An empty union (live entries but no seeds seen) estimates to `0`.
-    fn seeders_est(&self) -> Option<u64> {
-        self.seeders_union()?.estimate().map(|n| n.floor() as u64)
-    }
-}
-
 /// The pure bookkeeping of one lookup.
 struct Lookup {
     target: NodeId,
@@ -884,7 +862,7 @@ mod tests {
         assert_eq!(out.peer_filters.len(), 1);
         // One seed across the union estimates to 1; the empty peer
         // union estimates to 0, never UNKNOWN.
-        assert_eq!(out.seeders_est(), Some(1));
+        assert_eq!(crate::bloom::estimate_or(&out.seed_filters), Some(1));
         assert_eq!(crate::bloom::estimate_or(&out.peer_filters), Some(0));
         // No aware response at all is UNKNOWN.
         let empty = ScrapeOutcome {
@@ -894,7 +872,7 @@ mod tests {
             aware: 0,
             unaware: 3,
         };
-        assert_eq!(empty.seeders_est(), None);
+        assert_eq!(crate::bloom::estimate_or(&empty.seed_filters), None);
     }
 
     #[test]
@@ -983,7 +961,7 @@ mod tests {
         assert!(out.seed_filters.is_empty());
         assert!(out.peer_filters.is_empty());
         // No aware response: UNKNOWN, not a zero (dead) estimate.
-        assert_eq!(out.seeders_est(), None);
+        assert_eq!(crate::bloom::estimate_or(&out.seed_filters), None);
     }
 
     #[test]

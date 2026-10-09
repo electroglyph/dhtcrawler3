@@ -483,17 +483,23 @@ mod tests {
         use std::collections::HashMap;
         use std::time::Duration;
 
-        use super::search::{boosted, order_page};
+        use super::search::{boosted_at, order_page};
         let freshness = Duration::from_secs(7 * 24 * 60 * 60);
         // A fresh estimate multiplies the score; stale and missing do not.
         let fresh = scraped_record(Some(99), Some(100));
         let stale = scraped_record(Some(9999), Some(8 * 24 * 60 * 60));
         let missing = scraped_record(None, None);
         let base = 2.0f32;
-        assert!(boosted(&fresh, Some(&base), freshness) > base);
-        assert_eq!(boosted(&stale, Some(&base), freshness), base);
-        assert_eq!(boosted(&missing, Some(&base), freshness), base);
-        assert_eq!(boosted(&fresh, None, freshness), 0.0);
+        assert!(boosted_at(&fresh, Some(&base), freshness, chrono::Utc::now()) > base);
+        assert_eq!(
+            boosted_at(&stale, Some(&base), freshness, chrono::Utc::now()),
+            base
+        );
+        assert_eq!(
+            boosted_at(&missing, Some(&base), freshness, chrono::Utc::now()),
+            base
+        );
+        assert_eq!(boosted_at(&fresh, None, freshness, chrono::Utc::now()), 0.0);
 
         // The boost re-ranks the page: the lower BM25 score with many
         // fresh seeders comes first; a stale swarm does not move.

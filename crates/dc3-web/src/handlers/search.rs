@@ -332,7 +332,7 @@ async fn hydrate<B: Backend>(
 ///
 /// * `Seeders`: estimate descending, unknown last.
 /// * `Relevance`: each hit's index score times the seeder boost
-///   ([`boosted`]), fresh estimates only.
+///   ([`boosted_at`]), fresh estimates only.
 /// * Anything else: untouched (the index already ordered it).
 pub(crate) fn order_page(
     torrents: &mut Vec<(TorrentRecord, Shown)>,
@@ -366,12 +366,8 @@ pub(crate) fn order_page(
 
 /// `score` with the web-side seeder boost (bep33.md §7): fresh estimates
 /// multiply by `1 + SEEDER_WEIGHT·log10(1+est)`; anything else is unchanged.
-pub(crate) fn boosted(record: &TorrentRecord, score: Option<&f32>, freshness: Duration) -> f32 {
-    boosted_at(record, score, freshness, Utc::now())
-}
-
-/// [`boosted`] against an explicit clock reading, so page-wide ranking can
-/// share one `now` with [`fresh_seeders_at`].
+/// Takes an explicit clock reading so page-wide ranking can share one `now`
+/// with [`fresh_seeders_at`].
 pub(crate) fn boosted_at(
     record: &TorrentRecord,
     score: Option<&f32>,
