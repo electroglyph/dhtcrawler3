@@ -1,0 +1,22 @@
+-- Drop the unused `pending_ready` index (db churn plan, part 1).
+--
+-- `pending_ready` on `(next_attempt_at) WHERE NOT gave_up` has zero scans
+-- over 1.5+ days of cumulative stats, yet every `pending` update pays one
+-- index write for it. The claim's `ORDER BY` leads with `attempts`
+-- (`crawler.rs` `CLAIM_SQL`), so a `next_attempt_at`-leading index can
+-- never serve it; counts are unfiltered `LIMIT` scans and the purge DELETE
+-- filters on `gave_up = true` (the opposite partial predicate). The claim,
+-- purge and depth plans are byte-identical with and without it (throwaway
+-- repro in db.md proof 4).
+--
+-- Same playbook as `pending_seeders`, dropped in `..._10_pending_claim.sql`.
+-- Plain `DROP INDEX`, not `CONCURRENTLY`: migrations run inside a
+-- transaction and `CONCURRENTLY` cannot run in one.
+--
+-- Rollback (no data change involved):
+-- `CREATE INDEX CONCURRENTLY pending_ready ON pending (next_attempt_at)
+--  WHERE NOT gave_up;`
+--
+-- No new grants: indexes carry the owner's rights.
+
+DROP INDEX IF EXISTS pending_ready;

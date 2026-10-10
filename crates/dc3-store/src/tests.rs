@@ -1405,7 +1405,6 @@ async fn schema_constraints(pool: PgPool) {
         "torrents_dht_key_key",
         "torrents_info_hash_v1_key",
         "torrents_info_hash_v2_key",
-        "pending_ready",
         "pending_gave_up",
         "pending_claim",
         "audit_log_at",
@@ -1420,6 +1419,10 @@ async fn schema_constraints(pool: PgPool) {
     assert!(
         !indexes.contains("pending_seeders"),
         "pending_seeders was replaced by pending_claim"
+    );
+    assert!(
+        !indexes.contains("pending_ready"),
+        "pending_ready is dropped by 000011 (zero scans, write churn only)"
     );
 
     // `pending_claim` must keep matching the claim's ORDER BY exactly
