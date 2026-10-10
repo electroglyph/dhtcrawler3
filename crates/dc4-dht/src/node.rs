@@ -1434,6 +1434,9 @@ async fn maintenance(inner: Arc<Inner>) {
                 let refresh = st
                     .table
                     .refresh_targets(now, tuning.bucket_refresh_interval, free);
+                for (idx, _) in &refresh {
+                    st.table.mark_refreshed(*idx, now);
+                }
                 (pings, refresh, st.table.good_count(now))
             };
             for node in pings {
@@ -1444,13 +1447,23 @@ async fn maintenance(inner: Arc<Inner>) {
                         .await;
                 });
             }
-            for target in refresh {
+            for (idx, target) in refresh {
                 sock.refreshes_running.fetch_add(1, Ordering::SeqCst);
                 let (inner2, sock2) = (Arc::clone(&inner), Arc::clone(sock));
                 inner.spawn_job(async move {
                     let _guard = CountGuard(&sock2.refreshes_running);
                     let deadline = after(Instant::now(), inner2.cfg.tuning.lookup_timeout);
-                    lookup::find_node(&inner2, &sock2, target, Vec::new(), deadline).await;
+                    let outcome =
+                        lookup::find_node(&inner2, &sock2, target, Vec::new(), deadline).await;
+                    if outcome.closest.is_empty() {
+                        // The refresh reached no live node: leave the bucket
+                        // due so the next round retries it.
+                        let now = Instant::now();
+                        let interval = inner2.cfg.tuning.bucket_refresh_interval;
+                        lock(&sock2.state)
+                            .table
+                            .mark_refresh_due(idx, now, interval);
+                    }
                 });
             }
             maybe_bootstrap(&inner, sock, good, now);

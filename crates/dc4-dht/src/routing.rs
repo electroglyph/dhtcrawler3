@@ -660,14 +660,19 @@ impl RoutingTable {
     }
 
     /// Random lookup targets for at most `max` buckets unchanged for
-    /// `interval`, least recently changed first. Only those buckets count as
-    /// refreshed from now on; the others stay due.
+    /// `interval`, least recently changed first, as `(bucket, target)`
+    /// pairs. Returning a bucket does NOT mark it: the caller marks it via
+    /// [`mark_refreshed`](Self::mark_refreshed) when the refresh is
+    /// dispatched, and may leave it due via
+    /// [`mark_refresh_due`](Self::mark_refresh_due) when the refresh reached
+    /// no live node — so a failed refresh is retried next round instead of
+    /// silencing the bucket for a full `interval`.
     pub(crate) fn refresh_targets(
         &mut self,
         now: Instant,
         interval: Duration,
         max: usize,
-    ) -> Vec<NodeId> {
+    ) -> Vec<(usize, NodeId)> {
         let last = self.last_index();
         let own = self.own_id;
         let mut due: Vec<(Instant, usize)> = self
@@ -689,12 +694,26 @@ impl RoutingTable {
         due.sort_unstable();
         let mut out = Vec::with_capacity(due.len());
         for (_, i) in due {
-            if let Some(bucket) = self.buckets.get_mut(i) {
-                bucket.last_changed = now;
-                out.push(own.random_with_prefix(i, i < last));
-            }
+            out.push((i, own.random_with_prefix(i, i < last)));
         }
         out
+    }
+
+    /// Marks `idx` refreshed as of `now` (call when its refresh is dispatched).
+    pub(crate) fn mark_refreshed(&mut self, idx: usize, now: Instant) {
+        if let Some(bucket) = self.buckets.get_mut(idx) {
+            bucket.last_changed = now;
+        }
+    }
+
+    /// Leaves `idx` due as of `now` (call when its refresh reached no live
+    /// node, so the next round retries it instead of waiting `interval`).
+    pub(crate) fn mark_refresh_due(&mut self, idx: usize, now: Instant, interval: Duration) {
+        if let Some(bucket) = self.buckets.get_mut(idx) {
+            bucket.last_changed = now
+                .checked_sub(interval.saturating_add(Duration::from_secs(1)))
+                .unwrap_or(now);
+        }
     }
 
     /// Up to `max` members that are not good and were not pinged within
@@ -1359,10 +1378,24 @@ mod tests {
         );
         let targets = t.refresh_targets(t0 + QA, QA, usize::MAX);
         assert_eq!(targets.len(), n);
-        for (i, target) in targets.iter().enumerate() {
+        for (i, (idx, target)) in targets.iter().enumerate() {
+            assert_eq!(*idx, i);
             assert_eq!(t.bucket_index(target), i);
         }
-        assert!(t.refresh_targets(t0 + QA, QA, usize::MAX).is_empty());
+        // Returned buckets are NOT marked by the call itself...
+        let again = t.refresh_targets(t0 + QA, QA, usize::MAX);
+        assert_eq!(again.len(), n);
+        // ...the caller marks them dispatched...
+        let now = t0 + QA;
+        for (idx, _) in &targets {
+            t.mark_refreshed(*idx, now);
+        }
+        assert!(t.refresh_targets(now, QA, usize::MAX).is_empty());
+        // ...and a refresh that reached nobody leaves its bucket due again.
+        for (idx, _) in &targets {
+            t.mark_refresh_due(*idx, now, QA);
+        }
+        assert_eq!(t.refresh_targets(now, QA, usize::MAX).len(), n);
     }
 
     #[test]
@@ -1396,15 +1429,9 @@ mod tests {
         let total = due.len();
         assert!(total > 2);
         for max in [0, 1, 2, total - 1, total, total + 5] {
-            let saved: Vec<Instant> = t.buckets.iter().map(|b| b.last_changed).collect();
             let targets = t.refresh_targets(now, QA, max);
             assert_eq!(targets.len(), total.min(max), "max {max}");
-            let got: Vec<usize> = targets.iter().map(|x| t.bucket_index(x)).collect();
-            // `refresh_targets` marks what it returns as refreshed; undo
-            // that so every `max` starts from the same table.
-            for (b, s) in t.buckets.iter_mut().zip(saved.iter()) {
-                b.last_changed = *s;
-            }
+            let got: Vec<usize> = targets.iter().map(|(i, _)| *i).collect();
             // Oldest first, by the pre-call stamps.
             let mut ranked: Vec<(Instant, usize)> = got
                 .iter()
@@ -1441,12 +1468,17 @@ mod tests {
         let n = t.num_buckets();
         assert!(n > 2);
         // Two lookups at a time: the buckets that were not picked stay due.
+        // The caller marks dispatched targets (as maintenance does), so each
+        // round covers new buckets.
         let mut refreshed = HashSet::new();
         for round in 0..n {
             let now = t0 + QA + Duration::from_secs(round as u64);
             let targets = t.refresh_targets(now, QA, 2);
             assert!(targets.len() <= 2);
-            refreshed.extend(targets.iter().map(|x| t.bucket_index(x)));
+            for (idx, _) in &targets {
+                t.mark_refreshed(*idx, now);
+            }
+            refreshed.extend(targets.iter().map(|(i, _)| *i));
         }
         assert_eq!(refreshed.len(), n);
     }
