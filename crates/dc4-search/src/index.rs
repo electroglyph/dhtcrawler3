@@ -676,13 +676,26 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// Backstop on term-dictionary advances in [`expand_prefix`]: with the set
+/// capped at the smallest [`PREFIX_MAX_EXPANSIONS`] terms, ordinary
+/// segments stop after ~budget advances, but adversarially ordered
+/// segments could each scan their whole match set first. Past this many
+/// advances the expansion is best-effort (still the smallest terms seen),
+/// so one hostile prefix cannot pin the indexer thread on vocabulary-size
+/// scans. 64x the expansion budget.
+const PREFIX_SCAN_BUDGET: usize = 16_384;
+
 /// Up to [`PREFIX_MAX_EXPANSIONS`] indexed terms of `field` that start with
 /// `prefix`: the globally smallest terms across all segments, in
-/// lexicographic order.
+/// lexicographic order — best-effort past [`PREFIX_SCAN_BUDGET`] term reads.
 fn expand_prefix(searcher: &Searcher, field: Field, prefix: &str) -> Result<Vec<String>> {
+    const {
+        assert!(PREFIX_SCAN_BUDGET >= PREFIX_MAX_EXPANSIONS);
+    }
     let upper = prefix_upper_bound(prefix.as_bytes());
     let mut found: BTreeSet<String> = BTreeSet::new();
-    for segment in searcher.segment_readers() {
+    let mut scanned = 0usize;
+    'segments: for segment in searcher.segment_readers() {
         let inverted = segment.inverted_index(field)?;
         let mut range = inverted.terms().range().ge(prefix.as_bytes());
         if let Some(upper) = &upper {
@@ -690,11 +703,16 @@ fn expand_prefix(searcher: &Searcher, field: Field, prefix: &str) -> Result<Vec<
         }
         let mut stream = range.into_stream()?;
         while stream.advance() {
+            scanned = scanned.saturating_add(1);
+            if scanned > PREFIX_SCAN_BUDGET {
+                break 'segments;
+            }
             // Segment streams are lexicographically ordered: once the set
             // holds a full budget and the cursor has passed its largest
             // term, nothing later in this segment can displace anything,
-            // so stop scanning it. The budget is global, not per segment:
-            // later segments may still hold smaller terms.
+            // so stop scanning it. The set below is capped at the
+            // smallest budget terms, which keeps that largest term small
+            // and makes this break fire early on later segments too.
             if found.len() >= PREFIX_MAX_EXPANSIONS
                 && found
                     .last()
@@ -704,6 +722,9 @@ fn expand_prefix(searcher: &Searcher, field: Field, prefix: &str) -> Result<Vec<
             }
             if let Ok(term) = std::str::from_utf8(stream.key()) {
                 found.insert(term.to_owned());
+                if found.len() > PREFIX_MAX_EXPANSIONS {
+                    found.pop_last();
+                }
             }
         }
     }

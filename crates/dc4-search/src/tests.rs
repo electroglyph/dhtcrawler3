@@ -477,6 +477,21 @@ fn prefix_expansion_returns_globally_smallest_terms() {
 }
 
 #[test]
+fn prefix_expansion_is_bounded_past_scan_budget() {
+    // 18k terms under one 2-char prefix: past the scan backstop, the
+    // expansion still returns exactly the 200 smallest terms instead of
+    // walking the whole vocabulary.
+    let docs: Vec<IndexDoc> = (0..18_000)
+        .map(|i| doc(i as i64, &format!("qb{i:05}"), ""))
+        .collect();
+    let index = index_with(&docs);
+    let got = index.prefix_expansions("qb").unwrap();
+    assert_eq!(got.len(), 200);
+    let expected: Vec<String> = (0..200).map(|i| format!("qb{i:05}")).collect();
+    assert_eq!(got, expected);
+}
+
+#[test]
 fn prefix_expansions_union_covers_both_fields_whole() {
     // 250 name terms and 250 file terms under one prefix: each field
     // contributes a full per-field budget, so the policy gate sees all
