@@ -17,7 +17,8 @@
 //!
 //! The tombstone is conditional on the row being unchanged since the claim,
 //! so a concurrent fetch wins the race. A periodic sweep purges old scrape
-//! tombstones and trims removal memory.
+//! tombstones, gave-up queue rows (which count against the admission cap
+//! without ever becoming claimable again), and trims removal memory.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,6 +45,7 @@ pub const MAX_PURGE_BATCH: i64 = 10_000;
 const METRIC_SCRAPES: &str = "dc3_scrape_total";
 const METRIC_TOMBSTONES: &str = "dc3_scrape_tombstones_total";
 const METRIC_PURGED: &str = "dc3_purge_tombstoned_total";
+const METRIC_PURGED_GAVE_UP: &str = "dc3_purge_gave_up_total";
 const METRIC_DUE_DEPTH: &str = "dc3_scrape_due_depth";
 const METRIC_REMOVED_KEYS: &str = "dc3_removed_keys_count";
 const METRIC_ZERO_SEEDER_SHARE: &str = "dc3_scrape_zero_seeder_share";
@@ -71,6 +73,11 @@ pub struct ScrapeTuning {
     pub sweep_interval: Duration,
     /// Grace before a tombstoned row is hard-purged (`tombstone_purge_hours`).
     pub purge_grace: Duration,
+    /// Age before a gave-up queue row is hard-purged (`gave_up_purge_hours`).
+    /// Gave-up rows count against the admission cap without ever becoming
+    /// claimable again, so without this sweep the queue fills with corpses
+    /// and the crawler stalls.
+    pub gave_up_purge: Duration,
 }
 
 impl ScrapeTuning {
@@ -87,6 +94,7 @@ impl ScrapeTuning {
             unknown_interval: Duration::from_secs(c.scrape_unknown_interval_secs),
             sweep_interval: Duration::from_secs(c.scrape_sweep_secs),
             purge_grace: Duration::from_secs(c.tombstone_purge_hours.saturating_mul(3600)),
+            gave_up_purge: Duration::from_secs(c.gave_up_purge_hours.saturating_mul(3600)),
         }
     }
 }
@@ -129,8 +137,16 @@ pub fn classify(report: &ScrapeReport, threshold: u64) -> ScrapeVerdict {
     ScrapeVerdict::Unknown
 }
 
+/// One gave-up purge: removes queue rows that gave up more than `older_than`
+/// ago and returns the rows removed. Split out for tests (a [`Scraper`]
+/// needs a DHT node, which unit tests do not start); [`Scraper::sweep`]
+/// only moves the count into metrics and logs.
+async fn sweep_gave_up<S: CrawlStore>(store: &S, older_than: Duration) -> dc3_store::Result<u64> {
+    store.purge_gave_up(older_than).await
+}
+
 /// One scrape worker: claims due rows, scrapes them, writes the outcomes,
-/// and sweeps tombstones on `sweep_interval`.
+/// and sweeps tombstones and gave-up queue rows on `sweep_interval`.
 #[derive(Debug)]
 pub struct Scraper<S> {
     store: S,
@@ -304,7 +320,8 @@ impl<S: CrawlStore> Scraper<S> {
         Some((item.clone(), verdict))
     }
 
-    /// Purges old scrape tombstones and trims removal memory.
+    /// Purges old scrape tombstones, gave-up queue rows, and trims removal
+    /// memory.
     async fn sweep(&self) {
         match self
             .store
@@ -318,6 +335,15 @@ impl<S: CrawlStore> Scraper<S> {
                 }
             }
             Err(e) => tracing::error!(error = %e, "purge_tombstoned failed"),
+        }
+        match sweep_gave_up(&self.store, self.tuning.gave_up_purge).await {
+            Ok(n) => {
+                if n > 0 {
+                    metrics::counter!(METRIC_PURGED_GAVE_UP).increment(n);
+                    tracing::info!(purged = n, "scrape sweep purged gave-up queue rows");
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "purge_gave_up failed"),
         }
         match self.store.trim_removed_keys(SCRAPE_REMOVED_KEYS_CAP).await {
             Ok(n) => {
@@ -351,6 +377,8 @@ impl<S: CrawlStore> Scraper<S> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::config::CrawlConfig;
+    use crate::memstore::MemoryStore;
 
     fn empty_report(aware: usize, families_attempted: usize) -> ScrapeReport {
         ScrapeReport {
@@ -410,5 +438,42 @@ mod tests {
             ScrapeVerdict::Live { est: as_u32 }
         );
         assert_eq!(classify(&r, est), ScrapeVerdict::Dead { est: as_u32 });
+    }
+
+    #[test]
+    fn tuning_carries_the_gave_up_purge_grace() {
+        // Default 1 hour, straight through to the sweep.
+        let tuning = ScrapeTuning::from_config(&CrawlConfig::default());
+        assert_eq!(tuning.gave_up_purge, Duration::from_secs(3600));
+    }
+
+    /// The sweep leg purges only gave-up rows older than the grace, with no
+    /// DHT node involved.
+    #[tokio::test(start_paused = true)]
+    async fn sweep_gave_up_purges_only_old_gave_up_rows() {
+        fn key(n: u8) -> dc3_core::DhtKey {
+            dc3_core::DhtKey([n; 20])
+        }
+        let store = MemoryStore::new();
+        for k in [key(41), key(42), key(43)] {
+            store.enqueue(k);
+        }
+        // Gave up twice: k41 is old enough, k42 just gave up below.
+        store.fail(&key(41)).await.unwrap();
+        store.fail(&key(41)).await.unwrap();
+        tokio::time::advance(Duration::from_secs(3601)).await;
+        store.fail(&key(42)).await.unwrap();
+        store.fail(&key(42)).await.unwrap();
+        // k43 failed once: still retry-waiting, never purged.
+        store.fail(&key(43)).await.unwrap();
+
+        let hour = Duration::from_secs(3600);
+        assert_eq!(sweep_gave_up(&store, hour).await.unwrap(), 1);
+        // Only live rows are listed; the young gave-up row is kept but
+        // hidden, which the zero-grace purge below proves.
+        assert_eq!(store.pending_keys(), vec![key(43)]);
+        // A zero grace takes the young gave-up row too, but never live rows.
+        assert_eq!(sweep_gave_up(&store, Duration::ZERO).await.unwrap(), 1);
+        assert_eq!(store.pending_keys(), vec![key(43)]);
     }
 }

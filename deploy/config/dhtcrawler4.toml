@@ -83,6 +83,10 @@ scrape_packets_per_sec = 100
 removal_cooldown_days = 7
 # Grace before a tombstoned row is hard-purged, in hours.
 tombstone_purge_hours = 1
+# Age before a gave-up queue row is hard-purged, in hours. Gave-up rows count
+# against max_pending without ever becoming claimable again, so this must stay
+# short enough that corpses leave faster than failures arrive.
+gave_up_purge_hours = 1
 # Interval of the tombstone-purge sweep, in seconds.
 scrape_sweep_secs = 3600
 # Re-scrape interval of rows whose swarm is still unknown (30 days): unknown

@@ -30,6 +30,9 @@ struct Pending {
     next_attempt: Instant,
     lease_until: Option<Instant>,
     gave_up: bool,
+    /// Last failure or give-up time, mirroring `pending.last_attempt_at`
+    /// (NULL there keeps the row, so `None` here is never purged).
+    last_attempt: Option<Instant>,
     /// Last piggybacked seeder estimate (`None` means unscraped).
     seeders: Option<u32>,
 }
@@ -166,6 +169,7 @@ impl MemoryStore {
             next_attempt: Instant::now(),
             lease_until: None,
             gave_up: false,
+            last_attempt: None,
             seeders: None,
         });
     }
@@ -268,6 +272,7 @@ impl CrawlStore for MemoryStore {
                         next_attempt: now,
                         lease_until: None,
                         gave_up: false,
+                        last_attempt: None,
                         seeders: None,
                     },
                 );
@@ -392,6 +397,7 @@ impl CrawlStore for MemoryStore {
         };
         let doubling = 2u32.saturating_pow(p.attempts);
         p.attempts = p.attempts.saturating_add(1);
+        p.last_attempt = Some(now);
         p.next_attempt = now
             .checked_add(base.saturating_mul(doubling))
             .unwrap_or(now);
@@ -409,6 +415,7 @@ impl CrawlStore for MemoryStore {
             return Ok(false);
         };
         p.attempts = p.attempts.saturating_add(1);
+        p.last_attempt = Some(Instant::now());
         p.lease_until = None;
         p.gave_up = true;
         Ok(true)
@@ -566,6 +573,29 @@ impl CrawlStore for MemoryStore {
             state.tombstoned.remove(&key);
         }
         Ok(u64::try_from(n).unwrap_or(u64::MAX))
+    }
+
+    async fn purge_gave_up(&self, older_than: Duration) -> Result<u64> {
+        let mut state = self.lock();
+        let now = Instant::now();
+        // Mirrors the SQL predicate: only gave-up rows with a last attempt
+        // older than the age go; a missing timestamp (never attempted) keeps
+        // the row, as NULL does in the database.
+        let doomed: Vec<DhtKey> = state
+            .pending
+            .iter()
+            .filter(|(_, p)| {
+                p.gave_up
+                    && p.last_attempt
+                        .is_some_and(|at| now.saturating_duration_since(at) >= older_than)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        let n = u64::try_from(doomed.len()).unwrap_or(u64::MAX);
+        for key in doomed {
+            state.pending.remove(&key);
+        }
+        Ok(n)
     }
 
     async fn note_fetch_estimate(&self, key: &DhtKey, seeders_est: u32) -> Result<()> {
@@ -859,6 +889,7 @@ mod scrape_tests {
 
     const LIVE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
     const UNKNOWN: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+    const HOUR: Duration = Duration::from_secs(3600);
 
     fn key(n: u8) -> DhtKey {
         DhtKey([n; 20])
@@ -1067,5 +1098,61 @@ mod scrape_tests {
         assert_eq!((out.known, out.queued, out.dropped), (0, 1, 0));
         assert!(s.torrent(&k).is_none());
         assert_eq!(s.pending_keys(), vec![k]);
+    }
+
+    /// `MAX_FETCH_ATTEMPTS` failures give up; only gave-up rows older than
+    /// the age purge, mirroring the SQL predicate.
+    #[tokio::test(start_paused = true)]
+    async fn purge_gave_up_keeps_young_and_live_rows() {
+        let s = MemoryStore::new();
+        for k in [key(31), key(32), key(33)] {
+            s.enqueue(k);
+        }
+        s.fail(&key(31)).await.unwrap();
+        assert!(!s.lock().pending[&key(31)].gave_up);
+        s.fail(&key(31)).await.unwrap();
+        assert!(s.lock().pending[&key(31)].gave_up);
+        s.fail(&key(32)).await.unwrap();
+        assert!(!s.lock().pending[&key(32)].gave_up);
+
+        // Nothing is old enough for an hour age.
+        assert_eq!(s.purge_gave_up(HOUR).await.unwrap(), 0);
+        assert!(s.lock().pending.contains_key(&key(31)));
+
+        // Past the age only the gave-up row goes; the live retry-waiting
+        // row and the never-attempted row stay.
+        tokio::time::advance(HOUR.saturating_add(Duration::from_secs(1))).await;
+        assert_eq!(s.purge_gave_up(HOUR).await.unwrap(), 1);
+        assert!(!s.lock().pending.contains_key(&key(31)));
+        assert!(s.lock().pending.contains_key(&key(32)));
+        assert!(s.lock().pending.contains_key(&key(33)));
+        // A second purge is a no-op.
+        assert_eq!(s.purge_gave_up(Duration::ZERO).await.unwrap(), 0);
+    }
+
+    /// Direct give-ups stamp the attempt time too: a zero age purges them.
+    /// A gave-up row with no stamp is kept, as NULL is in the database.
+    #[tokio::test(start_paused = true)]
+    async fn purge_gave_up_covers_direct_give_ups() {
+        let s = MemoryStore::new();
+        s.enqueue(key(34));
+        s.give_up(&key(34)).await.unwrap();
+        assert_eq!(s.purge_gave_up(Duration::ZERO).await.unwrap(), 1);
+        assert!(!s.lock().pending.contains_key(&key(34)));
+
+        s.lock().pending.insert(
+            key(35),
+            Pending {
+                seen: 1,
+                attempts: 2,
+                next_attempt: tokio::time::Instant::now(),
+                lease_until: None,
+                gave_up: true,
+                last_attempt: None,
+                seeders: None,
+            },
+        );
+        assert_eq!(s.purge_gave_up(Duration::ZERO).await.unwrap(), 0);
+        assert!(s.lock().pending.contains_key(&key(35)));
     }
 }

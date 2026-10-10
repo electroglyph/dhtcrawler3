@@ -68,6 +68,8 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
         grace: Duration,
         limit: i64,
     ) -> impl Future<Output = Result<u64>> + Send;
+    /// See [`Store::purge_gave_up`].
+    fn purge_gave_up(&self, older_than: Duration) -> impl Future<Output = Result<u64>> + Send;
     /// See [`Store::note_fetch_estimate`].
     fn note_fetch_estimate(
         &self,
@@ -209,6 +211,10 @@ impl CrawlStore for Store {
         limit: i64,
     ) -> impl Future<Output = Result<u64>> + Send {
         Store::purge_tombstoned(self, grace, limit)
+    }
+
+    fn purge_gave_up(&self, older_than: Duration) -> impl Future<Output = Result<u64>> + Send {
+        Store::purge_gave_up(self, older_than)
     }
 
     fn note_fetch_estimate(

@@ -205,6 +205,11 @@ pub struct CrawlConfig {
     pub removal_cooldown_days: u64,
     /// Grace before a tombstoned row is hard-purged, in hours.
     pub tombstone_purge_hours: u64,
+    /// Age before a gave-up queue row is hard-purged, in hours. Gave-up rows
+    /// count against `max_pending` without ever becoming claimable again, so
+    /// this must stay short enough that corpses leave faster than failures
+    /// arrive; 1 hour holds about an hour of failures.
+    pub gave_up_purge_hours: u64,
     /// Interval of the purge sweep, in seconds.
     pub scrape_sweep_secs: u64,
     /// Re-scrape interval of rows whose swarm is still unknown, in seconds.
@@ -245,6 +250,7 @@ impl Default for CrawlConfig {
             scrape_packets_per_sec: dc3_dht::DEFAULT_SCRAPE_PACKETS_PER_SEC,
             removal_cooldown_days: 7,
             tombstone_purge_hours: 1,
+            gave_up_purge_hours: 1,
             scrape_sweep_secs: 3600,
             scrape_unknown_interval_secs: 30 * 24 * 60 * 60,
             scrape_node_cache_keys: 4096,
@@ -819,6 +825,7 @@ impl Config {
             0,
             168,
         )?;
+        check_range("crawl.gave_up_purge_hours", c.gave_up_purge_hours, 0, 168)?;
         check_range("crawl.scrape_sweep_secs", c.scrape_sweep_secs, 60, 86_400)?;
         check_range(
             "crawl.scrape_unknown_interval_secs",
@@ -1468,6 +1475,7 @@ mod tests {
             ("DC3_CRAWL__REMOVAL_COOLDOWN_DAYS", "0"),
             ("DC3_CRAWL__REMOVAL_COOLDOWN_DAYS", "366"),
             ("DC3_CRAWL__TOMBSTONE_PURGE_HOURS", "169"),
+            ("DC3_CRAWL__GAVE_UP_PURGE_HOURS", "169"),
             ("DC3_CRAWL__SCRAPE_SWEEP_SECS", "59"),
             ("DC3_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "86399"),
             ("DC3_CRAWL__SCRAPE_NODE_CACHE_KEYS", "65537"),
@@ -1587,6 +1595,7 @@ mod tests {
         assert_eq!(c.scrape_packets_per_sec, 100);
         assert_eq!(c.removal_cooldown_days, 7);
         assert_eq!(c.tombstone_purge_hours, 1);
+        assert_eq!(c.gave_up_purge_hours, 1);
         assert_eq!(c.scrape_sweep_secs, 3600);
         assert_eq!(c.scrape_unknown_interval_secs, 2592000);
         assert_eq!(c.scrape_node_cache_keys, 4096);
