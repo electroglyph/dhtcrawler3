@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use axum::body::Body;
 use axum::extract::connect_info::{ConnectInfo, MockConnectInfo};
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::header::{
@@ -103,7 +104,7 @@ pub(crate) async fn guard<B: Backend>(
 /// Applies the request limits, then runs the handler.
 async fn admit<B: Backend>(
     st: &AppState<B>,
-    req: Request,
+    mut req: Request,
     route: &'static str,
     flavor: Flavor,
     next: Next,
@@ -134,6 +135,15 @@ async fn admit<B: Backend>(
             theme,
             "/",
         );
+    }
+
+    // Only POST /theme reads a request body. Drop any body on every other
+    // route before the rate-limit check and the concurrency permit below:
+    // chunked or slow bodies to GET routes must not hold a permit hostage
+    // while trickling — the Content-Length pre-check above cannot see
+    // chunked bodies, and the inner body cap only fires once bytes arrive.
+    if !reads_body(route) {
+        *req.body_mut() = Body::empty();
     }
 
     let Some(peer) = peer_addr(&req) else {
@@ -251,6 +261,11 @@ fn peer_addr(req: &Request) -> Option<SocketAddr> {
         .or_else(|| ext.get::<MockConnectInfo<SocketAddr>>().map(|m| m.0))
 }
 
+/// Whether `route` reads the request body: only POST /theme does.
+fn reads_body(route: &str) -> bool {
+    route == routes::THEME
+}
+
 fn declared_length(headers: &HeaderMap) -> Option<u64> {
     headers
         .get(CONTENT_LENGTH)?
@@ -273,6 +288,17 @@ fn retry_after(wait: Duration) -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_theme_reads_the_body() {
+        assert!(reads_body(routes::THEME));
+        for route in routes::ALL {
+            if route != routes::THEME {
+                assert!(!reads_body(route), "{route}");
+            }
+        }
+        assert!(!reads_body(routes::UNMATCHED));
+    }
 
     #[test]
     fn retry_after_rounds_up() {
