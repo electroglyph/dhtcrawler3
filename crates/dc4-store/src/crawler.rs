@@ -273,6 +273,7 @@ WITH doomed AS (
      AND t.deleted_at < now() - make_interval(secs => $1)
    ORDER BY t.total_size DESC
    LIMIT $2
+   FOR UPDATE
 ),
 fed AS (
   INSERT INTO purged_torrents (torrent_id, purged_seq)
@@ -280,7 +281,7 @@ fed AS (
   ON CONFLICT DO NOTHING
   RETURNING torrent_id
 )
-DELETE FROM torrents WHERE id IN (SELECT torrent_id FROM fed)";
+DELETE FROM torrents WHERE id IN (SELECT torrent_id FROM fed) AND deleted_at IS NOT NULL";
 
 /// Purge-feed entries older than this are pruned by [`Store::purge_tombstoned`].
 /// An indexer resuming from a checkpoint older than that must re-sync from

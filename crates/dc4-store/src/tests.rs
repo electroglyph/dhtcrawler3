@@ -1758,6 +1758,51 @@ async fn purge_tombstoned_holds_the_change_feed_lock(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn purge_tombstoned_does_not_delete_revived_rows(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(43);
+    let id = s.complete(&k, &torrent(k, "doomed")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    // A reviver locks the row first (like `complete`'s SELECT FOR UPDATE):
+    // the purge must wait for it instead of snapshotting past it.
+    let mut reviver = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM torrents WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_one(&mut *reviver)
+        .await
+        .unwrap();
+    let purged = tokio::spawn({
+        let s = s.clone();
+        async move { s.purge_tombstoned(Duration::ZERO, 10).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!purged.is_finished(), "purge did not wait for the row lock");
+    // The row is revived before the purge gets it: re-checks (row lock
+    // re-evaluation plus the outer `deleted_at` predicate) must exclude it.
+    sqlx::query("UPDATE torrents SET deleted_at = NULL, name = 'back' WHERE id = $1")
+        .bind(id)
+        .execute(&mut *reviver)
+        .await
+        .unwrap();
+    reviver.commit().await.unwrap();
+    let n = tokio::time::timeout(Duration::from_secs(10), purged)
+        .await
+        .expect("purge stalled")
+        .unwrap()
+        .unwrap();
+    assert_eq!(n, 0);
+    let row = raw_torrent(&pool, id).await;
+    assert!(row.is_live());
+    assert_eq!(row.name, "back");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn purge_tombstoned_keeps_fresh_rows(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     // Old scrape tombstone: purged.
