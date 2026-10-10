@@ -229,9 +229,6 @@ impl<S: AsyncRead + Unpin> AsyncRead for GuardedStream<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.head_expired() {
-            return Poll::Ready(Err(head_timed_out()));
-        }
         let before = buf.filled().len();
         match Pin::new(&mut this.inner).poll_read(cx, buf) {
             Poll::Ready(result) => {
@@ -241,6 +238,9 @@ impl<S: AsyncRead + Unpin> AsyncRead for GuardedStream<S> {
                 }
                 Poll::Ready(result)
             }
+            // Data that is already readable wins over an expired head
+            // deadline: only a still-pending read times out.
+            Poll::Pending if this.head_expired() => Poll::Ready(Err(head_timed_out())),
             Poll::Pending => this.poll_idle(cx),
         }
     }
@@ -444,6 +444,19 @@ mod tests {
         let err = read_until_error(&mut guarded, Duration::from_secs(300)).await;
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert!(start.elapsed() <= HEADER_READ_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_data_wins_over_an_expired_head_deadline() {
+        let (mut client, server) = tokio::io::duplex(256);
+        let mut guarded = GuardedStream::new(server, CONNECTION_IDLE_TIMEOUT, None);
+        // The whole head is buffered and readable, but the head deadline
+        // passes before the server gets around to reading it.
+        client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        tokio::time::sleep(HEADER_READ_TIMEOUT + Duration::from_secs(1)).await;
+        let mut buf = [0u8; 256];
+        let n = guarded.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"GET / HTTP/1.1\r\n\r\n");
     }
 
     #[tokio::test]
