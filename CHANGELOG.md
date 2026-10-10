@@ -2,6 +2,10 @@
 
 Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 
+## 0.6.1
+
+- Crawl: sampler concurrency 512→1024 (the enforced ceiling) and packet budget 6000→12000/s, fetch workers 1536→3072 with connections 6144→12288; compose sized for 12 GB boxes (crawl 6g, db 3g, pools 128/PG 200, 1 GiB inflight budget).
+
 ## 0.6.0
 
 - Crawl: sampler concurrency 160→512 and packet budget 3000→6000/s, responder budget 500→1500 replies/s and 64→192 kB/s, fetch workers 768→1536 with connections 3072→6144 and inflight metadata 512 MiB→1 GiB (4 conns/worker kept); compose crawl `mem_limit` 3→4 GiB. The scrape budget stays 100/s and the inbound 4/s + burst 8 gate is unchanged.

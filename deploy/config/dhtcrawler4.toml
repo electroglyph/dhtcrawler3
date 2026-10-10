@@ -43,18 +43,18 @@ state_dir = "/var/lib/dhtcrawler4"
 # Global outbound DHT packet budget. Sized for a server; lower it on a
 # home connection. Politeness toward any single node comes from the 1 s
 # per-address query spacing, so this aggregate only bounds total wire bytes
-# (~3 MB/s total at full reply rate: ~0.6 out + ~2.4 in at typical
+# (~6 MB/s total at full reply rate: ~1.2 out + ~4.8 in at typical
 # response sizes).
-max_packets_per_sec = 6000
+max_packets_per_sec = 12000
 # Sampler workers (one query each at a time): timeout-bound mixes sustain
 # roughly concurrency / 2 s sends (sampler queries time out after 2 s),
 # so this floors worst-case discovery.
-sampler_concurrency = 512
+sampler_concurrency = 1024
 # Answer no DHT queries and mark ours read-only (BEP 43). Leave false to be a
 # full, reciprocating DHT node.
 read_only = false
-fetch_workers = 1536
-max_connections = 6144
+fetch_workers = 3072
+max_connections = 12288
 max_metadata_bytes = 8388608
 # Total metadata bytes held by all fetches at once (memory bound).
 max_inflight_metadata_bytes = 1073741824

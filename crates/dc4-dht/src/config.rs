@@ -11,11 +11,11 @@ use crate::krpc::MAX_DATAGRAM_OUT;
 pub const DEFAULT_PORT: u16 = 6881;
 /// Default global send budget in packets per second (design §3): politeness
 /// toward any single node comes from the 1 s per-address spacing, not this
-/// aggregate (~3 MB/s total at full reply rate: ~0.6 out + ~2.4 in at
+/// aggregate (~6 MB/s total at full reply rate: ~1.2 out + ~4.8 in at
 /// typical response sizes).
-pub const DEFAULT_MAX_PACKETS_PER_SEC: u32 = 6000;
+pub const DEFAULT_MAX_PACKETS_PER_SEC: u32 = 12_000;
 /// Default number of concurrent `sample_infohashes` queries.
-pub const DEFAULT_SAMPLER_CONCURRENCY: usize = 512;
+pub const DEFAULT_SAMPLER_CONCURRENCY: usize = 1024;
 /// Default client version sent in `v`: "DC" plus version 0.1.
 pub const DEFAULT_CLIENT_VERSION: [u8; 4] = *b"DC\x00\x01";
 /// Default bootstrap routers (checked live on 2026-09-16; see `docs/00-horismos.md`).
@@ -408,7 +408,7 @@ mod tests {
         // `query_scrape` charges `scrape_budget`, `query_gated` charges
         // `budget`; both share per-address spacing).
         assert_eq!(DEFAULT_SCRAPE_PACKETS_PER_SEC, 100);
-        assert_eq!(DEFAULT_MAX_PACKETS_PER_SEC, 6000);
+        assert_eq!(DEFAULT_MAX_PACKETS_PER_SEC, 12_000);
         let c = DhtConfig::default();
         assert!(c.scrape_packets_per_sec < c.max_packets_per_sec);
         assert!(c.validate().is_ok());

@@ -63,8 +63,8 @@ Not implemented:
 ## Being a good citizen
 
 - **Budgets.**
-  - Outgoing queries: `max_packets_per_sec` in total (default 6000) and at least 1 s
-    between queries to one IP. Sampler concurrency defaults to 512.
+  - Outgoing queries: `max_packets_per_sec` in total (default 12000) and at least 1 s
+    between queries to one IP. Sampler concurrency defaults to 1024.
   - A query waits at most 4 s for the budget, then is dropped (`throttled`).
   - A lookup sends α = 3 queries at a time and runs at most 8 rounds.
 - **Replies.**
