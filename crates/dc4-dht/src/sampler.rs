@@ -43,6 +43,7 @@ use crate::lookup;
 use crate::node::{FlagGuard, Inner, QueryError, SocketNode};
 use crate::node_id::NodeId;
 use crate::ratelimit::{RATE_MAP_CAPACITY, WindowQuota};
+use crate::responder::MAX_SAMPLE_INTERVAL_SECS;
 use crate::stats::{add, incr};
 use crate::util::{after, after_skip, lock};
 use crate::{Discovered, Source};
@@ -51,8 +52,6 @@ use crate::{Discovered, Source};
 pub(crate) const FRONTIER_CAPACITY: usize = 50_000;
 /// Entries in the visited map, per family (design §3).
 pub(crate) const VISITED_CAPACITY: usize = 1_000_000;
-/// Largest `interval` honoured (BEP 51 allows 0..=21600 seconds).
-pub(crate) const MAX_SAMPLE_INTERVAL_SECS: u64 = 21_600;
 /// Queue entries inspected per pick before giving up.
 const MAX_POPS_PER_PICK: usize = 256;
 /// Shortest time between two scans of a full visited map, in seconds.

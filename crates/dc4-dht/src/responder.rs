@@ -20,6 +20,9 @@ use crate::{Discovered, Source};
 pub(crate) const MAX_VALUES_PER_REPLY: usize = MAX_PEERS_PER_KEY;
 /// Keys put in one `sample_infohashes` answer (BEP 51 suggests about 20).
 pub(crate) const MAX_SAMPLES_PER_REPLY: usize = 20;
+/// Largest `interval` a `sample_infohashes` answer may carry (BEP 51 caps it
+/// at six hours = 21 600 seconds).
+pub(crate) const MAX_SAMPLE_INTERVAL_SECS: u64 = 21_600;
 
 /// Everything about the request and the node that an answer depends on.
 pub(crate) struct AnswerContext<'a> {
@@ -177,7 +180,12 @@ pub(crate) fn answer(
         Method::SampleInfohashes { .. } => {
             response.samples = Some(store.sample(MAX_SAMPLES_PER_REPLY));
             response.num = Some(i64::try_from(store.len()).unwrap_or(i64::MAX));
-            response.interval = Some(secs_i64(ctx.tuning.sample_interval_sent));
+            // BEP 51 caps `interval` at six hours; clamp custom tuning.
+            let sent = ctx
+                .tuning
+                .sample_interval_sent
+                .min(Duration::from_secs(MAX_SAMPLE_INTERVAL_SECS));
+            response.interval = Some(secs_i64(sent));
             with_nodes(&mut response);
         }
     }
@@ -725,6 +733,21 @@ mod tests {
         assert_eq!(r.bf_sd.as_ref().map(|b| b.len()), Some(256));
         assert_eq!(r.bf_pe.as_ref().map(|b| b.len()), Some(256));
         assert!(r.nodes.is_some());
+    }
+
+    #[test]
+    fn sample_interval_sent_is_clamped_to_bep51_max() {
+        let mut f = Fixture::new();
+        f.tuning.sample_interval_sent = Duration::from_secs(1_000_000);
+        let (reply, _) = f
+            .ask(
+                src(),
+                &query(Method::SampleInfohashes {
+                    target: NodeId::random(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(response(&reply).interval, Some(21_600));
     }
 
     #[test]

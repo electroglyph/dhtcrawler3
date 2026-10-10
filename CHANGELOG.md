@@ -5,6 +5,7 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 ## 0.5.0
 
 - DHT: responses with top-level `ro=1` (BEP 43) no longer enter the routing table, the external-IP vote, or the sampler frontier.
+- DHT: `sample_infohashes` answers clamp `interval` to the BEP 51 maximum of 21 600 s, and configs with a larger `sample_interval_sent` are rejected at validation.
 
 ## 0.4.0
 

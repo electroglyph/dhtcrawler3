@@ -285,6 +285,14 @@ impl DhtTuning {
                 "tuning.bootstrap_retry_max must be at least bootstrap_retry_base".into(),
             ));
         }
+        if self.sample_interval_sent
+            > Duration::from_secs(crate::responder::MAX_SAMPLE_INTERVAL_SECS)
+        {
+            return Err(Error::Config(format!(
+                "tuning.sample_interval_sent must be at most {}s (BEP 51)",
+                crate::responder::MAX_SAMPLE_INTERVAL_SECS
+            )));
+        }
         if self.inbound_rate == 0 || self.inbound_burst == 0 {
             return Err(Error::Config(
                 "tuning.inbound_rate and inbound_burst must be at least 1".into(),
@@ -355,6 +363,22 @@ mod tests {
         assert_eq!(t.scrape_node_cache_keys, 4096);
         assert!(!t.limits_by_endpoint);
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn sample_interval_sent_capped_at_bep51_max() {
+        let ok = DhtConfig::default();
+        assert!(ok.validate().is_ok());
+        let bad = DhtConfig {
+            tuning: DhtTuning {
+                sample_interval_sent: Duration::from_secs(
+                    crate::responder::MAX_SAMPLE_INTERVAL_SECS + 1,
+                ),
+                ..DhtTuning::default()
+            },
+            ..DhtConfig::default()
+        };
+        assert!(bad.validate().is_err());
     }
 
     #[test]
