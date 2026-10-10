@@ -126,26 +126,96 @@ or down.
 Risk: lookup-only passes still cost DHT packets (`max_packets_per_sec =
 1000`, `deploy/config/dhtcrawler4.toml:45`); cap their share.
 
-## 4. More dials + deeper lookups for high-est keys only
+## 4. More dials + deeper lookups for high-est keys only — DONE (shipped in 0.4.0)
 
-Problem: every key gets the same effort (8 dials, 3-wide, 6s lookup
-`GET_PEERS_TIMEOUT`, `fetch.rs:60`, 45s `KEY_DEADLINE`, `fetch.rs:62`),
-so junk burns the same budget as a 10-seeder swarm.
+Prereq (done in step 2): every `PendingItem` already carries
+`seeders_est` (`types.rs`, `crawler.rs` `RETURNING p.seeders_est`,
+`claim_bulk` in `fetch.rs:191-212`), so this is fetch-side only — no
+store change, no migration.
 
-Change:
-- Scale effort by estimate: NULL-est → 3 dials, one 6s lookup; `est >= 5`
-  → full 8 dials plus one second deeper lookup before giving up.
-- Keep `KEY_DEADLINE` (45s) and lease (120s, `fetch.rs:52`) as the ceilings.
-- Add a dial-attempt counter next to `emit()` (`fetch.rs:727-734`): the
-  current counters (`fetch.rs:728,774`) count outcomes and throttle skips,
-  not dials, so "ok per dial" is unmeasurable without it. In-memory only,
-  permanent, nearly free.
+Problem: every key gets the same effort (`MAX_PEER_ATTEMPTS = 8`,
+`PARALLEL_ATTEMPTS = 3`, 6s `GET_PEERS_TIMEOUT`, `fetch.rs:64-70`, 45s
+`KEY_DEADLINE`, `fetch.rs:66`), so junk burns the same budget as a
+10-seeder swarm. The queue is NULL-dominated by construction (fresh keys
+are NULL until scraped), so uniform effort spends most dials where
+expected value is lowest.
 
-1-hour gate: `Failed` (peers found, fetch lost) share on high-est keys down;
-ok per 10k dials up; pool idle and DHT timeouts flat (no new saturation).
-Risk: connection/destination pressure (`max_connections = 3072`,
-`DEST_MAX_CONCURRENT = 2`, `fetch.rs:74`); gate by estimate so only
-proven swarms spend it.
+Change — effort buckets by estimate (one helper, `effort_for(est)`):
+- `null` (None) and `dead` (Some(0); measured dead, never live): 3 dials
+  max, one 6s lookup, no second lookup. `Some(0)` must behave like NULL —
+  the old text left it undefined.
+- `low` (1–4): today's effort exactly — 8 dials max, one 6s lookup, no
+  second lookup. (The old text left 1–4 undefined; standard effort is the
+  safe default.)
+- `high` (>= 5, `HIGH_EST_MIN = 5`, starting value not derived — no
+  est-split outcome data exists yet; move it on the gate): 8 dials max
+  plus up to one second 6s lookup before giving up.
+- Fan-out stays 3-wide for every bucket (`PARALLEL_ATTEMPTS` unchanged):
+  only depth/retries scale, never concurrency, so per-key connection
+  pressure never exceeds today's.
+- Hints share the budget: hints are queued before the lookup
+  (`fetch.rs:859-864`) and the single `attempts` counter covers
+  hints + lookup peers, so "3 dials max" means 3 total, not 3 after
+  hints. Peerless keys cost ~0 dials either way (no peers → no starts),
+  so the 8→3 cut saves up to 62% of dial *budget* on keys with peers —
+  measured dials drop less, because most junk already dies peerless.
+- Second-lookup rule (high bucket only): after the first lookup completes,
+  if no dial has succeeded and (`queue` empty and `running` empty, or every
+  started dial failed) and time remains inside `KEY_DEADLINE`, issue exactly
+  one more `scrape_peers(key, get_peers_timeout)`. Cap 2 lookups per key,
+  always inside the existing `timeout(key_deadline, obtain(...))`
+  (`fetch.rs:790`). No new timeout knob. Restructure required: today's
+  `tokio::pin!(lookup)` + `lookup_done: bool` became
+  a re-creatable future + `lookups_done: u8` (`fetch.rs:870-873`) — feasible because
+  `PeerSource::scrape_peers` takes `&self` and returns a fresh future per
+  call (`peers.rs:28-32`, `dc3-dht/src/lib.rs:255`), and `obtain()` has a
+  single caller (`fetch.rs:790`, grep-proven), so no other path changes.
+  Also update the `Deferred` bound comment ("attempt budget plus one
+  lookup", `fetch.rs:384`) to plus two — the termination argument gains
+  one progress step (repro-simulated: all six adversarial cases terminate
+  within caps, including double-empty and limiter-refuses-all).
+- The second piggyback write is safe: `note_fetch_estimate` is a plain
+  `UPDATE pending SET seeders_est` (`crawler.rs:1105`), last-wins —
+  repro-proven on the live PG (5 then 9 reads 9, row restored to NULL).
+- Ceilings unchanged: 45s key deadline, 120s `CLAIM_LEASE` (`fetch.rs:56`).
+- Code touches: `obtain()` takes the item's est (`fetch.rs:850`, caller
+  `fetch.rs:790`), derives the bucket once, and uses effective
+  `max_attempts` (estimate budget capped by `tuning.max_attempts`,
+  `fetch.rs:850-855`) instead of `tuning.max_attempts` directly.
+  `attempt()` unchanged. Destination-limiter skips still don't
+  consume dial budget (only `Ok(permit)` increments `attempts`,
+  `fetch.rs:884-888`) — keep that. No `metrics_server.rs` change: its
+  pipeline test (`metrics_server.rs:231-236`) builds its own counter with
+  its own labels, so production `emit()` labels can't break it — proven by
+  the full suite staying green with the `est` label live (133/133).
+- Metrics (both needed — the old text added only a dial counter, which
+  can't split the gate "on high-est keys"): add `est` bucket label
+  (`null`/`dead`/`low`/`high`, 4 values) to a new
+  `dc3_fetch_dials_total{est}` (`fetch.rs:118`) incremented once per started dial next to
+  the `try_acquire` success (`fetch.rs:884-888`), and the same `est` label
+  on `dc3_fetch_total` in `emit()` (`fetch.rs:830-839`; the old
+  `fetch.rs:727-734`/`728,774` refs are stale post-step-2). Label value is
+  the claim-time `item.seeders_est` bucket on both counters — the
+  mid-fetch piggyback writes the DB row, never the in-hand item, so
+  claim-time keeps dials and outcomes joinable. 4×6 + 4 series, in-memory
+  only, permanent. `ok per 10k dials` per bucket is then
+  `fetch_total{outcome="ok",est} / dials{est}` — unmeasurable today
+  because outcomes count keys and skips, not dials.
+
+1-hour gate (diag diff, prior hour vs new hour): `fetch_failed` share
+within `est="high"` down; ok per 10k dials in `high` up; dial *budget*
+on `null`/`dead` down 62% with measured dials down less (peerless keys
+unchanged at ~0); `no_peers` per claim flat or up (junk correctly finding
+nobody faster); pool idle (`dc3_db_pool_idle`) and
+`dc3_dht_timeouts_total` (`crawl.rs:377`) flat (no new saturation). All
+series are in the diag (bare `^dc3_` grep). Volume caveat: `high` keys
+are rare (300/105k in the repro mix) — if `est="high"` N/hour < ~1k,
+the share is noisy; gate then on dial-direction + no saturation and
+extend the read, don't ship on noise.
+Risk: connection/destination pressure (`max_connections = 3072` in
+`deploy/config/dhtcrawler4.toml`, `DEST_MAX_CONCURRENT = 2`,
+`fetch.rs:74`); bounded because only `high` keys spend extra and fan-out
+never rises. Rollback is one helper (uniform effort back).
 
 ## 5. Generous timeouts on retry only
 

@@ -663,7 +663,7 @@ cd ~/dhtcrawler4/deploy
   echo '### queue churn (compare two diag files for rates) ###'
   docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT relname, n_tup_ins, n_tup_upd, n_tup_hot_upd, n_dead_tup, last_autovacuum FROM pg_stat_user_tables WHERE relname IN ('"'"'pending'"'"','"'"'torrents'"'"');" -c "SELECT indexrelname, pg_size_pretty(pg_relation_size(indexrelid)) AS size, idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE relname = '"'"'pending'"'"';" -c "SELECT count(*) AS n, state, wait_event_type, wait_event, LEFT(query, 60) AS query FROM pg_stat_activity WHERE datname = current_database() GROUP BY 2, 3, 4, 5 ORDER BY 1 DESC LIMIT 8;"'
   echo '### queue age (dead queue vs junk discovery) ###'
-  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT min(discovered_at) AS oldest, max(discovered_at) AS newest, avg(attempts) AS avg_attempts FROM pending WHERE NOT gave_up;" -c "SELECT attempts, count(*) FROM pending WHERE NOT gave_up GROUP BY 1 ORDER BY 1 LIMIT 10;" -c "SELECT count(*) FILTER (WHERE seeders_est IS NULL) AS null_est, count(*) AS queued FROM pending WHERE NOT gave_up;"'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT min(discovered_at) AS oldest, max(discovered_at) AS newest, avg(attempts) AS avg_attempts FROM pending WHERE NOT gave_up;" -c "SELECT attempts, count(*) FROM pending WHERE NOT gave_up GROUP BY 1 ORDER BY 1 LIMIT 10;" -c "SELECT count(*) FILTER (WHERE seeders_est IS NULL) AS null_est, count(*) FILTER (WHERE seeders_est = 0) AS dead_est, count(*) FILTER (WHERE seeders_est BETWEEN 1 AND 4) AS low_est, count(*) FILTER (WHERE seeders_est >= 5) AS high_est, count(*) AS queued FROM pending WHERE NOT gave_up;"'
   echo '### crawl logs (last 500 lines) ###'
   echo -n 'pool timed out: '
   docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'pool timed out while waiting' || true
@@ -690,117 +690,67 @@ plain `psql`, `du` on the data/index directories, and
 
 How to read the output:
 
-- **Nothing indexed after a night?** Compare `discovered` vs `fetched`
-  vs `fetch_failed` in `stats_daily`. Failed dwarfing fetched means
-  workers burn attempts on dead peers — normal up to a point (the DHT is
-  mostly graveyards); a success rate near zero with millions queued is
-  the crawler working as designed, just slowly. Then look at
-  `dc3_fetch_total`: `no_peers` dominating means lookups find nobody
-  holding the keys (stale keys); `fetch_failed` dominating means peers
-  exist but TCP connects/handshakes die (firewalled internet, or
-  timeouts too tight). If `dc3_fetch_total` is missing entirely a while
-  after a restart, workers have not finished a single key — the stall is
-  upstream of fetching (pool, DB), not the DHT; see the pool bullet.
-- **Crawl logs full of `pool timed out`?** The DB cannot serve the pool:
-  `dc3_db_pool_idle` pinned at zero confirms it, and the snippet's log
-  counts say it outright. Usual cause is one slow query holding every connection — historically the fetch claim sorting
-  millions of rows for want of its index (fixed by migration
-  `000010_pending_claim`; the `\di pending*` leg proves it is applied).
-  The `pg_stat_activity` grouping in the churn leg shows what the backends
-  are doing right now instead of guessing: a wall of `active` on the same
-  query means fix the query/plan, not the knobs.
-  `claim failures` must sit near zero — the single claimer is the only
-  thing that claims, so any sustained count there is a database problem,
-  not worker contention.
-- **Is the single claimer keeping up?** `dc3_claim_chan_depth` fluctuating
-  well under 256 is healthy backpressure (the claimer outpaces the
-  workers for seconds at a time). Pinned at 256 with `fetch_total` frozen
-  means the workers are stuck, not the claimer — see the pool bullet.
-  Claim scan rate comes from two diag files: `pending_claim` `idx_tup_read`
-  growth divided by keys fetched (≈47k tuples per 8-key claim before the
-  claimer, ≈1.5 bulk scans/s after).
-- **Are live keys jumping the queue?** `dc3_claimed_total{live="true"}`
-   climbing means the claimer finds `seeders_est > 0` keys to prefer;
-   `live="false"` dominating while the queue-age leg shows few NULLs means
-   the live pool is dry and the fallback feeds unproven keys (today's
-   behavior). `live="true"` near zero with a NULL-heavy queue means
-   estimates never land — check the fetch piggyback, not the claim.
-- **Did the durability/checkpoint tuning take?** The settings leg shows
-  each value plus its `source` (compose command vs default) and the
-  crawler role's stored `rolconfig` (`synchronous_commit=off`): a fresh
-  crawler session inherits it, old pool connections do not (recreate the
-  role containers after changing it). Acceptance is `num_requested`
-  barely climbing and `wal_fpi` (full-page writes) growing slowly at
-  equal fetch throughput — not proportionally fewer WAL bytes.
-- **Is index churn down?** `pending` `n_tup_hot_upd` should stay a large
-  fraction of `n_tup_upd` (HOT updates skip the indexes), and `\di`
-  proves `pending_ready` is gone so its write cost is too. Rates need two
-  diag files: divide counter growth by `postmaster_uptime` growth (or by
-  keys fetched from `stats_daily`).
-- **Is the DHT side healthy?** `good_nodes` in the hundreds with
-  `timeouts_total` a small fraction of `samples_total` is fine, and the
-  table keeps filling for the first days. `queries_received_total`
-  climbing (especially `get_peers`) proves inbound UDP 6881 works — if
-  it sits near zero, the internet cannot reach the node: fix the
-  firewall/security group, no config knob compensates. All-zero `v6`
-  lines just mean no working IPv6 (expected when it is disabled on the
-  host; harmless).
-- **Why is yield near zero?** The queue-age leg discriminates. Oldest
-  `discovered_at` in weeks with attempts piled at max and `null_est`
-  ≈ queued means a dead queue: the DHT correctly reports no peers for
-  corpses, and the fix is admission/expiry, not fetch knobs — with the
-  sweep purging them hourly (`gave_up_purge_hours`), corpses also stop
-  counting against the cap. Everything
-  young with attempts near 0 means junk discovery (e.g. polluted
-  `sample_infohashes`), and the fix is the discovery source. On the
-  metrics side: `admitted_total` by `source` shows where keys come from,
-  `discovered_dropped_total` vs `discovered_total` shows admission
-  pressure, `peer_store_keys` near zero means fetches run without hints
-  (expected right after a restart, suspicious days later),
-  `sampler_visited_full_total` climbing fast means the sampler burns
-  whole routing tables for few keys, and `scrape_zero_seeder_share` /
-  `scrape_unaware_share` near 1 confirm the swarms are dead or unknown
-  rather than the network being broken.
-- **Is the queue stalled on corpses?** `queue_depth` pinned at the cap
-  with `queued` draining 1:1 into `gave_up`, `blocked_total{reason="queue_full"}`
-  climbing, and `fetch_total` frozen means nothing claimable is left:
-  gave-up rows count against `max_pending` without ever becoming due
-  again. The scrape sweep purges them hourly — `purge_gave_up_total`
-  climbing once per sweep is the proof it runs; flat at zero an hour
-  after a restart means the sweep is not firing, not that there is
-  nothing to purge. After the purge catches up, depth drops below the
-  cap and the `queue_full` drops stop.
-- **Scrape/index/web roles alive?** `dc3_scrape_tombstones_total` and
-  `dc3_purge_tombstoned_total` climbing means dead torrents get tombstoned
-  and reaped; `dc3_scrape_due_depth` stuck high means the scrape queue
-  never catches up. `dc3_index_lag` near zero with `dc3_index_docs`
-  tracking the torrent count means the indexer keeps up. On web,
-  `dc3_http_requests_total` climbing with `dc3_search_cache_hits_total`
-  well above misses means serving is healthy; `dc3_rate_limited_total`
-  climbing alone means clients hit the rate limit, not an outage.
-- **Disk filling up?** `docker system df` first: gigabytes of reclaimable
-  build cache is normal after repeated `--build` updates — `docker
-  builder prune -f` drops it. Of the volumes, `pgdata` is always the
-  big one: the pending queue holds millions of undiscovered keys (that
-  is the `queued` count, not a problem by itself) and constant row
-  updates churn WAL. Cross-check `du` against the SQL `db_size`: a large
-  gap (tens of GB on disk for a ~1 GB database) is WAL piled up or dead
-  tuples, not data — look at `pg_wal` inside the volume
-  (`du -sh .../pgdata/_data/pg_wal`), `n_dead_tup`/`last_autovacuum` in
-  `pg_stat_user_tables`, and run `CHECKPOINT` to let recycled WAL go.
-  The `index` volume stays small until the torrent
-  count is large; `state` (DHT routing snapshot) is kilobytes.
-- **Out of headroom?** `docker stats` shows it: crawl CPU/mem near its
-  3 GiB cap, the DB near its 4 GiB cap, or the DB pool idle gauge pinned
-  at zero, means the crawl budget outgrew the machine — lower
-  `fetch_workers`/`max_connections` or grow the host. Plenty of idle
-  CPU/RAM means the opposite: the knobs, not the hardware, are the
-  limit. (Pool pinned at zero with idle hardware is a slow-query
-  problem, not a size problem — see the pool bullet.)
 - **A role unhealthy?** `docker compose ps` names it;
   `docker compose logs --tail=30 <role>` (JSON lines, query text never
   logged) usually names the cause: DB unreachable, bad TOML key, port
-  already bound.
+  already bound. `curl -s http://127.0.0.1/healthz` checks the web role
+  from the host.
+- **Crawl logs full of `pool timed out`?** The DB cannot serve the pool:
+  `dc3_db_pool_idle` pinned at zero confirms it, and the snippet's log
+  counts say it outright. The `pg_stat_activity` grouping in the churn
+  leg shows what the backends are doing right now: a wall of `active`
+  on one query means fix the query/plan, not the knobs (historically the
+  fetch claim missing its index — fixed by migration
+  `000010_pending_claim`, which the `\di pending*` leg proves applied).
+  `claim failures` must sit near zero — the single claimer is the only
+  thing that claims, so any sustained count there is a database problem,
+  not worker contention. `docker stats` decides size vs slowness: containers
+  near their caps means the crawl budget outgrew the machine (lower
+  `fetch_workers`/`max_connections` or grow the host); idle hardware with
+  the pool pinned at zero is a slow query, not a small machine.
+- **Disk filling up?** `docker system df` first: gigabytes of reclaimable
+  build cache is normal after repeated `--build` updates — `docker
+  builder prune -f` drops it. Otherwise `pgdata` is the big volume by
+  design (millions of queued keys plus WAL churn). Cross-check `du`
+  against the SQL `db_size`: a large gap is WAL piled up or dead tuples,
+  not data — look at `pg_wal` inside the volume and `n_dead_tup` in
+  `pg_stat_user_tables`, then run `CHECKPOINT` to let recycled WAL go.
+- **Nothing indexed after a night?** Compare `discovered` vs `fetched`
+  vs `fetch_failed` in `stats_daily`, then `dc3_fetch_total`:
+  `no_peers` dominating means lookups find nobody holding the keys
+  (stale keys); `fetch_failed` dominating means peers exist but TCP
+  connects/handshakes die (firewalled internet, or timeouts too tight).
+  If `dc3_fetch_total` is missing entirely a while after a restart,
+  workers have not finished a single key — the stall is upstream
+  (pool, DB), not the DHT. The queue-age leg says which kind of slow:
+  oldest `discovered_at` weeks old with attempts piled at max means a
+  dead queue (fix admission/expiry, not fetch knobs); everything young
+  with attempts near 0 means junk discovery, and `dc3_admitted_total` by
+  `source` shows where it comes from.
+- **Is the DHT side healthy?** `dc3_dht_good_nodes` in the hundreds with
+  `dc3_dht_timeouts_total` a small fraction of `dc3_dht_samples_total` is fine.
+  `dc3_dht_queries_received_total` climbing (especially `get_peers`) proves
+  inbound UDP 6881 works — near zero means the internet cannot reach
+  the node: fix the firewall/security group, no config knob compensates.
+  All-zero `v6` lines just mean no working IPv6 (harmless).
+- **Is the queue moving?** `dc3_claim_chan_depth` fluctuating under 256
+  is healthy backpressure; pinned at 256 with `dc3_fetch_total` frozen means
+  the workers are stuck, not the claimer. `dc3_claimed_total{live="true"}`
+  climbing means live keys jump the queue; `live="false"` dominating a
+  NULL-heavy queue means estimates never land. Per-bucket pay is
+  `dc3_fetch_total{outcome="ok",est} / dc3_fetch_dials_total{est}` — expect
+  `high` up, `null`/`dead` dials down (measured dials drop less than the
+  62% budget cut: peerless keys cost ~0 either way). `dc3_purge_gave_up_total`
+  climbing once per sweep proves the hourly corpse purge runs; flat at
+  zero an hour after a restart means the sweep is not firing. While corpses
+  pile up, `dc3_blocked_total{reason="queue_full"}` climbs — that stops once
+  the purge catches depth below the cap.
+- **Index and web alive?** `dc3_index_lag` near zero with `dc3_index_docs`
+  tracking the torrent count means the indexer keeps up;
+  `dc3_scrape_due_depth` stuck high means the scrape queue never catches
+  up. On web, `dc3_http_requests_total` climbing with cache hits well
+  above misses is healthy; `dc3_rate_limited_total` climbing alone means
+  clients hit the rate limit, not an outage.
 
 ## License
 

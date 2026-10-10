@@ -234,6 +234,9 @@ pub struct FetchTuning {
     pub idle_max: Duration,
     pub get_peers_timeout: Duration,
     pub key_deadline: Duration,
+    /// Global dial ceiling per key. The estimate bucket (`effort_for`) sets
+    /// the per-key budget below it; the effective budget is the minimum of
+    /// the two, so lowering this in tests still binds.
     pub max_attempts: usize,
     pub parallel_attempts: usize,
     pub connect_timeout: Duration,
@@ -847,7 +850,9 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
     async fn obtain(&self, key: DhtKey, est: Option<u32>) -> Obtained {
         let effort = effort_for(est);
         let bucket = est_bucket(est);
-        let max_attempts = effort.max_attempts;
+        // The estimate bucket sets the per-key budget; tuning stays a
+        // global ceiling so a lowered test knob still binds.
+        let max_attempts = effort.max_attempts.min(self.tuning.max_attempts);
         let mut own = OwnAddrs::of(&self.peers);
         let mut queue: VecDeque<SocketAddr> = VecDeque::new();
         let mut seen: HashSet<SocketAddr> = HashSet::new();
@@ -1541,6 +1546,32 @@ mod tests {
         fetcher_with(store, peers, test_tuning())
     }
 
+    /// [`fetcher_with`], but the fetch reads `hints` first — for proving
+    /// hint peers share the one dial budget.
+    fn fetcher_with_hints<P: PeerSource>(
+        store: &MemoryStore,
+        peers: P,
+        tuning: FetchTuning,
+        hints: SharedHints,
+    ) -> Arc<Fetcher<MemoryStore, P>> {
+        let filter = PeerFilter {
+            allow_private: true,
+            by_endpoint: true,
+        };
+        Arc::new(Fetcher::new(
+            store.clone(),
+            peers,
+            filter,
+            hints,
+            FetchLimitsConfig {
+                max_connections: 8,
+                max_metadata_bytes: 1024 * 1024,
+                max_inflight_metadata_bytes: 1024 * 1024,
+            },
+            tuning,
+        ))
+    }
+
     fn fetcher_with<P: PeerSource>(
         store: &MemoryStore,
         peers: P,
@@ -1890,7 +1921,9 @@ mod tests {
         assert_eq!(LOW_EFFORT_MAX_ATTEMPTS, 3);
         assert_eq!(HIGH_EST_MIN, 5);
         assert_eq!(HIGH_EST_MAX_LOOKUPS, 2);
-        assert!(LOW_EFFORT_MAX_ATTEMPTS < MAX_PEER_ATTEMPTS);
+        const {
+            assert!(LOW_EFFORT_MAX_ATTEMPTS < MAX_PEER_ATTEMPTS);
+        }
         assert_eq!(
             effort_for(None),
             KeyEffort {
@@ -1941,11 +1974,13 @@ mod tests {
 
     /// Scripted lookups for the effort tests: each `scrape_peers` call pops
     /// the next peer list and counts the call, so tests pin both the dial
-    /// budget and the lookup count.
+    /// budget and the lookup count. Timeouts are recorded to prove both
+    /// lookups share the one 6 s knob (no new timeout).
     #[derive(Clone)]
     struct ScriptedLookups {
         scripts: Arc<Mutex<std::collections::VecDeque<Vec<SocketAddr>>>>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        timeouts: Arc<Mutex<Vec<Duration>>>,
     }
 
     impl ScriptedLookups {
@@ -1953,11 +1988,16 @@ mod tests {
             Self {
                 scripts: Arc::new(Mutex::new(scripts.into_iter().collect())),
                 calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                timeouts: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn timeouts(&self) -> Vec<Duration> {
+            lock(&self.timeouts).clone()
         }
     }
 
@@ -1965,8 +2005,9 @@ mod tests {
         async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
             Vec::new()
         }
-        async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
+        async fn scrape_peers(&self, _: DhtKey, timeout: Duration) -> dc3_dht::ScrapeReport {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            lock(&self.timeouts).push(timeout);
             let peers = lock(&self.scripts).pop_front().unwrap_or_default();
             dc3_dht::ScrapeReport {
                 peers,
@@ -1989,14 +2030,9 @@ mod tests {
         let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = Arc::clone(&dials);
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((socket, _)) => {
-                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        drop(socket);
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((socket, _)) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(socket);
             }
         });
         (addr, dials)
@@ -2062,6 +2098,8 @@ mod tests {
         ));
         assert_eq!(peers.calls(), 2);
         assert_eq!(dial_count(&counters), MAX_PEER_ATTEMPTS);
+        // Both rounds share the one 6 s knob — no new timeout.
+        assert_eq!(peers.timeouts(), vec![GET_PEERS_TIMEOUT, GET_PEERS_TIMEOUT]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2108,6 +2146,112 @@ mod tests {
         assert_eq!(peers.calls(), 2);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn non_high_estimates_never_rerun_a_drained_lookup() {
+        // A drained first lookup with dial budget still left: only `high`
+        // earns the second round. The queued second script must stay
+        // untouched (one lookup, zero dials, peerless `NoPeers`).
+        for (est, key) in [
+            (None, DhtKey([96; 20])),
+            (Some(0), DhtKey([97; 20])),
+            (Some(4), DhtKey([98; 20])),
+        ] {
+            let store = MemoryStore::new();
+            let (addrs, counters) = counting_pool(4).await;
+            let peers = ScriptedLookups::new(vec![Vec::new(), addrs]);
+            let f = fetcher(&store, peers.clone());
+            assert!(
+                matches!(f.obtain(key, est).await, Obtained::NoPeers),
+                "est {est:?}: drained and peerless"
+            );
+            assert_eq!(peers.calls(), 1, "est {est:?}: one lookup");
+            assert_eq!(dial_count(&counters), 0, "est {est:?}: no dials");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn high_estimate_caps_lookups_at_two() {
+        // Two drained lookups with budget left: the third script stays
+        // queued forever — the cap holds even when peers would exist.
+        let store = MemoryStore::new();
+        let (addrs, counters) = counting_pool(4).await;
+        let peers = ScriptedLookups::new(vec![Vec::new(), Vec::new(), addrs]);
+        let f = fetcher(&store, peers.clone());
+        assert!(matches!(
+            f.obtain(DhtKey([99; 20]), Some(50)).await,
+            Obtained::NoPeers
+        ));
+        assert_eq!(peers.calls(), 2);
+        assert_eq!(dial_count(&counters), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hints_share_the_dial_budget() {
+        // Two hint peers plus four lookup peers against the 3-dial floor:
+        // the hints go first (queue order) and the lookup gets the
+        // remainder — 2 + 1, not 2 + 3.
+        let store = MemoryStore::new();
+        let (hint_addrs, hint_counters) = counting_pool(2).await;
+        let (lookup_addrs, lookup_counters) = counting_pool(4).await;
+        let peers = ScriptedLookups::new(vec![lookup_addrs]);
+        let hints = shared_hints(&AdmissionTuning::default());
+        let k = DhtKey([100; 20]);
+        for peer in &hint_addrs {
+            lock(&hints).add(k, *peer, Instant::now());
+        }
+        let tuning = test_tuning();
+        let f = fetcher_with_hints(&store, peers.clone(), tuning, hints);
+        assert!(matches!(f.obtain(k, None).await, Obtained::Failed));
+        assert_eq!(peers.calls(), 1);
+        assert_eq!(dial_count(&hint_counters), 2, "both hints dialed");
+        assert_eq!(dial_count(&lookup_counters), 1, "one lookup peer left");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn high_estimate_with_refused_peers_still_terminates() {
+        // Every peer refused by the destination limiter (`Full` is
+        // retryable, so they defer): the second lookup still issues once
+        // progress advances it, then the cap stops the loop — no spin,
+        // no dials, lookup count pinned at two.
+        let store = MemoryStore::new();
+        let (addrs, counters) = counting_pool(1).await;
+        let peers = ScriptedLookups::new(vec![addrs.clone(), addrs]);
+        let tuning = FetchTuning {
+            destinations: DestLimits {
+                capacity: 0,
+                ..test_tuning().destinations
+            },
+            ..test_tuning()
+        };
+        let f = fetcher_with(&store, peers.clone(), tuning);
+        assert!(matches!(
+            f.obtain(DhtKey([101; 20]), Some(50)).await,
+            Obtained::Failed
+        ));
+        assert_eq!(peers.calls(), 2);
+        assert_eq!(dial_count(&counters), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tuning_max_attempts_still_caps_as_a_ceiling() {
+        // The estimate bucket sets the per-key budget; a lowered tuning
+        // knob still binds below it.
+        let store = MemoryStore::new();
+        let (addrs, counters) = counting_pool(10).await;
+        let peers = ScriptedLookups::new(vec![addrs]);
+        let tuning = FetchTuning {
+            max_attempts: 2,
+            ..test_tuning()
+        };
+        let f = fetcher_with(&store, peers.clone(), tuning);
+        assert!(matches!(
+            f.obtain(DhtKey([102; 20]), Some(50)).await,
+            Obtained::Failed
+        ));
+        assert_eq!(peers.calls(), 1, "spent budget skips the rerun");
+        assert_eq!(dial_count(&counters), 2);
+    }
+
     #[test]
     fn fetch_and_dial_metrics_carry_the_claim_time_bucket() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -2121,14 +2265,28 @@ mod tests {
                 .unwrap()
                 .block_on(async {
                     let store = MemoryStore::new();
+                    // One dead port per fetch: a refused dial negative-caches
+                    // its destination, so sharing one port would make the
+                    // second fetch skip (correctly) with zero dials.
                     let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
                     let dead_addr = dead.local_addr().unwrap();
                     drop(dead);
-                    let f = fetcher(&store, FixedPeers(vec![dead_addr]));
+                    let dead2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let dead_addr2 = dead2.local_addr().unwrap();
+                    drop(dead2);
                     let k = DhtKey([95; 20]);
                     store.enqueue(k);
+                    let f = fetcher(&store, FixedPeers(vec![dead_addr]));
                     assert_eq!(
                         f.process(&item_with(k, Some(50))).await,
+                        FetchOutcome::FetchFailed
+                    );
+                    // Same shape, unscraped bucket: one dial, `null` labels.
+                    let k2 = DhtKey([103; 20]);
+                    store.enqueue(k2);
+                    let f2 = fetcher(&store, FixedPeers(vec![dead_addr2]));
+                    assert_eq!(
+                        f2.process(&item_with(k2, None)).await,
                         FetchOutcome::FetchFailed
                     );
                 });
@@ -2138,11 +2296,20 @@ mod tests {
             text.contains("dc3_fetch_dials_total{est=\"high\"} 1"),
             "{text}"
         );
+        assert!(
+            text.contains("dc3_fetch_dials_total{est=\"null\"} 1"),
+            "{text}"
+        );
         let fetch_line = text
             .lines()
             .find(|l| l.starts_with("dc3_fetch_total{") && l.contains("est=\"high\""))
             .unwrap_or_else(|| panic!("no high-bucket fetch_total:\n{text}"));
         assert!(fetch_line.contains("outcome=\"fetch_failed\""), "{text}");
+        let null_line = text
+            .lines()
+            .find(|l| l.starts_with("dc3_fetch_total{") && l.contains("est=\"null\""))
+            .unwrap_or_else(|| panic!("no null-bucket fetch_total:\n{text}"));
+        assert!(null_line.contains("outcome=\"fetch_failed\""), "{text}");
     }
 
     #[test]
