@@ -24,7 +24,9 @@ use crate::{
 /// positive a and b the highest set bit is equal exactly when
 /// (a XOR b) < (a AND b). Tombstoned rows are left alone: only a fetch
 /// revives those. The addition saturates at the bigint maximum instead of
-/// aborting the batch.
+/// aborting the batch. The `sums` read locks its rows (`FOR UPDATE`), so a
+/// concurrent writer is re-read after it commits instead of being
+/// overwritten with a stale sum (READ COMMITTED re-evaluation).
 const OBSERVE_KNOWN_SQL: &str = "\
 WITH input(k, n) AS (SELECT * FROM unnest($1::bytea[], $2::bigint[])),
 sums AS (
@@ -34,6 +36,7 @@ sums AS (
               ELSE t.seen_count + i.n END AS new_seen,
          t.seen_count AS old_seen
     FROM input i JOIN torrents t ON t.dht_key = i.k AND t.deleted_at IS NULL
+   FOR UPDATE
 )
 UPDATE torrents t
    SET seen_count = s.new_seen,
@@ -58,6 +61,7 @@ sums AS (
     FROM input i JOIN torrents t
       ON (t.info_hash_v1 = i.k OR substring(t.info_hash_v2 FROM 1 FOR 20) = i.k)
      AND t.deleted_at IS NULL
+   FOR UPDATE
 )
 UPDATE torrents t
    SET seen_count = s.new_seen,

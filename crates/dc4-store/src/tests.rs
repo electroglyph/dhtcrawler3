@@ -1758,6 +1758,29 @@ async fn purge_tombstoned_holds_the_change_feed_lock(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn concurrent_observes_do_not_lose_seen_counts(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(45);
+    let id = s.complete(&k, &torrent(k, "watched")).await.unwrap();
+    let obs = |n: u32| Observation {
+        key: k,
+        sightings: n,
+        priority: false,
+    };
+    // Ten back-to-back races: without row locking in the `sums` read, the
+    // loser applies a stale sum and one increment vanishes per round.
+    for _ in 0..10 {
+        let before = raw_torrent(&pool, id).await.seen_count;
+        let one = [obs(1)];
+        let two = [obs(2)];
+        let (a, b) = tokio::join!(s.observe(&one, NO_LIMIT), s.observe(&two, NO_LIMIT),);
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(raw_torrent(&pool, id).await.seen_count, before + 3);
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn purge_tombstoned_does_not_delete_revived_rows(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let k = key(43);
