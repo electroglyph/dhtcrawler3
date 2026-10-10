@@ -1719,6 +1719,45 @@ async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn purge_tombstoned_holds_the_change_feed_lock(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(41);
+    let id = s.complete(&k, &torrent(k, "doomed")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    // The exclusive change lock held on a dedicated connection (what the
+    // high-water mark takes): the purge must wait for it instead of
+    // stamping a `purged_seq` the mark could read uncommitted.
+    let mut held = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(CHANGE_LOCK_KEY)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let gated = tokio::time::timeout(
+        Duration::from_millis(300),
+        s.purge_tombstoned(Duration::ZERO, 10),
+    )
+    .await;
+    assert!(
+        gated.is_err(),
+        "purge did not wait for the change-feed lock"
+    );
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(CHANGE_LOCK_KEY)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    drop(held);
+    assert_eq!(s.purge_tombstoned(Duration::ZERO, 10).await.unwrap(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn purge_tombstoned_keeps_fresh_rows(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     // Old scrape tombstone: purged.

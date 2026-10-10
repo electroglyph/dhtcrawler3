@@ -1089,15 +1089,21 @@ impl Store {
     /// lagging indexer still converges. Expired purge-feed entries are
     /// pruned (see `PURGED_FEED_RETENTION_SECS`).
     pub async fn purge_tombstoned(&self, grace: Duration, limit: i64) -> Result<u64> {
+        // The purge stamps `purged_seq` from `change_seq`: hold the shared
+        // change-feed lock like every other writer, so the high-water mark
+        // can never read a stamp from an uncommitted purge.
+        let mut tx = self.pool.begin().await?;
+        lock_change_shared(&mut tx).await?;
         sqlx::query(PRUNE_PURGED_SQL)
             .bind(PURGED_FEED_RETENTION_SECS)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         let res = sqlx::query(PURGE_TOMBSTONED_SQL)
             .bind(secs(grace))
             .bind(limit.max(0))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(res.rows_affected())
     }
 
