@@ -670,7 +670,7 @@ cd ~/dhtcrawler4/deploy
   echo -n 'claim failures: '
   docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'claiming queue items failed' || true
   echo '### crawl metrics ###'
-  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_(fetch_total|queue_depth|db_pool_size|db_pool_idle|claim_chan_depth|discovered_total|admitted_total|blocked_total|scrape_total|scrape_zero_seeder_share|scrape_unaware_share|destination_skipped_total|purge_gave_up_total)|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total|sampler_early_total|sampler_visited_full_total|responder_dropped_total|discovered_dropped_total|peer_store_keys)" <&3'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_(fetch_total|claimed_total|queue_depth|db_pool_size|db_pool_idle|claim_chan_depth|discovered_total|admitted_total|blocked_total|scrape_total|scrape_zero_seeder_share|scrape_unaware_share|destination_skipped_total|purge_gave_up_total)|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total|sampler_early_total|sampler_visited_full_total|responder_dropped_total|discovered_dropped_total|peer_store_keys)" <&3'
 } 2>&1 | tee /tmp/dc3-diag.txt
 ```
 
@@ -715,6 +715,12 @@ How to read the output:
   Claim scan rate comes from two diag files: `pending_claim` `idx_tup_read`
   growth divided by keys fetched (≈47k tuples per 8-key claim before the
   claimer, ≈1.5 bulk scans/s after).
+- **Are live keys jumping the queue?** `dc3_claimed_total{live="true"}`
+   climbing means the claimer finds `seeders_est > 0` keys to prefer;
+   `live="false"` dominating while the queue-age leg shows few NULLs means
+   the live pool is dry and the fallback feeds unproven keys (today's
+   behavior). `live="true"` near zero with a NULL-heavy queue means
+   estimates never land — check the fetch piggyback, not the claim.
 - **Did the durability/checkpoint tuning take?** The settings leg shows
   each value plus its `source` (compose command vs default) and the
   crawler role's stored `rolconfig` (`synchronous_commit=off`): a fresh

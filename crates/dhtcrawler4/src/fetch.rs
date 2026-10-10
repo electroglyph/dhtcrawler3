@@ -1592,6 +1592,192 @@ mod tests {
         );
     }
 
+    /// A scripted claim backend for `claim_bulk`: the live phase returns
+    /// canned items, the top-up is recorded and scripted. Everything else
+    /// is unimplemented (these tests never touch it).
+    #[derive(Clone)]
+    struct ScriptedClaims {
+        live: Vec<PendingItem>,
+        topup: Vec<PendingItem>,
+        fail_topup: bool,
+        calls: Arc<Mutex<Vec<(&'static str, i64)>>>,
+    }
+
+    impl CrawlStore for ScriptedClaims {
+        async fn observe(
+            &self,
+            _batch: &[dc3_store::Observation],
+            _max_pending: i64,
+        ) -> dc3_store::Result<dc3_store::ObserveOutcome> {
+            unimplemented!()
+        }
+        async fn claim(
+            &self,
+            n: i64,
+            _lease: Duration,
+        ) -> dc3_store::Result<Vec<PendingItem>> {
+            self.calls.lock().unwrap().push(("claim", n));
+            if self.fail_topup {
+                return Err(StoreError::Invalid("injected top-up failure".into()));
+            }
+            Ok(self.topup.clone())
+        }
+        async fn claim_live(
+            &self,
+            n: i64,
+            _lease: Duration,
+        ) -> dc3_store::Result<Vec<PendingItem>> {
+            self.calls.lock().unwrap().push(("claim_live", n));
+            Ok(self.live.clone())
+        }
+        async fn renew(
+            &self,
+            _key: &DhtKey,
+            _lease: Duration,
+        ) -> dc3_store::Result<bool> {
+            unimplemented!()
+        }
+        async fn complete(
+            &self,
+            _key: &DhtKey,
+            _t: &NewTorrent,
+        ) -> dc3_store::Result<i64> {
+            unimplemented!()
+        }
+        async fn fail(&self, _key: &DhtKey) -> dc3_store::Result<bool> {
+            unimplemented!()
+        }
+        async fn give_up(&self, _key: &DhtKey) -> dc3_store::Result<bool> {
+            unimplemented!()
+        }
+        async fn pending_depth(&self) -> dc3_store::Result<i64> {
+            unimplemented!()
+        }
+        async fn claim_scrape_due(
+            &self,
+            _limit: i64,
+            _live_interval: Duration,
+            _unknown_interval: Duration,
+        ) -> dc3_store::Result<Vec<dc3_store::ScrapeItem>> {
+            unimplemented!()
+        }
+        async fn record_scrape(
+            &self,
+            _id: i64,
+            _seeders_est: Option<u32>,
+            _scrape_failures: u32,
+        ) -> dc3_store::Result<bool> {
+            unimplemented!()
+        }
+        async fn record_scrapes(
+            &self,
+            _rows: &[(i64, Option<u32>, u32)],
+        ) -> dc3_store::Result<u64> {
+            unimplemented!()
+        }
+        async fn tombstone_dead(
+            &self,
+            _id: i64,
+            _old_last_seen_at: chrono::DateTime<chrono::Utc>,
+            _old_change_seq: i64,
+        ) -> dc3_store::Result<bool> {
+            unimplemented!()
+        }
+        async fn purge_tombstoned(
+            &self,
+            _grace: Duration,
+            _limit: i64,
+        ) -> dc3_store::Result<u64> {
+            unimplemented!()
+        }
+        async fn purge_gave_up(
+            &self,
+            _older_than: Duration,
+        ) -> dc3_store::Result<u64> {
+            unimplemented!()
+        }
+        async fn note_fetch_estimate(
+            &self,
+            _key: &DhtKey,
+            _seeders_est: u32,
+        ) -> dc3_store::Result<()> {
+            unimplemented!()
+        }
+        async fn trim_removed_keys(&self, _cap: i64) -> dc3_store::Result<u64> {
+            unimplemented!()
+        }
+        async fn removed_keys_count(&self) -> dc3_store::Result<i64> {
+            unimplemented!()
+        }
+        async fn removal_cooldowns(
+            &self,
+            _keys: &[DhtKey],
+            _base_days: u64,
+            _strong_evidence: &[DhtKey],
+        ) -> dc3_store::Result<Vec<dc3_store::RemovalCooldown>> {
+            unimplemented!()
+        }
+        async fn note_removed_sightings(
+            &self,
+            _keys: &[DhtKey],
+        ) -> dc3_store::Result<u64> {
+            unimplemented!()
+        }
+        async fn refresh_scraped(&self, _keys: &[DhtKey]) -> dc3_store::Result<u64> {
+            unimplemented!()
+        }
+        async fn ping(&self) -> dc3_store::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bulk_top_up_is_sized_to_fill_n() {
+        let live_key = DhtKey([61; 20]);
+        let store = ScriptedClaims {
+            live: vec![PendingItem {
+                dht_key: live_key,
+                attempts: 1,
+                seen_count: 2,
+                seeders_est: Some(9),
+            }],
+            topup: vec![item(DhtKey([62; 20])), item(DhtKey([63; 20]))],
+            fail_topup: false,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let bulk = claim_bulk(&store, 8, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(bulk.len(), 3);
+        assert_eq!(bulk[0].dht_key, live_key);
+        // The top-up is asked for exactly the shortfall, not a full bulk.
+        assert_eq!(
+            store.calls.lock().unwrap().clone(),
+            vec![("claim_live", 8), ("claim", 7)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bulk_top_up_failure_errors_the_scan() {
+        let store = ScriptedClaims {
+            live: vec![item(DhtKey([64; 20]))],
+            topup: Vec::new(),
+            fail_topup: true,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        // A failed top-up errors the whole scan (the claimer backs off)
+        // instead of feeding a short bulk.
+        assert!(
+            claim_bulk(&store, 8, Duration::from_secs(120))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.calls.lock().unwrap().clone(),
+            vec![("claim_live", 8), ("claim", 7)]
+        );
+    }
+
     #[test]
     fn renewal_guard_spawns_only_before_the_deadline() {
         // Production tuning: the first tick (90 s) never fires before the

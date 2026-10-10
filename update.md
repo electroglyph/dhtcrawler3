@@ -13,7 +13,7 @@ to gate on — it stays a scoreboard only. Every gate below uses counts in
 the 10k–1M/hour range, which settle within one hour of live traffic.
 Ship or revert each step on its proxy; never wait for `ok/day`.
 
-## 1. Shed sampler first (queue_full drops the wrong keys today)
+## 1. Shed sampler first — DONE (shipped in 0.2.0)
 
 Problem: `priority = source != GetPeers` (`admission.rs:576`) makes Sample
 equal to Announce. Gate (`crawler.rs:319-330`): depth >= 5M drops GetPeers
@@ -50,24 +50,60 @@ announce admitted flat vs the prior hour while sample admitted drops steeply.
 Risk: starving useful sampler keys — depth-gate the shed (shed only on cached
 depth high) and back off by lowering the shed threshold gradually.
 
-## 2. Stop fetching blind (estimate-aware claim)
+## 2. Live-first claim with fallback (estimate-aware claim) — DONE (shipped in 0.3.0)
 
 Problem: claim orders `attempts ASC, seeders_est DESC NULLS LAST`
-(`crawler.rs:107`) but still claims NULL-est keys when workers are free —
-~99k of 100k queued are NULL-est. The free piggyback estimate
-(`fetch.rs:790-799`, `note_fetch_estimate`) already populates `seeders_est`
-on contact, so estimates improve over time if we let them.
+(`crawler.rs:107`) but attempts leads: fresh keys are always NULL by
+construction (no backfill, `crawler.rs:74-78`), so ~99k NULL fresh keys
+claim before any live retry. The free piggyback estimate
+(`fetch.rs:790-799`, `note_fetch_estimate`) only helps retries order
+within their tier. Unaware lookups leave NULL, never 0 (`fetch.rs:792`).
 
-Change (claim side only — the lookup behavior is step 3):
-- When depth is high, `CLAIM_SQL` takes only `seeders_est IS NOT NULL`
-  (or `> 0`); NULL-est keys stay queued for the lookup-only pass.
-- Track NULL share as a gauge alongside `dc3_queue_depth`.
+Repro (ephemeral PG, 100k rows: 99k NULL / 700 zero / 300 live, `psql`
+via `/tmp/opencode/pgstep2sock:54399` — table + data still live there):
+- T1 starvation: filtered (`seeders_est > 0`) bulks of 512 return
+  300, then 0, then 0 — the whole live pool fits one bulk, workers idle
+  after. Unfiltered bulks return 512 (0 NULL), 512 (124 NULL),
+  512 (512 NULL): the third bulk is the pure-NULL diet behind today's
+  1.9M `no_peers`. Verdict: a hard filter starves; a fallback is required.
+- T2 predicate: `IS NOT NULL` bulk returns 512 = 300 live + 212 dead
+  zeros. `Some(0)` is measured dead (aware responses, no seeds,
+  `bloom.rs:146-160`, `lib.rs:147-154`). Verdict: predicate must be
+  `seeders_est > 0`, never `IS NOT NULL`.
+- T3 index, CORRECTED: the `> 0` claim uses `pending_claim` as an
+  `Index Cond` (`EXPLAIN`: `Index Scan using pending_claim`, empty-pool
+  scan 0.13 ms / 124 buffers at 105k rows). No new index needed for the
+  claim. A partial index only earns its keep for a live-count gauge —
+  and the gauge below doesn't need one.
+- T4 leak: under a hard filter 104k NULL + 700 dead rows are never
+  claimable; +5k NULL inflow → depth 105k, still 104.7k stranded.
+  `purge_gave_up` never touches never-tried keys. Verdict: the fallback
+  IS the NULL consumer — no separate lane, no step-3 dependency.
+- T5 measurability: `PendingItem` carries no est (`types.rs:174-179`),
+  `CLAIM_SQL:99-110` doesn't `RETURNING` it, so "NULL share of claims"
+  is unmeasurable today; and a queue NULL-share gauge is a
+  `Parallel Seq Scan` (`EXPLAIN` proven). Verdict: no queue gauge —
+  add `seeders_est` to `RETURNING` and count live/null per bulk in the
+  claimer (one-line change, free — repro T5b returns live_n/null_n per
+  bulk with zero extra round trips).
 
-1-hour gate: NULL share of claims falls vs the pre-change hour; workers not
-starved (`claim_chan_depth` still flickers > 0, idle time flat);
-`no_peers`/claim flat or down.
-Risk: starving workers if the filter is too strict — keep it depth-gated,
-not absolute. Interacts with step 1 (less sampler junk = fewer NULLs).
+Change (claimer-side only, no `ORDER BY` change, no migration, no depth gate):
+- Live bulk first: same `CLAIM_SQL` + `AND q.seeders_est > 0`, `LIMIT 512`.
+  If it returns short of the full bulk (`n`), top up with one
+  unfiltered bulk. Fallback guarantees feeding, so no depth trigger and
+  no starvation mode. Live retries jump ahead of the fresh-NULL flood;
+  NULLs still flow when the live pool is dry.
+- Instrument: `RETURNING p.seeders_est`, emit `live_n`/`null_n` per bulk
+  next to `emit()` (`fetch.rs:727-734`). In-memory only, permanent.
+  No `dc3_queue_depth`-style gauge query.
+
+1-hour gate: `live_n` per bulk > 0 while the live pool exists; `null_n`
+per bulk down vs the pre-change hour; `claim_chan_depth` still flickers
+> 0 and pool idle flat (fallback proves no starvation);
+`no_peers`/claim flat or down, `ok`/claim up.
+Risk: none of the old ones remain — fallback removes the starvation and
+leak risks; the only cost is one extra claim round trip per scan while
+the live pool is dry (the scan already runs ~1.5/s).
 
 ## 3. Two-stage fetch (cheap lookup, expensive dial)
 
@@ -76,7 +112,8 @@ magnitude more than the DHT lookup that `obtain()` (`fetch.rs:742-824`)
 already runs first (hints → `scrape_peers` lookup → dial up to
 `MAX_PEER_ATTEMPTS = 8`, `PARALLEL_ATTEMPTS = 3`, `fetch.rs:63-66`).
 
-Change (fetch side — consumes the deferred keys step 2 leaves):
+Change (fetch side — needs its own justification now: step 2's fallback
+leaves no deferred backlog, so this step no longer "consumes" anything):
 - NULL-est keys get lookup-only passes that populate the estimate via the
   existing piggyback (`fetch.rs:790-799`) and requeue; only keys with
   dialable peers or `est > 0` spend connection/byte budget (`connections`,
