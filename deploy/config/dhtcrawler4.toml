@@ -12,7 +12,7 @@ name = "dc4"
 # Each role connects as its own least-privilege user (see deploy/docker-compose.yml).
 user = "dc4_crawler"
 password_file = "/run/secrets/db_password"
-max_connections = 16
+max_connections = 8
 
 # Optional per-role credentials, used by `dhtcrawler4 all` (one pool per role).
 # [database.crawler]
@@ -41,8 +41,10 @@ bootstrap = [
 # Routing-table state (node ids, a few hundred contacts). Never contains peers.
 state_dir = "/var/lib/dhtcrawler4"
 # Global outbound DHT packet budget. Sized for a server; lower it on a
-# home connection.
-max_packets_per_sec = 1000
+# home connection. Politeness toward any single node comes from the 1 s
+# per-address query spacing, so this aggregate only bounds total wire bytes
+# (~1 MB/s at most for small queries).
+max_packets_per_sec = 3000
 # Sampler workers (one query each at a time): timeout-bound mixes sustain
 # roughly concurrency / 4 s sends, so this floors worst-case discovery.
 sampler_concurrency = 160

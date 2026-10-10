@@ -9,8 +9,10 @@ use crate::krpc::MAX_DATAGRAM_OUT;
 
 /// Default DHT port.
 pub const DEFAULT_PORT: u16 = 6881;
-/// Default global send budget in packets per second (design §3).
-pub const DEFAULT_MAX_PACKETS_PER_SEC: u32 = 1000;
+/// Default global send budget in packets per second (design §3): 3000 small
+/// queries are well under 1 MB/s of wire traffic, and politeness toward any
+/// single node comes from the 1 s per-address spacing, not this aggregate.
+pub const DEFAULT_MAX_PACKETS_PER_SEC: u32 = 3000;
 /// Default number of concurrent `sample_infohashes` queries.
 pub const DEFAULT_SAMPLER_CONCURRENCY: usize = 160;
 /// Default client version sent in `v`: "DC" plus version 0.1.
@@ -337,7 +339,7 @@ mod tests {
             ]
         );
         assert_eq!(c.state_file, None);
-        assert_eq!(c.max_packets_per_sec, 1000);
+        assert_eq!(c.max_packets_per_sec, DEFAULT_MAX_PACKETS_PER_SEC);
         assert_eq!(c.scrape_packets_per_sec, 100);
         assert!(c.sampler);
         assert_eq!(c.sampler_concurrency, 160);
@@ -389,7 +391,7 @@ mod tests {
         // `query_scrape` charges `scrape_budget`, `query_gated` charges
         // `budget`; both share per-address spacing).
         assert_eq!(DEFAULT_SCRAPE_PACKETS_PER_SEC, 100);
-        assert_eq!(DEFAULT_MAX_PACKETS_PER_SEC, 1000);
+        assert_eq!(DEFAULT_MAX_PACKETS_PER_SEC, 3000);
         let c = DhtConfig::default();
         assert!(c.scrape_packets_per_sec < c.max_packets_per_sec);
         assert!(c.validate().is_ok());

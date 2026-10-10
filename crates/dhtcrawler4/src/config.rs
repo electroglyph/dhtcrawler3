@@ -142,7 +142,7 @@ impl Default for DatabaseConfig {
             name: "dc4".into(),
             user: "dc4_crawler".into(),
             password_file: PathBuf::from("/run/secrets/db_password"),
-            max_connections: 16,
+            max_connections: 8,
             url: None,
             crawler: None,
             indexer: None,
