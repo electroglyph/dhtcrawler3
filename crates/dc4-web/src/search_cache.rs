@@ -84,6 +84,11 @@ pub(crate) struct CacheKey {
 /// `hits.is_empty()` (shared by a flight, never inserted) and index
 /// failures are `Err`. Shared via `Arc` so [`Failure`] never needs `Clone`.
 pub(crate) type Flight = Result<(SearchResults, IndexStamp), Failure>;
+/// One singleflight cell plus when its flight started (for abandonment sweep).
+type InflightFlight = (
+    std::sync::Arc<OnceCell<std::sync::Arc<Flight>>>,
+    tokio::time::Instant,
+);
 
 struct Entry {
     results: SearchResults,
@@ -97,8 +102,11 @@ struct Inner {
     /// One cell per concurrently missed distinct key; removed when its
     /// flight completes. The outer `Arc` lets the leader remove the entry
     /// while waiters still await the cell; the inner `Arc` shares the
-    /// outcome without cloning `SearchResults`.
-    inflight: HashMap<CacheKey, std::sync::Arc<OnceCell<std::sync::Arc<Flight>>>>,
+    /// outcome without cloning `SearchResults`. Entries whose flight
+    /// started longer than the entry TTL ago are swept in `pre_search`:
+    /// a cancelled leader never installs, so without the sweep the map
+    /// (and the query text in its keys) would grow without bound.
+    inflight: HashMap<CacheKey, InflightFlight>,
 }
 
 /// The search query cache. Disabled when the config has zero entries or a
@@ -180,6 +188,13 @@ impl SearchCache {
     /// before any `.await`. `None` when disabled.
     pub(crate) fn pre_search(&self, key: &CacheKey, search: &SearchHandle) -> Option<PreSearch> {
         let mut inner = self.lock()?;
+        let at = now();
+        // Abandoned flights first: a cancelled leader never installs, so
+        // entries older than the entry TTL are dropped (waiters holding the
+        // cell are unaffected; a later install for a swept cell no-ops).
+        inner
+            .inflight
+            .retain(|_, (_, since)| at.saturating_duration_since(*since) < self.ttl);
         if !search.stamp_matches(&inner.stamp) {
             inner.stamp = search.stamp();
             inner.map.clear();
@@ -218,13 +233,13 @@ impl SearchCache {
                 }
             }
         }
-        if let Some(cell) = inner.inflight.get(key) {
+        if let Some((cell, _)) = inner.inflight.get(key) {
             return Some(PreSearch::Wait(std::sync::Arc::clone(cell)));
         }
         let cell = std::sync::Arc::new(OnceCell::new());
         inner
             .inflight
-            .insert(key.clone(), std::sync::Arc::clone(&cell));
+            .insert(key.clone(), (std::sync::Arc::clone(&cell), at));
         metrics::gauge!(metric_names::SEARCH_CACHE_ENTRIES).set(inner.map.len() as f64);
         Some(PreSearch::Lead(cell))
     }
@@ -246,7 +261,7 @@ impl SearchCache {
         if inner
             .inflight
             .get(key)
-            .is_none_or(|c| !std::sync::Arc::ptr_eq(c, cell))
+            .is_none_or(|(c, _)| !std::sync::Arc::ptr_eq(c, cell))
         {
             return;
         }
@@ -561,6 +576,26 @@ mod tests {
         assert!(search.stamp_matches(&cache.lock().unwrap().stamp));
         assert_eq!(cache.len(), 0);
         drop(dir);
+    }
+
+    #[tokio::test]
+    async fn abandoned_flights_are_swept() {
+        let (_dir, search) = handle();
+        let cache = SearchCache::new(config(100, Duration::from_millis(50)), search.stamp());
+        let k = key("q");
+        // A leader starts a flight and is cancelled before installing.
+        let lead = match cache.pre_search(&k, &search).unwrap() {
+            PreSearch::Lead(cell) => cell,
+            _ => panic!("first miss leads"),
+        };
+        drop(lead);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        // The next identical miss starts a fresh flight instead of waiting
+        // on the dead cell forever (and the dead query text is released).
+        assert!(matches!(
+            cache.pre_search(&k, &search).unwrap(),
+            PreSearch::Lead(_)
+        ));
     }
 
     #[tokio::test]
