@@ -123,12 +123,13 @@ async fn scenario() {
     assert_eq!(store.torrent_count(), 3);
     assert!(store.pending_keys().is_empty());
 
-    // The keys reached the queue as priority keys, found by BEP 51.
+    // The keys reached the queue as non-priority keys, found by BEP 51
+    // sampling (only announces are priority).
     let observed = store.observed();
     for key in [clean.key, second.key, third.key] {
         assert!(
-            observed.iter().any(|o| o.key == key && o.priority),
-            "{key} was not observed as a priority key"
+            observed.iter().any(|o| o.key == key && !o.priority),
+            "{key} was not observed as a non-priority key"
         );
     }
     let stats = crawler.dht().stats();

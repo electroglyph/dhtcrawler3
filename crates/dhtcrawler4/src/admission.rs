@@ -5,8 +5,12 @@
 //! 2. A key already in the [`DedupSet`] is skipped.
 //! 3. A key seen only through `get_peers` is admitted once sightings came
 //!    from at least two /24 (IPv4) or /48 (IPv6) networks within the current
-//!    dedup generation ([`SourceTracker`]). Sampled and announced keys are
-//!    admitted at once, as priority keys.
+//!    dedup generation ([`SourceTracker`]). Sampled keys are admitted at
+//!    once as non-priority keys (the sighting is our own sampler's, not a
+//!    stranger's claim needing corroboration); only announced keys are
+//!    admitted at once as priority keys. While the queue is under pressure
+//!    (the last flush saw depth at or above the cap), sampled discoveries
+//!    shed before the batch without entering the dedup set.
 //! 4. Admitted keys are merged into a batch that is written with
 //!    `observe` every second or every 1 000 keys, retrying with backoff.
 //! 5. A key enters the dedup set only after the `observe` call that
@@ -453,6 +457,13 @@ pub struct Admission<S> {
     /// lookup per discovery would kill throughput, so verdicts are cached
     /// here and refreshed in batch by [`Admission::flush`].
     removal_cache: HashMap<DhtKey, RemovalVerdict>,
+    /// Early-shed flag for sampled discoveries, refreshed by
+    /// [`Admission::flush`] from `pending_depth` (set at or above
+    /// `max_pending`, mirroring the store's priority-only gate). Read by the
+    /// sync [`Admission::handle`]; both run on the same task (`run` owns
+    /// `self`), so no synchronisation is needed. Shed keys skip the dedup
+    /// set, so clearing the flag admits them immediately again.
+    shed_sampler: bool,
 }
 
 /// A cached removal-memory verdict.
@@ -523,6 +534,7 @@ impl<S: CrawlStore> Admission<S> {
             batch: HashMap::new(),
             seed_announced: HashSet::new(),
             removal_cache: HashMap::new(),
+            shed_sampler: false,
         }
     }
 
@@ -573,18 +585,35 @@ impl<S: CrawlStore> Admission<S> {
         if self.dedup.contains(&event.key) {
             return;
         }
-        let priority = source != Source::GetPeers;
+        // Only announces are priority: sampled keys join get_peers keys as
+        // non-priority, so sampler volume no longer crowds announces out of
+        // the queue under pressure.
+        let priority = source == Source::Announce;
         if let Some(pending) = self.batch.get_mut(&event.key) {
             pending.sightings = pending.sightings.saturating_add(1);
             pending.priority |= priority;
             return;
         }
+        // Depth-gated early shed: while the flag is set these keys would be
+        // dropped by the store's priority-only gate anyway, so shedding them
+        // here skips the batch write. Shed keys stay out of the dedup set so
+        // recovery is instant; get_peers keys keep flowing through their
+        // two-network tracker (their volume is ~1% of the sampler's).
+        if source == Source::Sample && self.shed_sampler {
+            metrics::counter!(METRIC_BLOCKED, "reason" => "shed_sampler").increment(1);
+            return;
+        }
         if priority {
             self.sources.remove(&event.key);
-        } else {
+        } else if source == Source::GetPeers {
             if self.sources.record(event.key, event.from) < GET_PEERS_MIN_SOURCES {
                 return;
             }
+            self.sources.remove(&event.key);
+        } else {
+            // A sampled sighting is our own sampler's, not a stranger's
+            // claim: admit at once as non-priority, dropping any get_peers
+            // tracking for the key.
             self.sources.remove(&event.key);
         }
         self.batch.insert(
@@ -710,6 +739,17 @@ impl<S: CrawlStore> Admission<S> {
         cancel: Option<&CancellationToken>,
         deadline: Option<Instant>,
     ) -> Result<ObserveOutcome, FlushStopped> {
+        // Refresh the early-shed flag even for empty batches: an engaged
+        // shed starves the batch, so gating the poll on batch work would
+        // latch the shed on forever. The flag mirrors the store's
+        // priority-only gate (`depth >= max_pending`, corpses included).
+        match self.store.pending_depth().await {
+            Ok(depth) => self.shed_sampler = depth >= self.max_pending,
+            Err(e) => tracing::warn!(
+                error = %e,
+                "reading queue depth failed; keeping the shed flag"
+            ),
+        }
         let seeds: Vec<DhtKey> = self.seed_announced.iter().copied().collect();
         self.seed_announced.clear();
         if !seeds.is_empty()
@@ -1072,7 +1112,8 @@ mod tests {
         assert!(a.sources().is_empty());
         // More sightings merge into the batch.
         a.handle(event(k, Source::GetPeers, "9.9.9.9", None), &own, now);
-        // Samples and announces are admitted at once, with priority.
+        // Announce is admitted at once with priority; sample is admitted at
+        // once without it (only announces are priority now).
         a.handle(event(key(8), Source::Sample, "1.2.3.4", None), &own, now);
         a.handle(event(key(9), Source::Announce, "1.2.3.4", None), &own, now);
         assert_eq!(a.batch_len(), 3);
@@ -1081,7 +1122,8 @@ mod tests {
         let find = |k: DhtKey| observed.iter().find(|o| o.key == k).copied().unwrap();
         assert_eq!(find(key(7)).sightings, 2);
         assert!(!find(key(7)).priority);
-        assert!(find(key(8)).priority && find(key(9)).priority);
+        assert!(!find(key(8)).priority);
+        assert!(find(key(9)).priority);
         assert_eq!(store.pending_keys().len(), 3);
         // Keys now in the dedup set are skipped.
         a.handle(event(key(8), Source::Sample, "1.2.3.4", None), &own, now);
@@ -1104,6 +1146,149 @@ mod tests {
             &own,
             now,
         );
+        assert_eq!(a.batch_len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sample_admitted_at_once_without_priority() {
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        // One sighting is enough (no two-network rule for our own sampler),
+        // but the key is non-priority: only announces are priority.
+        a.handle(event(key(1), Source::Sample, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        a.flush(None, None).await.unwrap();
+        let observed = store.observed();
+        assert_eq!(observed.len(), 1);
+        assert!(!observed[0].priority);
+        assert_eq!(store.pending_keys(), vec![key(1)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sample_clears_get_peers_tracking() {
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        // One get_peers sighting only tracks the key ...
+        a.handle(event(key(1), Source::GetPeers, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 0);
+        assert_eq!(a.sources().len(), 1);
+        // ... then our own sampler sees it: admitted at once, non-priority,
+        // tracking dropped.
+        a.handle(event(key(1), Source::Sample, "9.9.9.9", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        assert!(a.sources().is_empty());
+        a.flush(None, None).await.unwrap();
+        let observed = store.observed();
+        assert_eq!(observed.len(), 1);
+        assert!(!observed[0].priority);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn announce_merges_priority_into_a_sampled_batch_entry() {
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        a.handle(event(key(1), Source::Sample, "1.2.3.4", None), &own, now);
+        a.handle(event(key(1), Source::Announce, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        a.flush(None, None).await.unwrap();
+        let observed = store.observed();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].sightings, 2);
+        assert!(observed[0].priority);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shed_drops_only_samples_while_set() {
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        a.shed_sampler = true;
+        // Samples shed before the batch and stay out of the dedup set ...
+        a.handle(event(key(1), Source::Sample, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 0);
+        assert!(!a.dedup().contains(&key(1)));
+        // ... announces still flow ...
+        a.handle(event(key(2), Source::Announce, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        // ... and get_peers sightings still count toward their two networks.
+        a.handle(event(key(3), Source::GetPeers, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        a.handle(event(key(3), Source::GetPeers, "9.9.9.9", None), &own, now);
+        assert_eq!(a.batch_len(), 2);
+        // A re-sighted shed key sheds again instead of hiding in dedup.
+        a.handle(event(key(1), Source::Sample, "5.6.7.8", None), &own, now);
+        assert_eq!(a.batch_len(), 2);
+        assert!(!a.dedup().contains(&key(1)));
+        let out = a.flush(None, None).await.unwrap();
+        assert_eq!(out.queued, 2);
+        assert_eq!(store.pending_keys().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shed_merges_into_an_existing_batch_entry() {
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        a.handle(event(key(1), Source::Announce, "1.2.3.4", None), &own, now);
+        a.shed_sampler = true;
+        // Already batched: the re-sighting merges (sightings grow, priority
+        // kept) instead of shedding — the batch write was already paid for.
+        a.handle(event(key(1), Source::Sample, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        a.flush(None, None).await.unwrap();
+        let observed = store.observed();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].sightings, 2);
+        assert!(observed[0].priority);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shed_flag_tracks_depth_across_flushes() {
+        use crate::stores::CrawlStore;
+
+        let store = MemoryStore::new();
+        let tuning = AdmissionTuning::default();
+        let mut a = Admission::new(
+            store.clone(),
+            2,
+            PeerFilter::PRODUCTION,
+            tuning,
+            shared_hints(&tuning),
+            Instant::now(),
+        );
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        assert!(!a.shed_sampler);
+        // Fill to the cap: the flag is polled before the observe, so it
+        // engages on the following flush, not this one.
+        a.handle(event(key(1), Source::Announce, "1.2.3.4", None), &own, now);
+        a.handle(event(key(2), Source::Announce, "1.2.3.4", None), &own, now);
+        a.flush(None, None).await.unwrap();
+        assert_eq!(store.pending_keys().len(), 2);
+        assert!(!a.shed_sampler);
+        // An empty flush still polls: without this an engaged shed would
+        // starve the batch and latch on forever.
+        a.flush(None, None).await.unwrap();
+        assert!(a.shed_sampler);
+        // Samples shed while the flag is set ...
+        a.handle(event(key(3), Source::Sample, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 0);
+        // ... and flow again once depth falls below the cap. Draining via
+        // completion removes the rows (a claim would only lease them).
+        for key in [key(1), key(2)] {
+            store.complete(&key, &stored_torrent(key)).await.unwrap();
+        }
+        a.flush(None, None).await.unwrap();
+        assert!(!a.shed_sampler);
+        a.handle(event(key(3), Source::Sample, "1.2.3.4", None), &own, now);
         assert_eq!(a.batch_len(), 1);
     }
 
