@@ -105,15 +105,18 @@ Not implemented:
   - The node ID changes, and the table re-bootstraps, at most once per hour.
 - **Sampler.**
   - A node is sampled again only after `max(interval, 300 s)`. Nodes without BEP 51
-    wait 6 h; nodes that time out wait 1 h.
+    wait 6 h; consecutive timeouts back off 1 h, 2 h, 4 h, then 6 h per endpoint.
+  - Sampler queries time out after 2 s so slow nodes fail fast; lookups still wait 4 s.
   - A node is remembered by its endpoint and, once it has answered, by its node ID.
   - At most 20 samples are taken from one reply, none from a reply under an
     unexpected node ID, and at most 200 per /24 or /48 per 10 min. At most 32
     nodes per response enter the sampler frontier.
   - A full frontier drops its oldest candidate for a new one; candidates queued
     more than 15 min ago are skipped.
-  - The visited map (4 000 000 entries per family) never forgets an unexpired entry.
-    When it is full, new nodes wait (`sampler_visited_full`).
+  - The visited map (4 000 000 entries per family) first forgets expired entries;
+    when still full it evicts the farthest next-sample times first, sparing
+    in-flight keys. Picks refused for lack of room count `sampler_visited_full`;
+    picks that find nothing count `sampler_pick_empty`.
   - The send path checks the recorded time once more. `sampler_early` counts failures
     and must stay 0.
 - **Bounded state.** Everything has a named limit:

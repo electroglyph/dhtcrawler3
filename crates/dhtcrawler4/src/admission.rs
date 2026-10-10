@@ -9,9 +9,8 @@
 //!    non-priority key subject to a per-flush-cycle cap
 //!    ([`GET_PEERS_SINGLE_CAP`], 20% of [`BATCH_MAX_KEYS`]). Sampled keys
 //!    are admitted at once as non-priority keys (the sighting is our own
-//!    once as non-priority keys (the sighting is our own sampler's, not a
-//!    stranger's claim needing corroboration); only announced keys are
-//!    admitted at once as priority keys. While the queue is under pressure
+//!    sampler's, not a stranger's claim needing corroboration); only
+//!    announced keys are admitted at once as priority keys. While the queue is under pressure
 //!    (the last flush saw depth at or above the cap), sampled discoveries
 //!    shed before the batch without entering the dedup set.
 //! 4. Admitted keys are merged into a batch that is written with

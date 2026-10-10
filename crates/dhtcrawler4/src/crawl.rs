@@ -464,6 +464,7 @@ async fn track_readiness<S: CrawlStore>(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use dc4_dht::FamilyStats;
 
     #[tokio::test]
     async fn admission_early_exit_keeps_the_cause() {
@@ -583,6 +584,20 @@ mod tests {
     #[test]
     fn snapshot_export_does_not_need_a_recorder() {
         export_snapshot(&DhtStatsSnapshot::default());
+        let s = DhtStatsSnapshot {
+            sampler_pick_empty: 3,
+            v4: FamilyStats {
+                recv_errors: 1,
+                sampler_frontier: 7,
+                ..FamilyStats::default()
+            },
+            v6: FamilyStats {
+                sampler_visited: 9,
+                ..FamilyStats::default()
+            },
+            ..DhtStatsSnapshot::default()
+        };
+        export_snapshot(&s);
     }
 
     #[tokio::test]

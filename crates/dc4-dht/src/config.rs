@@ -364,7 +364,10 @@ mod tests {
         assert_eq!(t.scrape_query_timeout, Duration::from_secs(10));
         assert_eq!(t.per_address_query_spacing, Duration::from_secs(1));
         assert_eq!((t.inbound_rate, t.inbound_burst), (4, 8));
-        assert_eq!(t.responder_replies_per_sec, DEFAULT_RESPONDER_REPLIES_PER_SEC);
+        assert_eq!(
+            t.responder_replies_per_sec,
+            DEFAULT_RESPONDER_REPLIES_PER_SEC
+        );
         assert_eq!(t.responder_bytes_per_sec, DEFAULT_RESPONDER_BYTES_PER_SEC);
         assert_eq!(t.peer_ttl, Duration::from_secs(45 * 60));
         assert_eq!(t.external_ip_votes, 10);

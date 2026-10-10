@@ -1373,6 +1373,7 @@ mod tests {
             ("DC4_LOG__FORMAT", "pretty"),
             ("DC4_LOG__LEVEL", "debug"),
             ("DC4_CRAWL__BIND_V6", ""),
+            ("DC4_CRAWL__BEP42_R", "3"),
             ("DC4_DATABASE__CRAWLER__USER", "crawler2"),
             ("DC4_DATABASE__URL", "postgres://h:5433/other"),
             // Ignored: no double underscore.
@@ -1385,6 +1386,7 @@ mod tests {
         assert_eq!(c.database.user, "dc4_web");
         assert_eq!(c.database.max_connections, 4);
         assert!(c.crawl.read_only);
+        assert_eq!(c.crawl.bep42_r, Some(3));
         assert_eq!(c.crawl.bootstrap, ["a.example:1", "b.example:2"]);
         assert_eq!(
             c.trusted_proxies().unwrap(),

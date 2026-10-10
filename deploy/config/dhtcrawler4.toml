@@ -47,7 +47,8 @@ state_dir = "/var/lib/dhtcrawler4"
 # response sizes).
 max_packets_per_sec = 6000
 # Sampler workers (one query each at a time): timeout-bound mixes sustain
-# roughly concurrency / 4 s sends, so this floors worst-case discovery.
+# roughly concurrency / 2 s sends (sampler queries time out after 2 s),
+# so this floors worst-case discovery.
 sampler_concurrency = 512
 # Answer no DHT queries and mark ours read-only (BEP 43). Leave false to be a
 # full, reciprocating DHT node.
