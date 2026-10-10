@@ -24,10 +24,9 @@ fuzz_target!(|data: &[u8]| {
     }
     let split = fuzzing::frames(data, MAX_FRAME_AFTER_EXT_HANDSHAKE);
     let read = fuzzing::read_frames(data);
-    // The async reader discards large non-extended frames that the
-    // splitter refuses, so it sees at least as many frames.
-    assert!(
-        read >= split,
+    // The splitter applies the reader's caps, so both see the same frames.
+    assert_eq!(
+        read, split,
         "read_frame saw {read} frames, split_frame {split}"
     );
     fuzzing::message(data);

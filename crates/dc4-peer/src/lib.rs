@@ -209,9 +209,11 @@ pub mod fuzzing {
         wire::check_frame_len(header, max).ok()
     }
 
-    /// Splits `data` into frames of at most `max` bytes and classifies each
-    /// one, parsing extension bodies as an extended handshake or a
-    /// `ut_metadata` message. Returns the number of whole frames seen.
+    /// Splits `data` into frames with the reader's caps (`ext_max` for
+    /// extension frames, the discard budget for anything else) and
+    /// classifies each one, parsing extension bodies as an extended
+    /// handshake or a `ut_metadata` message. Returns the number of whole
+    /// frames seen.
     pub fn frames(data: &[u8], max: usize) -> usize {
         let mut rest = data;
         let mut count = 0usize;

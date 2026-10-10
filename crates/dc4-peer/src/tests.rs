@@ -45,6 +45,39 @@ fn handshake_rejects_bad_input() {
 }
 
 #[test]
+fn split_frame_uses_the_reader_caps() {
+    // Non-extended frame above ext_max but within the discard budget: the
+    // splitter hands it over like the reader skips it, instead of refusing.
+    let big = (MAX_FRAME_AFTER_EXT_HANDSHAKE + 10) as u32;
+    let mut buf = big.to_be_bytes().to_vec();
+    buf.push(4); // "have"
+    buf.resize(4 + big as usize, 0);
+    let (payload, used) = wire::split_frame(&buf, MAX_FRAME_AFTER_EXT_HANDSHAKE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload[0], 4);
+    assert_eq!(used, buf.len());
+    // Extended frame above ext_max: refused.
+    let mut ext = big.to_be_bytes().to_vec();
+    ext.push(20);
+    ext.resize(4 + big as usize, 0);
+    assert!(matches!(
+        wire::split_frame(&ext, MAX_FRAME_AFTER_EXT_HANDSHAKE),
+        Err(FetchError::MessageTooLarge { .. })
+    ));
+    // Above the discard budget: refused whatever the ID byte says.
+    let huge = (MAX_DISCARD_FRAME + 1) as u32;
+    for id in [4u8, 20] {
+        let mut buf = huge.to_be_bytes().to_vec();
+        buf.push(id);
+        assert!(matches!(
+            wire::split_frame(&buf, MAX_FRAME_AFTER_EXT_HANDSHAKE),
+            Err(FetchError::MessageTooLarge { .. })
+        ));
+    }
+}
+
+#[test]
 fn frame_length_is_checked_before_reading() {
     assert_eq!(wire::check_frame_len(16u32.to_be_bytes(), 16), Ok(16));
     assert_eq!(

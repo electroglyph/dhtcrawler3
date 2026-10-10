@@ -194,17 +194,33 @@ async fn discard<R: AsyncRead + Unpin>(r: &mut R, mut n: usize) -> Result<(), Fe
 
 /// Splits one frame off the front of `buf`. Returns `None` if `buf` does not
 /// yet hold a whole frame, otherwise the payload and the bytes consumed.
+///
+/// The length caps mirror [`read_frame`]: nothing may exceed the larger of
+/// `ext_max` and [`MAX_DISCARD_FRAME`], extended frames (`20`) are capped at
+/// `ext_max`, and any other frame is capped at [`MAX_DISCARD_FRAME`] — the
+/// reader skips those bodies, and so does this splitter by handing the
+/// payload to the caller for classification (non-extension payloads parse
+/// as ignored messages). Fuzzing models the reader through this function.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn split_frame(buf: &[u8], max: usize) -> Result<Option<(&[u8], usize)>, FetchError> {
+pub(crate) fn split_frame(
+    buf: &[u8],
+    ext_max: usize,
+) -> Result<Option<(&[u8], usize)>, FetchError> {
     let Some((header, rest)) = buf.split_first_chunk::<FRAME_HEADER_LEN>() else {
         return Ok(None);
     };
-    let len = check_frame_len(*header, max)?;
-    match rest.get(..len) {
-        None => Ok(None),
-        // len <= max <= buf.len(), so the addition cannot overflow.
-        Some(payload) => Ok(Some((payload, len.saturating_add(FRAME_HEADER_LEN)))),
-    }
+    let len = check_frame_len(*header, MAX_DISCARD_FRAME.max(ext_max))?;
+    let Some(payload) = rest.get(..len) else {
+        return Ok(None);
+    };
+    let cap = if payload.first() == Some(&MSG_EXTENDED) {
+        ext_max
+    } else {
+        MAX_DISCARD_FRAME
+    };
+    check_frame_len(*header, cap)?;
+    // len <= cap <= buf.len(), so the addition cannot overflow.
+    Ok(Some((payload, len.saturating_add(FRAME_HEADER_LEN))))
 }
 
 /// A peer-wire message, as far as metadata fetching cares.
