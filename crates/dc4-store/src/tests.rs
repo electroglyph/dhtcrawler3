@@ -574,6 +574,17 @@ async fn fail_backs_off_and_gives_up(pool: PgPool) {
     assert_eq!((st.pending, st.gave_up), (0, 1));
     assert_eq!(s.pending_depth().await.unwrap(), 1);
 
+    // Repeat failures after give-up change nothing and count nothing.
+    assert!(!s.fail(&k).await.unwrap());
+    assert!(!s.give_up(&k).await.unwrap());
+    let frozen: i32 = sqlx::query_scalar("SELECT attempts FROM pending WHERE dht_key = $1")
+        .bind(k.0.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(frozen, MAX_FETCH_ATTEMPTS);
+    assert_eq!(today(&pool).await.fetch_failed, MAX_FETCH_ATTEMPTS as u64);
+
     // The cap applies to large attempt counts.
     sqlx::query("UPDATE pending SET attempts = 40, gave_up = false")
         .execute(&pool)
@@ -2716,6 +2727,17 @@ async fn fail_and_give_up_batches_merge_duplicates(pool: PgPool) {
     let missing = key(75);
     s.fail_batch(&[missing]).await.unwrap();
     s.give_up_batch(&[missing]).await.unwrap();
+    assert_eq!(today(&pool).await.fetch_failed, 2);
+
+    // Repeat batches after give-up change nothing and count nothing.
+    s.fail_batch(&[k]).await.unwrap();
+    s.give_up_batch(&[k]).await.unwrap();
+    let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM pending WHERE dht_key = $1")
+        .bind(k.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 2);
     assert_eq!(today(&pool).await.fetch_failed, 2);
 }
 

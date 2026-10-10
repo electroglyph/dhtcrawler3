@@ -148,7 +148,7 @@ UPDATE pending
        next_attempt_at = now() + least(make_interval(secs => $2) * power(2, least(attempts, 30)),
                                        make_interval(secs => $3)),
        gave_up = attempts + 1 >= $4
- WHERE dht_key = $1
+ WHERE dht_key = $1 AND NOT gave_up
 RETURNING gave_up";
 
 const GIVE_UP_SQL: &str = "\
@@ -157,15 +157,17 @@ UPDATE pending
        last_attempt_at = now(),
        lease_until = NULL,
        gave_up = true
- WHERE dht_key = $1
+ WHERE dht_key = $1 AND NOT gave_up
 RETURNING gave_up";
 
 /// [`Store::fail_batch`]: one transaction for many keys. The backoff math is
 /// identical to `FAIL_SQL`; matched keys come back for the daily count.
-const FAIL_BATCH_SQL: &str = "UPDATE pending SET attempts = attempts + 1, last_attempt_at = now(), lease_until = NULL, next_attempt_at = now() + least(make_interval(secs => $2) * power(2, least(attempts, 30)), make_interval(secs => $3)), gave_up = attempts + 1 >= $4 WHERE dht_key = ANY($1::bytea[]) RETURNING dht_key";
+/// Already-gave-up rows are skipped, as in `FAIL_SQL`.
+const FAIL_BATCH_SQL: &str = "UPDATE pending SET attempts = attempts + 1, last_attempt_at = now(), lease_until = NULL, next_attempt_at = now() + least(make_interval(secs => $2) * power(2, least(attempts, 30)), make_interval(secs => $3)), gave_up = attempts + 1 >= $4 WHERE dht_key = ANY($1::bytea[]) AND NOT gave_up RETURNING dht_key";
 
 /// [`Store::give_up_batch`]: one transaction for many keys.
-const GIVE_UP_BATCH_SQL: &str = "UPDATE pending SET attempts = attempts + 1, last_attempt_at = now(), lease_until = NULL, gave_up = true WHERE dht_key = ANY($1::bytea[]) RETURNING dht_key";
+/// Already-gave-up rows are skipped, as in `GIVE_UP_SQL`.
+const GIVE_UP_BATCH_SQL: &str = "UPDATE pending SET attempts = attempts + 1, last_attempt_at = now(), lease_until = NULL, gave_up = true WHERE dht_key = ANY($1::bytea[]) AND NOT gave_up RETURNING dht_key";
 
 const TORRENT_UPDATE_SQL: &str = "\
 UPDATE torrents
@@ -656,7 +658,8 @@ impl Store {
     /// Records a failed fetch: `attempts += 1`, retry after
     /// min(5 min × 2^(previous attempts), 7 days), and give up after
     /// [`MAX_FETCH_ATTEMPTS`] attempts. Releases the lease. Returns true when
-    /// the key has now given up; false also when no queue row exists.
+    /// the key has now given up; false when no queue row exists or the key
+    /// already gave up (a second failure changes nothing and counts nothing).
     pub async fn fail(&self, key: &DhtKey) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let gave_up: Option<bool> = sqlx::query_scalar(FAIL_SQL)
@@ -675,7 +678,8 @@ impl Store {
 
     /// Records a fetch that can never succeed (verified metadata that does not
     /// parse or cannot be stored): `attempts += 1` and the key gives up at
-    /// once. Releases the lease. Returns false when no queue row exists.
+    /// once. Releases the lease. Returns false when no queue row exists or
+    /// the key already gave up (a second call changes nothing).
     pub async fn give_up(&self, key: &DhtKey) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let found: Option<bool> = sqlx::query_scalar(GIVE_UP_SQL)

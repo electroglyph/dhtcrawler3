@@ -470,6 +470,11 @@ impl CrawlStore for MemoryStore {
         let Some(p) = state.pending.get_mut(key) else {
             return Ok(false);
         };
+        // Already gave up: production matches no row, so attempts and the
+        // daily count stay put.
+        if p.gave_up {
+            return Ok(false);
+        }
         let doubling = 2u32.saturating_pow(p.attempts);
         p.attempts = p.attempts.saturating_add(1);
         p.last_attempt = Some(now);
@@ -489,6 +494,9 @@ impl CrawlStore for MemoryStore {
         let Some(p) = state.pending.get_mut(key) else {
             return Ok(false);
         };
+        if p.gave_up {
+            return Ok(false);
+        }
         p.attempts = p.attempts.saturating_add(1);
         p.last_attempt = Some(Instant::now());
         p.lease_until = None;
