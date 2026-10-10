@@ -279,11 +279,8 @@ impl CrawlStore for MemoryStore {
     }
 
     async fn claim(&self, n: i64, lease: Duration) -> Result<Vec<PendingItem>> {
-        {
-            let mut state = self.lock();
-            state.claim_calls = state.claim_calls.saturating_add(1);
-        }
         let mut state = self.lock();
+        state.claim_calls = state.claim_calls.saturating_add(1);
         let now = Instant::now();
         let limit = usize::try_from(n.max(0)).unwrap_or(0);
         // Fresh keys first, then liveness (known-live keys), then oldest
