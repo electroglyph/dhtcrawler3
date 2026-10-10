@@ -492,6 +492,19 @@ fn prefix_expansion_is_bounded_past_scan_budget() {
 }
 
 #[test]
+fn upsert_truncates_huge_names_like_huge_file_lists() {
+    // 20k distinct small tokens (~140 KiB of name): only the first 64 KiB
+    // is indexed, so an early term hits and a term past the cut does not.
+    let name = (0..20_000)
+        .map(|i| format!("w{i:05}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let index = index_with(&[doc(1, &name, "")]);
+    assert!(!ids(&index, "w00000").is_empty());
+    assert!(ids(&index, "w19999").is_empty());
+}
+
+#[test]
 fn prefix_expansions_union_covers_both_fields_whole() {
     // 250 name terms and 250 file terms under one prefix: each field
     // contributes a full per-field budget, so the policy gate sees all

@@ -827,16 +827,21 @@ impl std::fmt::Debug for IndexWriterHandle {
 }
 
 impl IndexWriterHandle {
-    /// Replaces any document with the same id by `doc`.
+    /// Replaces any document with the same id by `doc`. Both free-text
+    /// fields are truncated to [`FILES_TEXT_MAX_BYTES`]: stored rows are
+    /// already smaller (the store validates names and file lists on write),
+    /// so the cut only ever bites on out-of-band documents, which must not
+    /// be able to pin tokenizer and indexing work.
     pub fn upsert(&mut self, doc: &IndexDoc) -> Result<()> {
         let f = self.fields;
         self.writer.delete_term(Term::from_field_i64(f.id, doc.id));
+        let name = truncate_on_char_boundary(&doc.name, FILES_TEXT_MAX_BYTES);
         let files = truncate_on_char_boundary(&doc.files, FILES_TEXT_MAX_BYTES);
         let mut d = TantivyDocument::new();
         d.add_i64(f.id, doc.id);
-        d.add_text(f.name, &doc.name);
+        d.add_text(f.name, name);
         d.add_text(f.files, files);
-        d.add_text(f.name_cjk1, &doc.name);
+        d.add_text(f.name_cjk1, name);
         d.add_text(f.files_cjk1, files);
         d.add_u64(f.size, doc.size);
         d.add_i64(f.created, doc.created);
