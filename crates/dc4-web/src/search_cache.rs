@@ -183,6 +183,11 @@ impl SearchCache {
         if !search.stamp_matches(&inner.stamp) {
             inner.stamp = search.stamp();
             inner.map.clear();
+            // In-flight cells belong to the old stamp: drop them so a stale
+            // flight can neither rewind the stamp nor insert stale results
+            // in `install` (its cell is gone, so the install no-ops, while
+            // waiters still holding the cell share its outcome).
+            inner.inflight.clear();
             metrics::counter!(metric_names::SEARCH_CACHE_MISSES, "reason" => "stamp").increment(1);
         } else {
             let live = inner.map.peek(key).map(|e| e.expires_at > now());
@@ -513,6 +518,48 @@ mod tests {
             cache.pre_search(&b, &search).unwrap(),
             PreSearch::Lead(_)
         ));
+        drop(dir);
+    }
+
+    #[test]
+    fn stale_flight_cannot_rewind_the_stamp() {
+        let (dir, search) = handle();
+        let cache = SearchCache::new(config(100, Duration::from_secs(60)), search.stamp());
+        let old_stamp = search.stamp();
+        let k = key("q");
+        // Flight A starts at the old stamp and is still running.
+        let cell = match cache.pre_search(&k, &search).unwrap() {
+            PreSearch::Lead(cell) => cell,
+            _ => panic!("first miss leads"),
+        };
+        // A commit moves the index; the next request adopts it and drops
+        // A's cell along with the entries.
+        let index = search.index();
+        let mut writer = index.writer(20 * 1024 * 1024).unwrap();
+        writer
+            .upsert(&dc4_search::IndexDoc {
+                id: 1,
+                name: "a b".into(),
+                files: String::new(),
+                size: 1,
+                created: 1,
+                seen: 0,
+                file_count: 1,
+            })
+            .unwrap();
+        writer.commit(1).unwrap();
+        index.reload().unwrap();
+        assert!(matches!(
+            cache.pre_search(&key("other"), &search).unwrap(),
+            PreSearch::Lead(_)
+        ));
+        assert!(!search.stamp_matches(&old_stamp));
+        // A completes late with old-stamp results: dropped, and the stamp
+        // never rewinds.
+        let flight = std::sync::Arc::new(Ok((results(&[1]), old_stamp)));
+        cache.install(&k, &cell, flight);
+        assert!(search.stamp_matches(&cache.lock().unwrap().stamp));
+        assert_eq!(cache.len(), 0);
         drop(dir);
     }
 
