@@ -541,6 +541,16 @@ docker compose ps                     # includes healthcheck status
 - **Stop everything:** `docker compose down`. Volumes survive; add `-v` only
   if you mean to wipe the database and index.
 
+#### Multiple crawl replicas on one IP
+
+- One replica per `r`: 8 replicas with distinct `dht_port` 6881-6888, distinct
+  `state_dir`, `bep42_r` 0-7 (`DC4_CRAWL__BEP42_R`), same bootstrap, IP and DB.
+- Stagger starts by ~30 s: each start fires a parallel `find_node` burst at the 4 routers.
+- Shared-DB safety: concurrent `observe` batches lock rows (`SELECT FOR UPDATE`);
+  pre-req is `concurrent_observes_do_not_lose_seen_counts` in `crates/dc4-store/src/tests.rs`.
+- Budget: 8x packet budget (~12 MB/s at full reply rate), 8x RAM/sockets/DB pool.
+- Start with 2-4 replicas, compare the `discovered` slope, then scale to 8.
+
 ### Without Docker
 
 See [Running a server on Ubuntu without Docker](#running-a-server-on-ubuntu-without-docker)

@@ -20,7 +20,7 @@ use crate::node_id::NodeId;
 /// Length of the transaction IDs we send.
 pub(crate) const TID_LEN: usize = 2;
 /// Queries waiting for a reply, per socket.
-pub(crate) const MAX_PENDING_PER_SOCKET: usize = 4096;
+pub(crate) const MAX_PENDING_PER_SOCKET: usize = 16384;
 /// Attempts to find an unused transaction ID for one endpoint.
 const TID_ATTEMPTS: usize = 16;
 /// External-IP votes kept per socket: the most recent voters.
@@ -248,6 +248,8 @@ pub(crate) fn bind_udp(addr: SocketAddr) -> io::Result<UdpSocket> {
     }
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
+    // Larger receive buffer absorbs reply bursts; best-effort (capped rmem).
+    let _ = socket.set_recv_buffer_size(4 * 1024 * 1024);
     UdpSocket::from_std(socket.into())
 }
 
@@ -563,6 +565,11 @@ mod tests {
     async fn binds_both_families() {
         let s4 = bind_udp("127.0.0.1:0".parse().unwrap()).unwrap();
         assert!(s4.local_addr().unwrap().is_ipv4());
+        // Requested 4 MiB above; the OS may clamp, so only check the buffer
+        // grew past a small default rather than the exact size.
+        if let Ok(size) = socket2::SockRef::from(&s4).recv_buffer_size() {
+            assert!(size >= 8 * 1024, "recv buffer suspiciously small: {size}");
+        }
         // IPv6 may be unavailable in some containers; only check it when it works.
         if let Ok(s6) = bind_udp("[::1]:0".parse().unwrap()) {
             assert!(s6.local_addr().unwrap().is_ipv6());

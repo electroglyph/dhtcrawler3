@@ -63,12 +63,12 @@ Not implemented:
 ## Being a good citizen
 
 - **Budgets.**
-  - Outgoing queries: `max_packets_per_sec` in total (default 250) and at least 1 s
-    between queries to one IP.
+  - Outgoing queries: `max_packets_per_sec` in total (default 6000) and at least 1 s
+    between queries to one IP. Sampler concurrency defaults to 512.
   - A query waits at most 4 s for the budget, then is dropped (`throttled`).
   - A lookup sends α = 3 queries at a time and runs at most 8 rounds.
 - **Replies.**
-  - Replies have their own budget: 500 replies/s and 64 000 bytes/s.
+  - Replies have their own budget: 1500 replies/s and 192 000 bytes/s.
   - A query beyond that budget is dropped unanswered (`responder_dropped`).
   - Every datagram we send is at most 1 024 bytes.
 - **Inbound.** Each host (an IPv4 address or an IPv6 /48, one external-IP voter) may send 4 packets/s with a burst of 8, which keeps our replies to it under libtorrent's 5 packets/s ban threshold. The limiter map holds
@@ -108,17 +108,18 @@ Not implemented:
     wait 6 h; nodes that time out wait 1 h.
   - A node is remembered by its endpoint and, once it has answered, by its node ID.
   - At most 20 samples are taken from one reply, none from a reply under an
-    unexpected node ID, and at most 200 per /24 or /48 per 10 min.
+    unexpected node ID, and at most 200 per /24 or /48 per 10 min. At most 32
+    nodes per response enter the sampler frontier.
   - A full frontier drops its oldest candidate for a new one; candidates queued
     more than 15 min ago are skipped.
-  - The visited map (1 000 000 entries per family) never forgets an unexpired entry.
+  - The visited map (4 000 000 entries per family) never forgets an unexpired entry.
     When it is full, new nodes wait (`sampler_visited_full`).
   - The send path checks the recorded time once more. `sampler_early` counts failures
     and must stay 0.
 - **Bounded state.** Everything has a named limit:
   - peer store: 20 000 keys × 100 peers, 45 min;
-  - frontier: 50 000;
-  - pending queries: 4 096 per socket;
+  - frontier: 200 000;
+  - pending queries: 16 384 per socket;
   - external-IP votes: 1 024 per socket;
   - discoveries: a bounded channel; when it is full, events are dropped and counted.
 
@@ -160,6 +161,10 @@ which hold the per-family counters. They map to
 | `dc4_dht_samples_total{family}` | `family.samples` |
 | `dc4_dht_sampler_early_total` | `sampler_early` |
 | `dc4_dht_sampler_visited_full_total` | `sampler_visited_full` |
+| `dc4_dht_sampler_pick_empty_total` | `sampler_pick_empty` |
+| `dc4_dht_sampler_frontier{family}` | `family.sampler_frontier` |
+| `dc4_dht_sampler_visited{family}` | `family.sampler_visited` |
+| `dc4_dht_recv_errors_total{family}` | `family.recv_errors` |
 | `dc4_dht_responder_dropped_total` | `responder_dropped` (= the sum of `dropped.responder_budget`) |
 
 `Family::as_str` gives the `family` label, and `Source::as_str` gives the `source`

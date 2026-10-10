@@ -9,12 +9,13 @@ use crate::krpc::MAX_DATAGRAM_OUT;
 
 /// Default DHT port.
 pub const DEFAULT_PORT: u16 = 6881;
-/// Default global send budget in packets per second (design §3): 3000 small
-/// queries are well under 1 MB/s of wire traffic, and politeness toward any
-/// single node comes from the 1 s per-address spacing, not this aggregate.
-pub const DEFAULT_MAX_PACKETS_PER_SEC: u32 = 3000;
+/// Default global send budget in packets per second (design §3): politeness
+/// toward any single node comes from the 1 s per-address spacing, not this
+/// aggregate (~3 MB/s total at full reply rate: ~0.6 out + ~2.4 in at
+/// typical response sizes).
+pub const DEFAULT_MAX_PACKETS_PER_SEC: u32 = 6000;
 /// Default number of concurrent `sample_infohashes` queries.
-pub const DEFAULT_SAMPLER_CONCURRENCY: usize = 160;
+pub const DEFAULT_SAMPLER_CONCURRENCY: usize = 512;
 /// Default client version sent in `v`: "DC" plus version 0.1.
 pub const DEFAULT_CLIENT_VERSION: [u8; 4] = *b"DC\x00\x01";
 /// Default bootstrap routers (checked live on 2026-09-16; see `docs/00-horismos.md`).
@@ -30,9 +31,9 @@ pub const DEFAULT_SCRAPE_PACKETS_PER_SEC: u32 = 100;
 /// Upper bound on `sampler_concurrency`.
 pub const MAX_SAMPLER_CONCURRENCY: usize = 1024;
 /// Default responder budget in replies per second (design §3).
-pub const DEFAULT_RESPONDER_REPLIES_PER_SEC: u32 = 500;
+pub const DEFAULT_RESPONDER_REPLIES_PER_SEC: u32 = 1500;
 /// Default responder budget in reply bytes per second (design §3).
-pub const DEFAULT_RESPONDER_BYTES_PER_SEC: u32 = 64_000;
+pub const DEFAULT_RESPONDER_BYTES_PER_SEC: u32 = 192_000;
 
 /// Configuration of a [`Dht`](crate::Dht) node.
 #[derive(Clone, Debug)]
@@ -67,6 +68,8 @@ pub struct DhtConfig {
     pub allow_private_addrs: bool,
     /// Client version sent as `v` in every message.
     pub client_version: [u8; 4],
+    /// Pins the BEP 42 `r` value 0-7 for multi-replica deployments, None = random.
+    pub bep42_r: Option<u8>,
     /// Timers and protocol limits; the defaults are the production values.
     pub tuning: DhtTuning,
 }
@@ -85,6 +88,7 @@ impl Default for DhtConfig {
             read_only: false,
             allow_private_addrs: false,
             client_version: DEFAULT_CLIENT_VERSION,
+            bep42_r: None,
             tuning: DhtTuning::default(),
         }
     }
@@ -119,6 +123,9 @@ impl DhtConfig {
                 "sampler_concurrency must be between 1 and {MAX_SAMPLER_CONCURRENCY}"
             )));
         }
+        if self.bep42_r.is_some_and(|r| r > 7) {
+            return Err(Error::Config("bep42_r must be between 0 and 7".into()));
+        }
         self.tuning.validate()
     }
 }
@@ -148,10 +155,10 @@ pub struct DhtTuning {
     /// Inbound burst accepted from one host. Production: 8.
     pub inbound_burst: u32,
     /// Replies per second the responder may send, over all addresses; a
-    /// query beyond it is dropped unanswered. Production: 500.
+    /// query beyond it is dropped unanswered. Production: 1500.
     pub responder_replies_per_sec: u32,
     /// Reply bytes per second the responder may send, over all addresses.
-    /// At least 1 024 (one full datagram). Production: 64 000.
+    /// At least 1 024 (one full datagram). Production: 192 000.
     pub responder_bytes_per_sec: u32,
     /// Period of the maintenance task. Production: 5 s.
     pub maintenance_interval: Duration,
@@ -189,6 +196,9 @@ pub struct DhtTuning {
     pub sample_unsupported_skip: Duration,
     /// Skip time for a node that did not answer `sample_infohashes`. Production: 1 h.
     pub sample_timeout_skip: Duration,
+    /// How long a BEP 51 sampler query waits for a reply. Shorter than
+    /// `query_timeout` so slow nodes fail fast. Production: 2 s.
+    pub sampler_query_timeout: Duration,
     /// Pause of a sampler worker that found nothing to sample. Production: 1 s.
     pub sampler_idle_wait: Duration,
     /// Agreeing nonzero scrape responses that end the traversal early
@@ -242,6 +252,7 @@ impl Default for DhtTuning {
             sample_min_resample: Duration::from_secs(300),
             sample_unsupported_skip: HOUR.saturating_mul(6),
             sample_timeout_skip: HOUR,
+            sampler_query_timeout: Duration::from_secs(2),
             sampler_idle_wait: Duration::from_secs(1),
             scrape_early_exit_quorum: 3,
             scrape_node_cache_keys: 4096,
@@ -273,6 +284,7 @@ impl DhtTuning {
             ("sample_min_resample", self.sample_min_resample),
             ("sample_unsupported_skip", self.sample_unsupported_skip),
             ("sample_timeout_skip", self.sample_timeout_skip),
+            ("sampler_query_timeout", self.sampler_query_timeout),
             ("sampler_idle_wait", self.sampler_idle_wait),
         ];
         for (name, value) in positive {
@@ -342,17 +354,18 @@ mod tests {
         assert_eq!(c.max_packets_per_sec, DEFAULT_MAX_PACKETS_PER_SEC);
         assert_eq!(c.scrape_packets_per_sec, 100);
         assert!(c.sampler);
-        assert_eq!(c.sampler_concurrency, 160);
+        assert_eq!(c.sampler_concurrency, DEFAULT_SAMPLER_CONCURRENCY);
         assert!(!c.read_only);
         assert!(!c.allow_private_addrs);
         assert_eq!(&c.client_version, b"DC\x00\x01");
+        assert_eq!(c.bep42_r, None);
         let t = &c.tuning;
         assert_eq!(t.query_timeout, Duration::from_secs(4));
         assert_eq!(t.scrape_query_timeout, Duration::from_secs(10));
         assert_eq!(t.per_address_query_spacing, Duration::from_secs(1));
         assert_eq!((t.inbound_rate, t.inbound_burst), (4, 8));
-        assert_eq!(t.responder_replies_per_sec, 500);
-        assert_eq!(t.responder_bytes_per_sec, 64_000);
+        assert_eq!(t.responder_replies_per_sec, DEFAULT_RESPONDER_REPLIES_PER_SEC);
+        assert_eq!(t.responder_bytes_per_sec, DEFAULT_RESPONDER_BYTES_PER_SEC);
         assert_eq!(t.peer_ttl, Duration::from_secs(45 * 60));
         assert_eq!(t.external_ip_votes, 10);
         assert_eq!(t.external_ip_vote_ttl, Duration::from_secs(30 * 60));
@@ -361,6 +374,7 @@ mod tests {
         assert_eq!(t.sample_min_resample, Duration::from_secs(300));
         assert_eq!(t.sample_unsupported_skip, Duration::from_secs(6 * 3600));
         assert_eq!(t.sample_timeout_skip, Duration::from_secs(3600));
+        assert_eq!(t.sampler_query_timeout, Duration::from_secs(2));
         assert_eq!(t.scrape_early_exit_quorum, 3);
         assert_eq!(t.scrape_node_cache_keys, 4096);
         assert!(!t.limits_by_endpoint);
@@ -391,7 +405,7 @@ mod tests {
         // `query_scrape` charges `scrape_budget`, `query_gated` charges
         // `budget`; both share per-address spacing).
         assert_eq!(DEFAULT_SCRAPE_PACKETS_PER_SEC, 100);
-        assert_eq!(DEFAULT_MAX_PACKETS_PER_SEC, 3000);
+        assert_eq!(DEFAULT_MAX_PACKETS_PER_SEC, 6000);
         let c = DhtConfig::default();
         assert!(c.scrape_packets_per_sec < c.max_packets_per_sec);
         assert!(c.validate().is_ok());
@@ -434,8 +448,16 @@ mod tests {
                 sampler_concurrency: 0,
                 ..DhtConfig::default()
             },
+            DhtConfig {
+                bep42_r: Some(8),
+                ..DhtConfig::default()
+            },
             tuned(DhtTuning {
                 query_timeout: Duration::ZERO,
+                ..DhtTuning::default()
+            }),
+            tuned(DhtTuning {
+                sampler_query_timeout: Duration::ZERO,
                 ..DhtTuning::default()
             }),
             tuned(DhtTuning {

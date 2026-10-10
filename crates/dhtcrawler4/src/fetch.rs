@@ -91,6 +91,8 @@ pub const DEST_MAX_ATTEMPTS: usize = 10;
 /// The attempt-counting window.
 pub const DEST_WINDOW: Duration = Duration::from_secs(60);
 /// How long a refused or timed-out destination is skipped.
+pub const DEST_NEGATIVE_TTL_SHORT: Duration = Duration::from_secs(3 * 60);
+/// How long a destination with other connect errors is skipped.
 pub const DEST_NEGATIVE_TTL: Duration = Duration::from_secs(10 * 60);
 /// Destination IPs tracked; new ones are refused when full.
 pub const DEST_CAPACITY: usize = 100_000;
@@ -336,6 +338,7 @@ pub struct DestLimits {
     pub max_attempts: usize,
     pub window: Duration,
     pub negative_ttl: Duration,
+    pub negative_ttl_short: Duration,
     pub capacity: usize,
     pub sweep_interval: Duration,
     /// TEST ONLY: count each IP:port as its own destination, like
@@ -350,6 +353,7 @@ impl Default for DestLimits {
             max_attempts: DEST_MAX_ATTEMPTS,
             window: DEST_WINDOW,
             negative_ttl: DEST_NEGATIVE_TTL,
+            negative_ttl_short: DEST_NEGATIVE_TTL_SHORT,
             capacity: DEST_CAPACITY,
             sweep_interval: DEST_SWEEP_INTERVAL,
             by_endpoint: false,
@@ -542,15 +546,40 @@ pub struct DestPermit {
 }
 
 impl DestPermit {
-    /// Ends the attempt. A `negative` attempt (refused or timed out) makes
-    /// the destination skipped for the negative-cache time.
+    /// Ends the attempt. A `negative` attempt (a non-refused connect error)
+    /// makes the destination skipped for the long negative-cache time;
+    /// refused and timed-out errors use the short one (see
+    /// [`negative_ttl_for`]).
     pub fn finish(self, negative: bool, now: Instant) {
-        if negative {
-            let until = after(now, self.limiter.limits.negative_ttl);
+        let long = self.limiter.limits.negative_ttl;
+        self.finish_with_ttl(negative.then_some(long), now);
+    }
+
+    /// Ends the attempt, skipping the destination until `now + ttl`.
+    pub fn finish_with_ttl(self, ttl: Option<Duration>, now: Instant) {
+        if let Some(ttl) = ttl {
+            let until = after(now, ttl);
             if let Some(dest) = lock(&self.limiter.state).map.get_mut(&self.ip) {
                 dest.blocked_until = Some(until);
             }
         }
+    }
+}
+
+/// Negative-cache TTL for a fetch failure, if any: refused and timed-out
+/// destinations rest briefly, other connect errors rest longer, and
+/// post-connect failures are not cached.
+fn negative_ttl_for(err: &FetchError, limits: &DestLimits) -> Option<Duration> {
+    match err {
+        FetchError::Timeout => Some(limits.negative_ttl_short),
+        FetchError::Connect(kind)
+            if *kind == std::io::ErrorKind::ConnectionRefused
+                || *kind == std::io::ErrorKind::TimedOut =>
+        {
+            Some(limits.negative_ttl_short)
+        }
+        FetchError::Connect(_) => Some(limits.negative_ttl),
+        _ => None,
     }
 }
 
@@ -995,8 +1024,11 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
             byte_budget: Some(Arc::clone(&self.byte_budget)),
         };
         let result = dc4_peer::fetch_metadata(peer, key, &limits).await;
-        let negative = matches!(result, Err(FetchError::Connect(_) | FetchError::Timeout));
-        permit.finish(negative, Instant::now());
+        let ttl = match &result {
+            Err(e) => negative_ttl_for(e, &self.tuning.destinations),
+            Ok(_) => None,
+        };
+        permit.finish_with_ttl(ttl, Instant::now());
         result
     }
 
@@ -1331,6 +1363,54 @@ mod tests {
             DestDenied::NegativeCache
         );
         l.try_acquire(dest("3.3.3.3"), t0 + DEST_NEGATIVE_TTL)
+            .unwrap();
+    }
+
+    #[test]
+    fn negative_ttl_classifier_splits_refused_and_timeout() {
+        use std::io::ErrorKind;
+        let limits = DestLimits::default();
+        assert_eq!(
+            negative_ttl_for(&FetchError::Timeout, &limits),
+            Some(DEST_NEGATIVE_TTL_SHORT)
+        );
+        assert_eq!(
+            negative_ttl_for(&FetchError::Connect(ErrorKind::ConnectionRefused), &limits),
+            Some(DEST_NEGATIVE_TTL_SHORT)
+        );
+        assert_eq!(
+            negative_ttl_for(&FetchError::Connect(ErrorKind::TimedOut), &limits),
+            Some(DEST_NEGATIVE_TTL_SHORT)
+        );
+        assert_eq!(
+            negative_ttl_for(&FetchError::Connect(ErrorKind::AddrInUse), &limits),
+            Some(DEST_NEGATIVE_TTL)
+        );
+        assert_eq!(
+            negative_ttl_for(&FetchError::Io(ErrorKind::ConnectionReset), &limits),
+            None
+        );
+        assert_eq!(negative_ttl_for(&FetchError::Rejected, &limits), None);
+        assert_eq!(negative_ttl_for(&FetchError::BadHandshake, &limits), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn destination_negative_ttl_split() {
+        let l = DestinationLimiter::new(limits(10));
+        let t0 = Instant::now();
+        l.try_acquire(dest("1.2.3.4"), t0)
+            .unwrap()
+            .finish_with_ttl(Some(DEST_NEGATIVE_TTL_SHORT), t0);
+        l.try_acquire(dest("5.6.7.8"), t0).unwrap().finish(true, t0);
+        // After the short TTL the refused destination is back, while the
+        // long-blocked one is still denied.
+        let t = t0 + DEST_NEGATIVE_TTL_SHORT;
+        l.try_acquire(dest("1.2.3.4"), t).unwrap().finish(false, t);
+        assert_eq!(
+            l.try_acquire(dest("5.6.7.8"), t).unwrap_err(),
+            DestDenied::NegativeCache
+        );
+        l.try_acquire(dest("5.6.7.8"), t0 + DEST_NEGATIVE_TTL)
             .unwrap();
     }
 

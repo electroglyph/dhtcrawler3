@@ -218,6 +218,9 @@ pub struct CrawlConfig {
     pub scrape_node_cache_keys: usize,
     /// Agreeing nonzero responses that end a traversal early (live-only).
     pub scrape_early_exit_quorum: u32,
+    /// Pins the BEP 42 `r` value 0-7 for multi-replica deployments, None = random.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bep42_r: Option<u8>,
 }
 
 impl Default for CrawlConfig {
@@ -234,10 +237,10 @@ impl Default for CrawlConfig {
             max_packets_per_sec: dc4_dht::DEFAULT_MAX_PACKETS_PER_SEC,
             sampler_concurrency: dc4_dht::DEFAULT_SAMPLER_CONCURRENCY,
             read_only: false,
-            fetch_workers: 768,
-            max_connections: 3072,
+            fetch_workers: 1536,
+            max_connections: 6144,
             max_metadata_bytes: dc4_peer::DEFAULT_MAX_METADATA,
-            max_inflight_metadata_bytes: 512 * 1024 * 1024,
+            max_inflight_metadata_bytes: 1024 * 1024 * 1024,
             max_pending: 5_000_000,
             scrape_workers: 1,
             scrape_interval_secs: 7 * 24 * 60 * 60,
@@ -255,6 +258,7 @@ impl Default for CrawlConfig {
             scrape_unknown_interval_secs: 30 * 24 * 60 * 60,
             scrape_node_cache_keys: 4096,
             scrape_early_exit_quorum: 3,
+            bep42_r: None,
         }
     }
 }
@@ -499,6 +503,7 @@ fn template() -> Result<toml::Table, ConfigError> {
     };
     let mut full = Config::default();
     full.database.url = Some(String::new());
+    full.crawl.bep42_r = Some(0);
     full.database.crawler = Some(role.clone());
     full.database.indexer = Some(role.clone());
     full.database.web = Some(role);
@@ -856,6 +861,9 @@ impl Config {
             2,
             5,
         )?;
+        if c.bep42_r.is_some_and(|r| r > 7) {
+            return Err(invalid("crawl.bep42_r must be between 0 and 7"));
+        }
         Ok(())
     }
 

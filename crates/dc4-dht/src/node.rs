@@ -58,7 +58,7 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Concurrent bucket-refresh lookups per socket.
 const MAX_CONCURRENT_REFRESH: usize = 2;
 /// Nodes taken from one response for the sampler frontier.
-const MAX_FRONTIER_NODES_PER_RESPONSE: usize = 16;
+const MAX_FRONTIER_NODES_PER_RESPONSE: usize = 32;
 /// Consecutive receive errors after which the receive loop pauses.
 const RECV_ERROR_BURST: u32 = 64;
 /// Pause after a burst of receive errors.
@@ -227,7 +227,10 @@ impl SocketNode {
         if let Some(ip) = external_ip
             && !is_bep42_valid(&id, ip)
         {
-            id = bep42_random_id(ip);
+            id = match cfg.bep42_r {
+                Some(r) => crate::node_id::bep42_id_for_r(ip, r),
+                None => bep42_random_id(ip),
+            };
         }
         let saved_contacts = saved
             .map(|s| {
@@ -564,6 +567,25 @@ impl Inner {
     where
         G: Fn(Instant) -> bool + Sync,
     {
+        let timeout = self.cfg.tuning.query_timeout;
+        self.query_gated_with_timeout(sock, addr, method, expect, gate, timeout)
+            .await
+    }
+
+    /// [`query_gated`](Self::query_gated) with an explicit transaction
+    /// deadline instead of `tuning.query_timeout`.
+    pub(crate) async fn query_gated_with_timeout<G>(
+        &self,
+        sock: &SocketNode,
+        addr: SocketAddr,
+        method: Method,
+        expect: Option<NodeId>,
+        gate: &G,
+        timeout: Duration,
+    ) -> Result<Response, QueryError>
+    where
+        G: Fn(Instant) -> bool + Sync,
+    {
         let addr = normalize_addr(addr);
         let tuning = &self.cfg.tuning;
         let counters = self.counters.family(sock.family);
@@ -605,7 +627,7 @@ impl Inner {
         }
 
         let (tx, rx) = oneshot::channel();
-        let deadline = after(now, tuning.query_timeout);
+        let deadline = after(now, timeout);
         let want = self.want_for(&method);
         let (id, tid) = {
             let mut st = lock(&sock.state);
@@ -1233,7 +1255,10 @@ impl Inner {
         if !allowed {
             return (changed, false);
         }
-        let new_id = bep42_random_id(winner);
+        let new_id = match self.cfg.bep42_r {
+            Some(r) => crate::node_id::bep42_id_for_r(winner, r),
+            None => bep42_random_id(winner),
+        };
         st.table = st.table.rebuild(new_id, now);
         st.id = new_id;
         st.last_id_change = Some(now);
@@ -1376,6 +1401,7 @@ async fn recv_loop(inner: Arc<Inner>, sock: Arc<SocketNode>) {
             }
             Err(e) => {
                 // Unconnected UDP sockets may report ICMP errors from earlier sends.
+                incr(&counters.recv_errors);
                 errors = errors.saturating_add(1);
                 if errors >= RECV_ERROR_BURST {
                     tracing::debug!(error = %e, "repeated UDP receive errors");

@@ -227,6 +227,19 @@ pub fn bep42_random_id(ip: IpAddr) -> NodeId {
     bep42_id(ip, rand::random())
 }
 
+/// The BEP 42 `r` value of `id` (low 3 bits of the last byte).
+pub fn bep42_r(id: &NodeId) -> u8 {
+    id.0[ID_LEN - 1] & BEP42_R_MASK
+}
+
+/// A BEP 42 node ID for `ip` with `r` pinned (masked to 3 bits); the rest
+/// of the rand byte stays random. Delegates to [`bep42_id`].
+pub fn bep42_id_for_r(ip: IpAddr, r: u8) -> NodeId {
+    let rand: u8 = rand::random();
+    let rand = (rand & !BEP42_R_MASK) | (r & BEP42_R_MASK);
+    bep42_id(ip, rand)
+}
+
 /// True when `ip` is not a public address, so BEP 42 does not apply to it
 /// (loopback, private, link-local and other non-global ranges).
 pub fn is_bep42_exempt(ip: IpAddr) -> bool {
@@ -271,6 +284,18 @@ mod tests {
                 assert!(is_bep42_valid(&id, ip));
             }
         }
+    }
+
+    #[test]
+    fn bep42_r_pins_replica_ids() {
+        let ip: IpAddr = "124.31.75.21".parse().unwrap();
+        for r in 0..8u8 {
+            let id = bep42_id_for_r(ip, r);
+            assert_eq!(bep42_r(&id), r);
+            assert!(is_bep42_valid(&id, ip));
+        }
+        // Masked to 3 bits.
+        assert_eq!(bep42_r(&bep42_id_for_r(ip, 8)), 0);
     }
 
     #[test]

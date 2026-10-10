@@ -150,6 +150,8 @@ pub struct FamilyStats {
     pub sampler_frontier: usize,
     /// Entries in the sampler's visited map.
     pub sampler_visited: usize,
+    /// Receive-loop errors (`dc4_dht_recv_errors_total`).
+    pub recv_errors: u64,
 }
 
 /// A snapshot of the node's counters and sizes. Counters only grow.
@@ -181,6 +183,9 @@ pub struct DhtStatsSnapshot {
     /// Nodes not sampled because the visited map was full of unexpired
     /// entries (`dc4_dht_sampler_visited_full_total`).
     pub sampler_visited_full: u64,
+    /// Sampler picks that found nothing to sample
+    /// (`dc4_dht_sampler_pick_empty_total`).
+    pub sampler_pick_empty: u64,
     /// Queries dropped unanswered by the responder budget, both families
     /// (`dc4_dht_responder_dropped_total`).
     pub responder_dropped: u64,
@@ -325,6 +330,7 @@ pub(crate) struct FamilyCounters {
     pub(crate) packets_in: AtomicU64,
     pub(crate) packets_out: AtomicU64,
     pub(crate) samples: AtomicU64,
+    pub(crate) recv_errors: AtomicU64,
     dropped: DropCounters,
 }
 
@@ -340,6 +346,7 @@ impl FamilyCounters {
             packets_out: get(&self.packets_out),
             dropped: self.dropped.snapshot(),
             samples: get(&self.samples),
+            recv_errors: get(&self.recv_errors),
             ..FamilyStats::default()
         }
     }
@@ -361,6 +368,7 @@ pub(crate) struct Counters {
     pub(crate) node_id_changes: AtomicU64,
     pub(crate) sampler_early: AtomicU64,
     pub(crate) sampler_visited_full: AtomicU64,
+    pub(crate) sampler_pick_empty: AtomicU64,
 }
 
 /// Adds one (wrapping, never panicking).
@@ -408,6 +416,7 @@ impl Counters {
             node_id_changes: get(&self.node_id_changes),
             sampler_early: get(&self.sampler_early),
             sampler_visited_full: get(&self.sampler_visited_full),
+            sampler_pick_empty: get(&self.sampler_pick_empty),
             peer_store_keys: 0,
         }
     }
@@ -420,6 +429,11 @@ mod tests {
     #[test]
     fn drops_are_counted_per_family_and_reason() {
         let c = Counters::default();
+        assert_eq!(c.snapshot().sampler_pick_empty, 0);
+        assert_eq!(c.snapshot().v4.recv_errors, 0);
+        incr(&c.sampler_pick_empty);
+        incr(&c.sampler_pick_empty);
+        incr(&c.family(Family::V4).recv_errors);
         c.family(Family::V4).drop_packet(DropReason::RateLimited);
         c.family(Family::V4)
             .drop_packet(DropReason::ResponderBudget);
@@ -437,6 +451,9 @@ mod tests {
         assert_eq!(s.family(Family::V6).packets_in, 1);
         assert_eq!(s.packets_in(), 1);
         assert_eq!(s.samples(), 20);
+        assert_eq!(s.sampler_pick_empty, 2);
+        assert_eq!(s.v4.recv_errors, 1);
+        assert_eq!(s.v6.recv_errors, 0);
         let labels: Vec<_> = s.v4.dropped.iter().map(|(r, n)| (r.as_str(), n)).collect();
         assert_eq!(labels[0], ("rate_limited", 1));
         assert_eq!(labels[3], ("responder_budget", 1));

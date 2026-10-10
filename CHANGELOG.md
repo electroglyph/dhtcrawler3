@@ -2,6 +2,18 @@
 
 Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 
+## 0.6.0
+
+- Crawl: sampler concurrency 160→512 and packet budget 3000→6000/s, responder budget 500→1500 replies/s and 64→192 kB/s, fetch workers 768→1536 with connections 3072→6144 and inflight metadata 512 MiB→1 GiB (4 conns/worker kept); compose crawl `mem_limit` 3→4 GiB. The scrape budget stays 100/s and the inbound 4/s + burst 8 gate is unchanged.
+- DHT: sampler visited map 1M→4M entries per family; when full it now evicts the farthest next-sample times first (the long unsupported skips) instead of refusing until expiry, sparing in-flight keys.
+- DHT: consecutive sampler timeouts back off 1h→2h→4h→6h per endpoint, capped at the unsupported skip; any other outcome resets the count.
+- DHT: new `sampler_query_timeout` tuning (default 2 s) bounds sampler queries only; lookups keep the 4 s timeout.
+- DHT: sampler frontier 50k→200k per family with up to 32 frontier nodes taken per response; new `dc4_dht_sampler_pick_empty_total` counter and per-family `dc4_dht_sampler_frontier` / `dc4_dht_sampler_visited` gauges.
+- DHT: transaction table 4096→16384 per socket; UDP sockets request a 4 MiB receive buffer (best-effort, failures ignored); receive errors count in per-family `dc4_dht_recv_errors_total`.
+- DHT: new optional `bep42_r` (0–7; `crawl.bep42_r`, `DC4_CRAWL__BEP42_R`) pins the BEP 42 `r` bits so replicas on one IP hold distinct IDs; saved valid IDs still win. The README gains a multi-replica runbook (distinct port/state_dir/`bep42_r`, staggered starts).
+- Admission: a first get_peers sighting is admitted at once as non-priority (like sampled keys), capped at 20% of the flush batch (`get_peers_single_cap`, default 200); over cap counts `dc4_blocked_total{reason="get_peers_single_capped"}`. The two-network rule still admits regardless of the cap, and removal cooldowns still gate at flush.
+- Fetch: destination negative cache split — refused/timed-out destinations skip 3 min, other connect errors 10 min (`negative_ttl_short`); post-connect failures still never negative-cache.
+
 ## 0.5.0
 
 - DHT: responses with top-level `ro=1` (BEP 43) no longer enter the routing table, the external-IP vote, or the sampler frontier.

@@ -70,6 +70,7 @@ fn config(bootstrap: &[SocketAddr]) -> DhtConfig {
         read_only: false,
         allow_private_addrs: true,
         client_version: *b"DT\x00\x01",
+        bep42_r: None,
         tuning: fast_tuning(),
     }
 }

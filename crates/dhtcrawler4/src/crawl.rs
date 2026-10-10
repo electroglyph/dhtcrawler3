@@ -115,10 +115,12 @@ impl CrawlOptions {
             read_only: c.read_only,
             allow_private_addrs: false,
             client_version: dc4_dht::DEFAULT_CLIENT_VERSION,
+            bep42_r: None,
             tuning: DhtTuning::default(),
         };
         dht.tuning.scrape_early_exit_quorum =
             usize::try_from(c.scrape_early_exit_quorum).unwrap_or(usize::MAX);
+        dht.bep42_r = c.bep42_r;
         dht.tuning.scrape_query_timeout = Duration::from_secs(c.scrape_query_timeout_secs);
         dht.tuning.scrape_node_cache_keys = c.scrape_node_cache_keys;
         let mut opts = Self::new(
@@ -368,8 +370,12 @@ pub fn export_snapshot(s: &DhtStatsSnapshot) {
             .absolute(n);
         }
         metrics::counter!("dc4_dht_samples_total", "family" => label).absolute(f.samples);
+        metrics::counter!("dc4_dht_recv_errors_total", "family" => label).absolute(f.recv_errors);
         metrics::gauge!("dc4_dht_routing_nodes", "family" => label).set(f.routing_nodes as f64);
         metrics::gauge!("dc4_dht_good_nodes", "family" => label).set(f.good_nodes as f64);
+        metrics::gauge!("dc4_dht_sampler_frontier", "family" => label)
+            .set(f.sampler_frontier as f64);
+        metrics::gauge!("dc4_dht_sampler_visited", "family" => label).set(f.sampler_visited as f64);
     }
     for (method, n) in s.queries_received.iter() {
         metrics::counter!("dc4_dht_queries_received_total", "method" => method).absolute(n);
@@ -377,6 +383,7 @@ pub fn export_snapshot(s: &DhtStatsSnapshot) {
     metrics::counter!("dc4_dht_timeouts_total").absolute(s.timeouts);
     metrics::counter!("dc4_dht_sampler_early_total").absolute(s.sampler_early);
     metrics::counter!("dc4_dht_sampler_visited_full_total").absolute(s.sampler_visited_full);
+    metrics::counter!("dc4_dht_sampler_pick_empty_total").absolute(s.sampler_pick_empty);
     metrics::counter!("dc4_dht_responder_dropped_total").absolute(s.responder_dropped);
     metrics::counter!("dc4_dht_discovered_dropped_total").absolute(s.discovered_dropped);
     metrics::gauge!("dc4_dht_peer_store_keys").set(s.peer_store_keys as f64);
@@ -509,23 +516,30 @@ mod tests {
         );
         assert_eq!(o.dht.bootstrap.len(), 4);
         assert!(o.dht.sampler);
-        assert_eq!(o.dht.sampler_concurrency, 160);
+        assert_eq!(o.dht.sampler_concurrency, 512);
         assert!(!o.dht.allow_private_addrs);
         assert_eq!(o.dht.tuning, DhtTuning::default());
         assert!(o.dht.validate().is_ok());
         assert_eq!(o.filter, PeerFilter::PRODUCTION);
-        assert_eq!(o.fetch_workers, 768);
+        assert_eq!(o.fetch_workers, 1536);
         assert_eq!(o.dht.scrape_packets_per_sec, 100);
         assert_eq!(o.dht.tuning.scrape_early_exit_quorum, 3);
         assert_eq!(o.dht.tuning.scrape_query_timeout, Duration::from_secs(10));
         assert_eq!(o.dht.tuning.scrape_node_cache_keys, 4096);
+        assert_eq!(o.dht.bep42_r, None);
         assert_eq!(o.admission.removal_cooldown_days, 7);
         assert_eq!(o.scrape_workers, 1);
         assert_eq!(o.scrape.threshold, 0);
         assert_eq!(o.max_pending, 5_000_000);
-        assert_eq!(o.limits.max_connections, 3072);
-        assert_eq!(o.limits.max_inflight_metadata_bytes, 536_870_912);
+        assert_eq!(o.limits.max_connections, 6144);
+        assert_eq!(o.limits.max_inflight_metadata_bytes, 1_073_741_824);
         assert_eq!(o.min_good_nodes, MIN_GOOD_NODES);
+        let mut cfg = Config::default();
+        cfg.crawl.bep42_r = Some(3);
+        assert_eq!(
+            CrawlOptions::from_config(&cfg).unwrap().dht.bep42_r,
+            Some(3)
+        );
 
         let mut cfg = Config::default();
         cfg.crawl.bind_v6 = String::new();

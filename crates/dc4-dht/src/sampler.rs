@@ -6,9 +6,12 @@
 //! again. A node is remembered by its endpoint and, once it has answered, by
 //! its node ID too.
 //!
-//! Only expired entries are ever removed from the visited map. When it is
-//! full of unexpired entries, no new node is admitted
-//! (`sampler_visited_full`) until entries expire. Right before a query is
+//! Only expired entries are removed first when the visited map needs room.
+//! If that is not enough, unexpired entries with the farthest next-sample
+//! time first (the long 6h unsupported skips) are evicted too, excluding
+//! in-flight keys, until the new node fits or nothing more can go. A pick
+//! refused for lack of room reports `sampler_visited_full` until entries
+//! expire or are evicted. Right before a query is
 //! sent, the node's recorded time is checked once more; a failure there is
 //! counted in `sampler_early`, which must stay 0, and nothing is sent.
 //!
@@ -36,6 +39,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use dc4_core::DhtKey;
+use lru::LruCache;
 
 use crate::compact::{AddrPolicy, CompactNode, Family, canonical_ip};
 use crate::config::DhtTuning;
@@ -50,9 +54,9 @@ use crate::util::{after, after_skip, lock};
 use crate::{Discovered, Source};
 
 /// Candidate nodes waiting to be sampled, per family (design §3).
-pub(crate) const FRONTIER_CAPACITY: usize = 50_000;
+pub(crate) const FRONTIER_CAPACITY: usize = 200_000;
 /// Entries in the visited map, per family (design §3).
-pub(crate) const VISITED_CAPACITY: usize = 1_000_000;
+pub(crate) const VISITED_CAPACITY: usize = 4_000_000;
 /// Queue entries inspected per pick before giving up.
 const MAX_POPS_PER_PICK: usize = 256;
 /// Shortest time between two scans of a full visited map, in seconds.
@@ -67,6 +71,24 @@ pub(crate) const SAMPLES_PER_NETWORK: u32 = 200;
 pub(crate) const SAMPLE_QUOTA_WINDOW: Duration = Duration::from_secs(600);
 /// Source networks tracked by the sample quota.
 const SAMPLE_QUOTA_CAPACITY: NonZeroUsize = RATE_MAP_CAPACITY;
+/// Consecutive-timeout strikes tracked per address for the backoff ladder.
+const TIMEOUT_STRIKE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(262_143);
+
+/// Skip after `strikes` consecutive timeouts: base, 2*base, 4*base, then max.
+/// Saturates and never exceeds `max`.
+pub(crate) fn timeout_backoff(strikes: u8, base: Duration, max: Duration) -> Duration {
+    let mut skip = base.min(max);
+    if base >= max {
+        return skip;
+    }
+    for _ in 1..strikes {
+        skip = skip.saturating_mul(2).min(max);
+        if skip >= max {
+            break;
+        }
+    }
+    skip
+}
 
 /// What a node is remembered by in the visited map.
 #[derive(Hash)]
@@ -318,8 +340,9 @@ impl Frontier {
             <= self.visited_cap
     }
 
-    /// Makes room for `needed` new entries by forgetting expired ones.
-    /// Entries of nodes in flight are kept, and unexpired entries always are.
+    /// Makes room for `needed` new entries: first by forgetting expired
+    /// ones, then by evicting unexpired entries with the farthest next-sample
+    /// time first. Entries of nodes in flight are always kept.
     fn make_room(&mut self, needed: usize, now_secs: u32) -> bool {
         if self.fits(needed) {
             return true;
@@ -336,6 +359,37 @@ impl Frontier {
             }
             in_flight.contains(key)
         });
+        if self.fits(needed) {
+            self.next_prune = earliest.max(now_secs.saturating_add(MIN_PRUNE_GAP_SECS));
+            return true;
+        }
+        // Still full: evict unexpired entries, farthest next-sample first.
+        let mut evict: Vec<(u64, u32)> = self
+            .visited
+            .iter()
+            .filter(|(key, next)| !in_flight.contains(key) && **next > now_secs)
+            .map(|(key, next)| (*key, *next))
+            .collect();
+        evict.sort_unstable_by_key(|(_, next)| std::cmp::Reverse(*next));
+        let mut freed = 0usize;
+        let shortfall = needed
+            .saturating_add(self.reserved)
+            .saturating_add(self.visited.len())
+            .saturating_sub(self.visited_cap);
+        for (key, _) in evict {
+            if freed >= shortfall {
+                break;
+            }
+            if self.visited.remove(&key).is_some() {
+                freed = freed.saturating_add(1);
+            }
+        }
+        earliest = u32::MAX;
+        for next in self.visited.values() {
+            if *next > now_secs {
+                earliest = earliest.min(*next);
+            }
+        }
         self.next_prune = earliest.max(now_secs.saturating_add(MIN_PRUNE_GAP_SECS));
         self.fits(needed)
     }
@@ -345,6 +399,8 @@ impl Frontier {
 pub(crate) struct Sampler {
     /// Samples each source network may still yield.
     quota: Mutex<WindowQuota>,
+    /// Consecutive `sample_infohashes` timeouts per address (backoff ladder).
+    timeouts: Mutex<LruCache<SocketAddr, u8>>,
     v4: Mutex<Frontier>,
     v6: Mutex<Frontier>,
     refilling_v4: AtomicBool,
@@ -359,11 +415,30 @@ impl Sampler {
                 SAMPLE_QUOTA_WINDOW,
                 SAMPLE_QUOTA_CAPACITY,
             )),
+            timeouts: Mutex::new(LruCache::new(TIMEOUT_STRIKE_CAPACITY)),
             v4: Mutex::new(Frontier::new(now)),
             v6: Mutex::new(Frontier::new(now)),
             refilling_v4: AtomicBool::new(false),
             refilling_v6: AtomicBool::new(false),
         }
+    }
+
+    /// Consecutive timeouts of `addr` after recording one more, capped.
+    fn timeout_strike(&self, addr: SocketAddr) -> u8 {
+        let mut strikes = lock(&self.timeouts);
+        let n = strikes
+            .get(&addr)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+        strikes.put(addr, n);
+        n
+    }
+
+    /// Forgets the timeout strikes of `addr` (any non-timeout outcome).
+    fn clear_timeout_strike(&self, addr: SocketAddr) {
+        lock(&self.timeouts).pop(&addr);
     }
 
     fn frontier(&self, family: Family) -> &Mutex<Frontier> {
@@ -465,7 +540,10 @@ pub(crate) async fn worker(inner: Arc<Inner>, index: usize) {
             }
             // The visited map is full: wait for entries to expire.
             Pick::Full => inner.sleep(idle).await,
-            Pick::Empty => refill(&inner, sampler, &sock).await || inner.sleep(idle).await,
+            Pick::Empty => {
+                incr(&inner.counters.sampler_pick_empty);
+                refill(&inner, sampler, &sock).await || inner.sleep(idle).await
+            }
         };
         if !keep_going {
             break;
@@ -497,10 +575,18 @@ async fn sample_one(inner: &Inner, sampler: &Sampler, sock: &SocketNode, ticket:
         target: NodeId::random(),
     };
     let result = inner
-        .query_gated(sock, node.addr, method, Some(node.id), &gate)
+        .query_gated_with_timeout(
+            sock,
+            node.addr,
+            method,
+            Some(node.id),
+            &gate,
+            tuning.sampler_query_timeout,
+        )
         .await;
     let (answered_as, skip) = match result {
         Ok(response) => {
+            sampler.clear_timeout_strike(node.addr);
             let (answered_as, skip) = sample_skip(&node.id, &response, tuning);
             if answered_as.is_some()
                 && let Some(samples) = response.samples
@@ -527,11 +613,25 @@ async fn sample_one(inner: &Inner, sampler: &Sampler, sock: &SocketNode, ticket:
             }
             (answered_as, skip)
         }
-        Err(QueryError::Timeout) => (None, tuning.sample_timeout_skip),
+        Err(QueryError::Timeout) => {
+            let strikes = sampler.timeout_strike(node.addr);
+            (
+                None,
+                timeout_backoff(
+                    strikes,
+                    tuning.sample_timeout_skip,
+                    tuning.sample_unsupported_skip,
+                ),
+            )
+        }
         Err(QueryError::Remote(_) | QueryError::Malformed) => {
+            sampler.clear_timeout_strike(node.addr);
             (None, tuning.sample_unsupported_skip)
         }
-        Err(_) => (None, tuning.sample_min_resample),
+        Err(_) => {
+            sampler.clear_timeout_strike(node.addr);
+            (None, tuning.sample_min_resample)
+        }
     };
     guard.finish(answered_as, after_skip(Instant::now(), skip));
 }
@@ -936,38 +1036,128 @@ mod tests {
     }
 
     #[test]
-    fn full_visited_map_admits_no_new_nodes() {
+    fn full_visited_map_evicts_farthest_first() {
         let t0 = Instant::now();
         // Room for three nodes (an endpoint and an ID each).
         let mut f = Frontier::with_capacity(t0, 100, 6);
-        for i in 0..3 {
+        for (i, skip) in [(0, HOUR), (1, 2 * HOUR), (2, 6 * HOUR)] {
             assert!(f.offer(node(i), t0));
             let t = picked(&mut f, t0);
-            f.finish(t, Some(id(i)), t0 + HOUR);
+            f.finish(t, Some(id(i)), t0 + skip);
         }
         assert_eq!(f.visited.len(), 6);
-        // A new node is refused, and nothing is forgotten.
+        // A new node is admitted by evicting the farthest entries (node 2's
+        // 6h pair), not by refusing.
         assert!(f.offer(node(10), t0));
         let (pick, refused) = f.pick(t0 + 60 * SEC);
+        assert!(matches!(pick, Pick::Node(ref t) if t.node == node(10)));
+        assert_eq!(refused, 0);
+        assert_eq!(f.visited.len(), 4);
+        // The evicted node is forgotten; the nearer ones are not.
+        assert!(f.eligible(&node(2), t0 + 60 * SEC));
+        assert!(!f.eligible(&node(0), t0 + 60 * SEC));
+        assert!(!f.eligible(&node(1), t0 + 60 * SEC));
+        check_bounds(&f);
+        // Right after an eviction the map is full again, so the next new
+        // node waits for the throttle instead of rescanning at once.
+        assert!(f.offer(node(11), t0 + 60 * SEC));
+        let (pick, refused) = f.pick(t0 + 61 * SEC);
         assert!(matches!(pick, Pick::Full));
         assert_eq!(refused, 1);
-        assert_eq!(f.visited.len(), 6);
-        for i in 0..3 {
-            assert!(!f.eligible(&node(i), t0 + HOUR - SEC));
-        }
-        // Still refused later on; the map is not rescanned before anything can expire.
-        assert!(f.offer(node(11), t0 + 120 * SEC));
-        assert!(f.offer(node(12), t0 + 120 * SEC));
-        // Three refusals: node 10 stayed queued from the earlier pick instead
-        // of being evicted.
-        assert_eq!(f.pick(t0 + 120 * SEC).1, 3);
-        assert_eq!(f.visited.len(), 6);
-        // Once the entries expire, new nodes are admitted.
-        assert!(f.offer(node(13), t0 + HOUR));
-        let (pick, refused) = f.pick(t0 + HOUR);
-        assert!(matches!(pick, Pick::Node(ref t) if t.node == node(13)));
-        assert_eq!(refused, 0);
+        assert_eq!(f.len(), 1);
         check_bounds(&f);
+    }
+
+    #[test]
+    fn in_flight_entries_block_eviction() {
+        let t0 = Instant::now();
+        let mut f = Frontier::with_capacity(t0, 100, 2);
+        assert!(f.offer(node(1), t0));
+        let t = picked(&mut f, t0);
+        f.finish(t, Some(id(1)), t0 + 10 * SEC);
+        // Node 1 is due again and picked: its expired entries are in flight.
+        assert!(f.offer(node(1), t0 + 20 * SEC));
+        let t1 = picked(&mut f, t0 + 20 * SEC);
+        // No room for node 2: the only entries are expired but in flight,
+        // and there is nothing unexpired to evict.
+        assert!(f.offer(node(2), t0 + 20 * SEC));
+        let (pick, refused) = f.pick(t0 + 20 * SEC);
+        assert!(matches!(pick, Pick::Full));
+        assert_eq!(refused, 1);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f.visited.len(), 2);
+        check_bounds(&f);
+        // Once node 1 is done, node 2 is admitted and node 1's expired
+        // entries are pruned.
+        f.finish(t1, Some(id(1)), t0 + 100 * SEC);
+        let (pick, refused) = f.pick(t0 + 100 * SEC);
+        assert!(matches!(pick, Pick::Node(ref t) if t.node == node(2)));
+        assert_eq!(refused, 0);
+        assert_eq!(f.visited.len(), 0);
+        check_bounds(&f);
+    }
+
+    #[test]
+    fn timeout_backoff_ladder() {
+        let base = HOUR;
+        let max = 6 * HOUR;
+        assert_eq!(timeout_backoff(1, base, max), HOUR);
+        assert_eq!(timeout_backoff(2, base, max), 2 * HOUR);
+        assert_eq!(timeout_backoff(3, base, max), 4 * HOUR);
+        assert_eq!(timeout_backoff(4, base, max), 6 * HOUR);
+        assert_eq!(timeout_backoff(5, base, max), 6 * HOUR);
+        assert_eq!(timeout_backoff(u8::MAX, base, max), 6 * HOUR);
+        // Custom base/max respected.
+        assert_eq!(timeout_backoff(1, SEC, 10 * SEC), SEC);
+        assert_eq!(timeout_backoff(2, SEC, 10 * SEC), 2 * SEC);
+        assert_eq!(timeout_backoff(3, SEC, 10 * SEC), 4 * SEC);
+        assert_eq!(timeout_backoff(4, SEC, 10 * SEC), 8 * SEC);
+        assert_eq!(timeout_backoff(5, SEC, 10 * SEC), 10 * SEC);
+        // Saturates, never exceeds max.
+        assert_eq!(timeout_backoff(u8::MAX, SEC, 10 * SEC), 10 * SEC);
+        assert_eq!(
+            timeout_backoff(3, Duration::MAX, Duration::MAX),
+            Duration::MAX
+        );
+        assert_eq!(timeout_backoff(u8::MAX, HOUR, 6 * HOUR), 6 * HOUR);
+    }
+
+    #[test]
+    fn timeout_strikes_increment_and_reset() {
+        let t0 = Instant::now();
+        let s = Sampler::new(t0);
+        let (a, b) = (addr(1), addr(2));
+        assert_eq!(s.timeout_strike(a), 1);
+        assert_eq!(s.timeout_strike(a), 2);
+        assert_eq!(s.timeout_strike(a), 3);
+        // Another address is independent.
+        assert_eq!(s.timeout_strike(b), 1);
+        assert_eq!(s.timeout_strike(a), 4);
+        // Any non-timeout outcome clears the strikes.
+        s.clear_timeout_strike(a);
+        assert_eq!(s.timeout_strike(a), 1);
+        assert_eq!(s.timeout_strike(b), 2);
+        s.clear_timeout_strike(b);
+        // Clearing an unknown address is a no-op.
+        s.clear_timeout_strike(addr(99));
+        check_strike_bound(&s, 3);
+    }
+
+    #[test]
+    fn timeout_strikes_are_bounded() {
+        let t0 = Instant::now();
+        let s = Sampler::new(t0);
+        for i in 0..262_200u32 {
+            s.timeout_strike(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::from(i),
+                6881,
+            )));
+        }
+        check_strike_bound(&s, 262_144);
+    }
+
+    fn check_strike_bound(s: &Sampler, max: usize) {
+        assert!(lock(&s.timeouts).len() <= max);
     }
 
     #[test]
@@ -995,12 +1185,15 @@ mod tests {
 
     /// Drives the frontier like the workers do, with a seeded random
     /// schedule, and checks every pick against a model of the recorded times.
+    /// The visited map is big enough to never fill, so nothing is ever
+    /// pruned or evicted and the model stays exact; capacity behavior has
+    /// its own deterministic tests below.
     #[test]
     fn sends_are_never_early() {
         let mut rng = StdRng::seed_from_u64(51);
         let t0 = Instant::now();
-        // 40 candidates over 35 endpoints and 30 IDs, in a map with room for 30 entries.
-        let mut f = Frontier::with_capacity(t0, 64, 30);
+        // 40 candidates over 35 endpoints and 30 IDs, in a map with room for all of them.
+        let mut f = Frontier::with_capacity(t0, 64, 1000);
         let nodes: Vec<CompactNode> = (0..40)
             .map(|i| CompactNode {
                 id: id(i % 30),
@@ -1059,7 +1252,10 @@ mod tests {
         }
         assert_eq!(early, 0);
         assert!(sent > 1000, "only {sent} samples sent");
-        assert!(refused > 0, "the visited map never filled up");
+        assert_eq!(
+            refused, 0,
+            "the visited map filled up; the model is no longer exact"
+        );
         eprintln!("sent {sent}, refused {refused}");
     }
 }

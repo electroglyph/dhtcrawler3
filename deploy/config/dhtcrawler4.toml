@@ -43,19 +43,20 @@ state_dir = "/var/lib/dhtcrawler4"
 # Global outbound DHT packet budget. Sized for a server; lower it on a
 # home connection. Politeness toward any single node comes from the 1 s
 # per-address query spacing, so this aggregate only bounds total wire bytes
-# (~1 MB/s at most for small queries).
-max_packets_per_sec = 3000
+# (~3 MB/s total at full reply rate: ~0.6 out + ~2.4 in at typical
+# response sizes).
+max_packets_per_sec = 6000
 # Sampler workers (one query each at a time): timeout-bound mixes sustain
 # roughly concurrency / 4 s sends, so this floors worst-case discovery.
-sampler_concurrency = 160
+sampler_concurrency = 512
 # Answer no DHT queries and mark ours read-only (BEP 43). Leave false to be a
 # full, reciprocating DHT node.
 read_only = false
-fetch_workers = 768
-max_connections = 3072
+fetch_workers = 1536
+max_connections = 6144
 max_metadata_bytes = 8388608
 # Total metadata bytes held by all fetches at once (memory bound).
-max_inflight_metadata_bytes = 536870912
+max_inflight_metadata_bytes = 1073741824
 # Keys waiting for metadata. Above this, only sampled and announced keys are queued.
 max_pending = 5000000
 # BEP 33 seeder scrapes: dedicated workers re-poll stored torrents for their
@@ -100,6 +101,9 @@ scrape_node_cache_keys = 4096
 # Agreeing nonzero responses that end a traversal early (live-only: a dead
 # verdict always requires the full traversal over both families).
 scrape_early_exit_quorum = 3
+# Pin the BEP 42 r value (0-7) so replicas on one IP hold distinct IDs.
+# Leave commented for a random r.
+# bep42_r = 0
 
 [index]
 path = "/var/lib/dhtcrawler4/index"

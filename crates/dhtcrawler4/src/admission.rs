@@ -5,7 +5,10 @@
 //! 2. A key already in the [`DedupSet`] is skipped.
 //! 3. A key seen only through `get_peers` is admitted once sightings came
 //!    from at least two /24 (IPv4) or /48 (IPv6) networks within the current
-//!    dedup generation ([`SourceTracker`]). Sampled keys are admitted at
+//!    dedup generation ([`SourceTracker`]), or on its first sighting as a
+//!    non-priority key subject to a per-flush-cycle cap
+//!    ([`GET_PEERS_SINGLE_CAP`], 20% of [`BATCH_MAX_KEYS`]). Sampled keys
+//!    are admitted at once as non-priority keys (the sighting is our own
 //!    once as non-priority keys (the sighting is our own sampler's, not a
 //!    stranger's claim needing corroboration); only announced keys are
 //!    admitted at once as priority keys. While the queue is under pressure
@@ -45,6 +48,9 @@ pub const DEDUP_GENERATION_KEYS: usize = 2_000_000;
 pub const DEDUP_ROTATION: Duration = Duration::from_secs(30 * 60);
 /// Distinct source networks a `get_peers`-only key needs.
 pub const GET_PEERS_MIN_SOURCES: usize = 2;
+/// First-sighting `get_peers` keys admitted per flush cycle (20% of
+/// [`BATCH_MAX_KEYS`]).
+pub const GET_PEERS_SINGLE_CAP: usize = 200;
 /// Keys the source tracker remembers.
 pub const SOURCE_TRACKER_KEYS: usize = 200_000;
 /// Source networks remembered per key.
@@ -112,6 +118,8 @@ pub struct AdmissionTuning {
     pub retry_base: Duration,
     pub retry_max: Duration,
     pub shutdown_flush_timeout: Duration,
+    /// First-sighting `get_peers` keys admitted per flush cycle.
+    pub get_peers_single_cap: usize,
     /// Base admission cooldown of a removed key, in days (bep33.md §4a/§6:
     /// base, escalating ×4 per repeat to the 90d cap).
     pub removal_cooldown_days: u64,
@@ -130,6 +138,7 @@ impl Default for AdmissionTuning {
             retry_base: FLUSH_RETRY_BASE,
             retry_max: FLUSH_RETRY_MAX,
             shutdown_flush_timeout: SHUTDOWN_FLUSH_TIMEOUT,
+            get_peers_single_cap: GET_PEERS_SINGLE_CAP,
             removal_cooldown_days: 7,
         }
     }
@@ -450,6 +459,9 @@ pub struct Admission<S> {
     sources: SourceTracker,
     hints: SharedHints,
     batch: HashMap<DhtKey, Pending>,
+    /// First-sighting `get_peers` admits this flush cycle (capped by
+    /// `get_peers_single_cap`).
+    single_sighting_admits: usize,
     /// Keys announced with `seed=1` since the last flush: live seeders that
     /// short-circuit their next scrape (bep33.md §4b win 6).
     seed_announced: HashSet<DhtKey>,
@@ -532,6 +544,7 @@ impl<S: CrawlStore> Admission<S> {
             sources: SourceTracker::new(tuning.source_keys),
             hints,
             batch: HashMap::new(),
+            single_sighting_admits: 0,
             seed_announced: HashSet::new(),
             removal_cache: HashMap::new(),
             shed_sampler: false,
@@ -606,10 +619,18 @@ impl<S: CrawlStore> Admission<S> {
         if priority {
             self.sources.remove(&event.key);
         } else if source == Source::GetPeers {
-            if self.sources.record(event.key, event.from) < GET_PEERS_MIN_SOURCES {
+            let count = self.sources.record(event.key, event.from);
+            if count >= GET_PEERS_MIN_SOURCES {
+                self.sources.remove(&event.key);
+            } else if self.single_sighting_admits < self.tuning.get_peers_single_cap {
+                // First sighting: admit at once as non-priority.
+                self.single_sighting_admits = self.single_sighting_admits.saturating_add(1);
+                self.sources.remove(&event.key);
+            } else {
+                metrics::counter!(METRIC_BLOCKED, "reason" => "get_peers_single_capped")
+                    .increment(1);
                 return;
             }
-            self.sources.remove(&event.key);
         } else {
             // A sampled sighting is our own sampler's, not a stranger's
             // claim: admit at once as non-priority, dropping any get_peers
@@ -762,12 +783,14 @@ impl<S: CrawlStore> Admission<S> {
             );
         }
         if self.batch.is_empty() {
+            self.single_sighting_admits = 0;
             return Ok(ObserveOutcome::default());
         }
         // Seed announces are strong evidence (§4a): they shorten (never
         // bypass) the removal cooldown of the same keys in the gate below.
         self.gate_removals(&seeds).await;
         if self.batch.is_empty() {
+            self.single_sighting_admits = 0;
             return Ok(ObserveOutcome::default());
         }
         let batch = self.observations();
@@ -784,6 +807,7 @@ impl<S: CrawlStore> Admission<S> {
                         self.sources.clear();
                     }
                     self.batch.clear();
+                    self.single_sighting_admits = 0;
                     if outcome.dropped > 0 {
                         metrics::counter!(METRIC_BLOCKED, "reason" => "queue_full")
                             .increment(outcome.dropped);
@@ -927,6 +951,25 @@ mod tests {
 
     fn admission(store: &MemoryStore, filter: PeerFilter) -> Admission<MemoryStore> {
         let tuning = AdmissionTuning::default();
+        Admission::new(
+            store.clone(),
+            i64::MAX,
+            filter,
+            tuning,
+            shared_hints(&tuning),
+            Instant::now(),
+        )
+    }
+
+    fn admission_with_single_cap(
+        store: &MemoryStore,
+        filter: PeerFilter,
+        cap: usize,
+    ) -> Admission<MemoryStore> {
+        let tuning = AdmissionTuning {
+            get_peers_single_cap: cap,
+            ..AdmissionTuning::default()
+        };
         Admission::new(
             store.clone(),
             i64::MAX,
@@ -1103,15 +1146,15 @@ mod tests {
         let mut a = admission(&store, PeerFilter::PRODUCTION);
         let own = OwnAddrs::default();
         let now = Instant::now();
+        // A first get_peers sighting admits at once as non-priority.
         let k = key(7);
         a.handle(event(k, Source::GetPeers, "1.2.3.4", None), &own, now);
-        a.handle(event(k, Source::GetPeers, "1.2.3.99", None), &own, now);
-        assert_eq!(a.batch_len(), 0, "one /24 is not enough");
-        a.handle(event(k, Source::GetPeers, "9.9.9.9", None), &own, now);
         assert_eq!(a.batch_len(), 1);
         assert!(a.sources().is_empty());
         // More sightings merge into the batch.
+        a.handle(event(k, Source::GetPeers, "1.2.3.99", None), &own, now);
         a.handle(event(k, Source::GetPeers, "9.9.9.9", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
         // Announce is admitted at once with priority; sample is admitted at
         // once without it (only announces are priority now).
         a.handle(event(key(8), Source::Sample, "1.2.3.4", None), &own, now);
@@ -1120,7 +1163,7 @@ mod tests {
         a.flush(None, None).await.unwrap();
         let observed = store.observed();
         let find = |k: DhtKey| observed.iter().find(|o| o.key == k).copied().unwrap();
-        assert_eq!(find(key(7)).sightings, 2);
+        assert_eq!(find(key(7)).sightings, 3);
         assert!(!find(key(7)).priority);
         assert!(!find(key(8)).priority);
         assert!(find(key(9)).priority);
@@ -1128,25 +1171,79 @@ mod tests {
         // Keys now in the dedup set are skipped.
         a.handle(event(key(8), Source::Sample, "1.2.3.4", None), &own, now);
         assert_eq!(a.batch_len(), 0);
-        // IPv6 /48s count as networks too.
+        // IPv6 sightings admit at once too.
         let k6 = key(10);
         a.handle(
             event(k6, Source::GetPeers, "2001:db8:1:2::1", None),
             &own,
             now,
         );
+        assert_eq!(a.batch_len(), 1);
         a.handle(
             event(k6, Source::GetPeers, "2001:db8:1:3::1", None),
             &own,
             now,
         );
-        assert_eq!(a.batch_len(), 0);
         a.handle(
             event(k6, Source::GetPeers, "2001:db8:2::1", None),
             &own,
             now,
         );
         assert_eq!(a.batch_len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_peers_single_sighting_admitted_non_priority() {
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        a.handle(event(key(1), Source::GetPeers, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        assert!(a.sources().is_empty());
+        a.flush(None, None).await.unwrap();
+        let observed = store.observed();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].sightings, 1);
+        assert!(!observed[0].priority);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_peers_single_cap_enforced_and_reset() {
+        let store = MemoryStore::new();
+        let mut a = admission_with_single_cap(&store, PeerFilter::PRODUCTION, 1);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        a.handle(event(key(1), Source::GetPeers, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        // Cap exhausted: the next first sighting is blocked, not batched.
+        a.handle(event(key(2), Source::GetPeers, "5.6.7.8", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        assert!(!a.dedup().contains(&key(2)));
+        // The flush ends the cycle, so new keys flow again.
+        a.flush(None, None).await.unwrap();
+        a.handle(event(key(2), Source::GetPeers, "5.6.7.8", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        a.flush(None, None).await.unwrap();
+        assert_eq!(store.pending_keys().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_peers_two_networks_admit_past_exhausted_single_cap() {
+        let store = MemoryStore::new();
+        let mut a = admission_with_single_cap(&store, PeerFilter::PRODUCTION, 1);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        // Exhaust the single-sighting cap with one key.
+        a.handle(event(key(1), Source::GetPeers, "1.2.3.4", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        // A first sighting of another key is blocked ...
+        a.handle(event(key(2), Source::GetPeers, "5.6.7.8", None), &own, now);
+        assert_eq!(a.batch_len(), 1);
+        // ... but its second network admits without consuming the cap.
+        a.handle(event(key(2), Source::GetPeers, "9.9.9.9", None), &own, now);
+        assert_eq!(a.batch_len(), 2);
+        assert!(a.sources().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1169,7 +1266,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn sample_clears_get_peers_tracking() {
         let store = MemoryStore::new();
-        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        // Single-sighting admits disabled: one get_peers sighting tracks.
+        let mut a = admission_with_single_cap(&store, PeerFilter::PRODUCTION, 0);
         let own = OwnAddrs::default();
         let now = Instant::now();
         // One get_peers sighting only tracks the key ...
@@ -1217,9 +1315,9 @@ mod tests {
         // ... announces still flow ...
         a.handle(event(key(2), Source::Announce, "1.2.3.4", None), &own, now);
         assert_eq!(a.batch_len(), 1);
-        // ... and get_peers sightings still count toward their two networks.
+        // ... and get_peers first sightings admit at once (non-priority).
         a.handle(event(key(3), Source::GetPeers, "1.2.3.4", None), &own, now);
-        assert_eq!(a.batch_len(), 1);
+        assert_eq!(a.batch_len(), 2);
         a.handle(event(key(3), Source::GetPeers, "9.9.9.9", None), &own, now);
         assert_eq!(a.batch_len(), 2);
         // A re-sighted shed key sheds again instead of hiding in dedup.
@@ -1315,7 +1413,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn source_counts_reset_with_the_generation() {
         let store = MemoryStore::new();
-        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        // Single-sighting admits disabled so the two-network rule applies.
+        let mut a = admission_with_single_cap(&store, PeerFilter::PRODUCTION, 0);
         let own = OwnAddrs::default();
         let t0 = Instant::now();
         a.handle(event(key(1), Source::GetPeers, "1.2.3.4", None), &own, t0);
