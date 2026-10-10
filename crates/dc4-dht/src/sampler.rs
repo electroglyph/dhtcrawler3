@@ -38,7 +38,8 @@ use tokio::time::Instant;
 use dc4_core::DhtKey;
 
 use crate::compact::{AddrPolicy, CompactNode, Family, canonical_ip};
-use crate::krpc::Method;
+use crate::config::DhtTuning;
+use crate::krpc::{Method, Response};
 use crate::lookup;
 use crate::node::{FlagGuard, Inner, QueryError, SocketNode};
 use crate::node_id::NodeId;
@@ -500,37 +501,31 @@ async fn sample_one(inner: &Inner, sampler: &Sampler, sock: &SocketNode, ticket:
         .await;
     let (answered_as, skip) = match result {
         Ok(response) => {
-            let skip = match response.samples {
-                Some(samples) => {
-                    let samples = sampler.accept_samples(
-                        inner.policy,
-                        &node,
-                        &response.id,
-                        samples,
-                        Instant::now(),
-                    );
-                    let count = u64::try_from(samples.len()).unwrap_or(u64::MAX);
-                    add(&inner.counters.family(sock.family).samples, count);
-                    let from = canonical_ip(node.addr.ip());
-                    for key in samples {
-                        inner.emit(Discovered {
-                            key,
-                            source: Source::Sample,
-                            peer: None,
-                            seed: false,
-                            from,
-                        });
-                    }
-                    let interval = response
-                        .interval
-                        .and_then(|i| u64::try_from(i).ok())
-                        .unwrap_or(0)
-                        .min(MAX_SAMPLE_INTERVAL_SECS);
-                    Duration::from_secs(interval).max(tuning.sample_min_resample)
+            let (answered_as, skip) = sample_skip(&node.id, &response, tuning);
+            if answered_as.is_some()
+                && let Some(samples) = response.samples
+            {
+                let samples = sampler.accept_samples(
+                    inner.policy,
+                    &node,
+                    &response.id,
+                    samples,
+                    Instant::now(),
+                );
+                let count = u64::try_from(samples.len()).unwrap_or(u64::MAX);
+                add(&inner.counters.family(sock.family).samples, count);
+                let from = canonical_ip(node.addr.ip());
+                for key in samples {
+                    inner.emit(Discovered {
+                        key,
+                        source: Source::Sample,
+                        peer: None,
+                        seed: false,
+                        from,
+                    });
                 }
-                None => tuning.sample_unsupported_skip,
-            };
-            (Some(response.id), skip)
+            }
+            (answered_as, skip)
         }
         Err(QueryError::Timeout) => (None, tuning.sample_timeout_skip),
         Err(QueryError::Remote(_) | QueryError::Malformed) => {
@@ -539,6 +534,33 @@ async fn sample_one(inner: &Inner, sampler: &Sampler, sock: &SocketNode, ticket:
         Err(_) => (None, tuning.sample_min_resample),
     };
     guard.finish(answered_as, after_skip(Instant::now(), skip));
+}
+
+/// Backoff and visited identity for a sample response, without touching
+/// the quota or emitting anything. A wrong-ID answer is treated as
+/// unsupported: its samples are dropped, the stranger's ID is not
+/// remembered, and the endpoint backs off for `sample_unsupported_skip`
+/// instead of the (attacker-chosen) interval.
+fn sample_skip(
+    node_id: &NodeId,
+    response: &Response,
+    tuning: &DhtTuning,
+) -> (Option<NodeId>, Duration) {
+    if response.id != *node_id {
+        return (None, tuning.sample_unsupported_skip);
+    }
+    let skip = match &response.samples {
+        Some(_) => {
+            let interval = response
+                .interval
+                .and_then(|i| u64::try_from(i).ok())
+                .unwrap_or(0)
+                .min(MAX_SAMPLE_INTERVAL_SECS);
+            Duration::from_secs(interval).max(tuning.sample_min_resample)
+        }
+        None => tuning.sample_unsupported_skip,
+    };
+    (Some(response.id), skip)
 }
 
 /// Refills the frontier from the routing table, or by walking towards a
@@ -695,6 +717,42 @@ mod tests {
         // No room right now is not gone either: the entry stays queued.
         assert_eq!(f.len(), 1);
         check_bounds(&f);
+    }
+
+    #[test]
+    fn wrong_id_sample_responses_back_off_unsupported() {
+        let tuning = DhtTuning::default();
+        let node = NodeId([7; 20]);
+        let keys = vec![DhtKey([1; 20])];
+        // Right ID with samples: answered as self, interval-based skip.
+        let ok = Response {
+            id: node,
+            samples: Some(keys.clone()),
+            interval: Some(0),
+            ..Response::default()
+        };
+        let (answered_as, skip) = sample_skip(&node, &ok, &tuning);
+        assert_eq!(answered_as, Some(node));
+        assert_eq!(skip, tuning.sample_min_resample);
+        // Wrong ID with samples and interval 0: unsupported backoff, and no
+        // visited identity for the stranger's ID.
+        let spoof = Response {
+            id: NodeId([9; 20]),
+            samples: Some(keys),
+            interval: Some(0),
+            ..Response::default()
+        };
+        let (answered_as, skip) = sample_skip(&node, &spoof, &tuning);
+        assert_eq!(answered_as, None);
+        assert_eq!(skip, tuning.sample_unsupported_skip);
+        // Wrong ID without samples: same treatment.
+        let silent = Response {
+            id: NodeId([9; 20]),
+            ..Response::default()
+        };
+        let (answered_as, skip) = sample_skip(&node, &silent, &tuning);
+        assert_eq!(answered_as, None);
+        assert_eq!(skip, tuning.sample_unsupported_skip);
     }
 
     #[test]
