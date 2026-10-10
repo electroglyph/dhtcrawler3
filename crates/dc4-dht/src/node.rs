@@ -279,6 +279,18 @@ impl SocketNode {
     }
 }
 
+/// What a reply delivery needs beyond the body itself: where it came from,
+/// what the sender saw us as, whether the sender is read-only (BEP 43) and
+/// when it arrived. Grouped so the delivery functions stay under the
+/// argument-count lint.
+#[derive(Clone, Copy)]
+struct ReplyMeta {
+    reported_ip: Option<SocketAddr>,
+    from: SocketAddr,
+    sender_read_only: bool,
+    now: Instant,
+}
+
 impl Inner {
     /// Binds the sockets and builds the node state (no tasks yet).
     pub(crate) async fn new(
@@ -848,14 +860,24 @@ impl Inner {
                     sock,
                     &msg.tid,
                     Ok(response),
-                    msg.ip,
-                    from,
-                    msg.read_only,
-                    now,
+                    ReplyMeta {
+                        reported_ip: msg.ip,
+                        from,
+                        sender_read_only: msg.read_only,
+                        now,
+                    },
                 ),
-                Body::Error(error) => {
-                    self.on_reply(sock, &msg.tid, Err(error), msg.ip, from, false, now)
-                }
+                Body::Error(error) => self.on_reply(
+                    sock,
+                    &msg.tid,
+                    Err(error),
+                    ReplyMeta {
+                        reported_ip: msg.ip,
+                        from,
+                        sender_read_only: false,
+                        now,
+                    },
+                ),
             },
             Err(DecodeError::BadQuery { tid, code, message }) => {
                 self.counters.queries_received.count_other();
@@ -1002,12 +1024,9 @@ impl Inner {
         sock: &SocketNode,
         tid: &[u8],
         body: Result<Response, KrpcError>,
-        reported_ip: Option<SocketAddr>,
-        from: SocketAddr,
-        sender_read_only: bool,
-        now: Instant,
+        meta: ReplyMeta,
     ) {
-        let pending = lock(&sock.state).txns.take(tid, &from);
+        let pending = lock(&sock.state).txns.take(tid, &meta.from);
         let Some(pending) = pending else {
             // Unknown (transaction, endpoint): late, or not ours.
             self.counters
@@ -1015,15 +1034,7 @@ impl Inner {
                 .drop_packet(DropReason::Unsolicited);
             return;
         };
-        self.deliver_reply(
-            sock,
-            pending,
-            body,
-            reported_ip,
-            from,
-            sender_read_only,
-            now,
-        );
+        self.deliver_reply(sock, pending, body, meta);
     }
 
     /// Delivers an already-claimed reply. `handle_datagram` calls this on the
@@ -1034,23 +1045,12 @@ impl Inner {
         sock: &SocketNode,
         pending: Pending,
         body: Result<Response, KrpcError>,
-        reported_ip: Option<SocketAddr>,
-        from: SocketAddr,
-        sender_read_only: bool,
-        now: Instant,
+        meta: ReplyMeta,
     ) {
         let reply = match body {
             Ok(response) => {
                 incr(&self.counters.responses_received);
-                self.learn_from_response(
-                    sock,
-                    &response,
-                    reported_ip,
-                    from,
-                    pending.expect,
-                    sender_read_only,
-                    now,
-                );
+                self.learn_from_response(sock, &response, pending.expect, meta);
                 Reply::Response(response)
             }
             Err(error) => {
@@ -1080,14 +1080,26 @@ impl Inner {
                         sock,
                         pending,
                         Ok(response),
-                        msg.ip,
-                        from,
-                        msg.read_only,
-                        now,
+                        ReplyMeta {
+                            reported_ip: msg.ip,
+                            from,
+                            sender_read_only: msg.read_only,
+                            now,
+                        },
                     );
                 }
                 Body::Error(error) => {
-                    self.deliver_reply(sock, pending, Err(error), msg.ip, from, false, now);
+                    self.deliver_reply(
+                        sock,
+                        pending,
+                        Err(error),
+                        ReplyMeta {
+                            reported_ip: msg.ip,
+                            from,
+                            sender_read_only: false,
+                            now,
+                        },
+                    );
                 }
                 Body::Query(_) => {
                     // Unreachable by construction (see above): degrade to a
@@ -1123,12 +1135,15 @@ impl Inner {
         &self,
         sock: &SocketNode,
         response: &Response,
-        reported_ip: Option<SocketAddr>,
-        from: SocketAddr,
         expect: Option<NodeId>,
-        sender_read_only: bool,
-        now: Instant,
+        meta: ReplyMeta,
     ) {
+        let ReplyMeta {
+            reported_ip,
+            from,
+            sender_read_only,
+            now,
+        } = meta;
         let (external_changed, switched) = {
             let mut st = lock(&sock.state);
             // An answer under another ID is a failure of the expected entry;
