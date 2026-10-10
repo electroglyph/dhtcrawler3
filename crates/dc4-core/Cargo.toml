@@ -1,0 +1,23 @@
+[package]
+name = "dc4-core"
+description = "Shared types for dhtcrawler4: DHT keys, info hashes, magnet links, text sanitising"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+data-encoding.workspace = true
+hex.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+unicode-script.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

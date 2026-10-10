@@ -1,18 +1,18 @@
 //! The store operations the pipeline uses, as traits, so the crawl and index
-//! loops can run against [`dc3_store::Store`] or an in-memory stand-in
+//! loops can run against [`dc4_store::Store`] or an in-memory stand-in
 //! ([`crate::memstore::MemoryStore`]).
 
 use std::future::Future;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use dc3_core::DhtKey;
-use dc3_store::{
+use dc4_core::DhtKey;
+use dc4_store::{
     IndexRow, NewTorrent, Observation, ObserveOutcome, PendingItem, RemovalCooldown, Result,
     ScrapeItem, Store,
 };
 
-/// What the crawl role needs from the database (the `dc3_crawler` user).
+/// What the crawl role needs from the database (the `dc4_crawler` user).
 pub trait CrawlStore: Clone + Send + Sync + 'static {
     /// See [`Store::observe`].
     fn observe(
@@ -289,7 +289,7 @@ impl CrawlStore for Store {
     }
 }
 
-/// What the index role needs from the database (the `dc3_indexer` user).
+/// What the index role needs from the database (the `dc4_indexer` user).
 pub trait ChangeFeed: Clone + Send + Sync + 'static {
     /// See [`Store::high_water_mark`].
     fn high_water_mark(&self) -> impl Future<Output = Result<Option<i64>>> + Send;

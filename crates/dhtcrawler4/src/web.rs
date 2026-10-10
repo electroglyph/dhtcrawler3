@@ -1,13 +1,13 @@
-//! The web role (design §12): serves `dc3-web` over the live search index.
+//! The web role (design §12): serves `dc4-web` over the live search index.
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dc3_search::{SearchError, SearchHandle};
-use dc3_store::Store;
-use dc3_web::{WebConfig, WebDeps};
+use dc4_search::{SearchError, SearchHandle};
+use dc4_store::Store;
+use dc4_web::{WebConfig, WebDeps};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ConfigError};
@@ -25,12 +25,12 @@ pub enum WebRoleError {
     #[error("cannot open the search index: {0}")]
     Search(#[from] SearchError),
     #[error("web server error: {0}")]
-    Web(#[from] dc3_web::WebError),
+    Web(#[from] dc4_web::WebError),
     #[error("web task failed: {0}")]
     Task(String),
 }
 
-/// The `dc3-web` configuration from `[web]`.
+/// The `dc4-web` configuration from `[web]`.
 pub fn web_config(cfg: &Config) -> Result<WebConfig, ConfigError> {
     let w = &cfg.web;
     Ok(WebConfig {
@@ -73,7 +73,7 @@ pub async fn run(
         backend: store,
         search,
     };
-    let result = dc3_web::serve(cfg, deps, cancel.cancelled_owned()).await;
+    let result = dc4_web::serve(cfg, deps, cancel.cancelled_owned()).await;
     stop.cancel();
     if let Err(e) = readiness.await {
         tracing::warn!(error = %e, "the web readiness task failed");
@@ -113,11 +113,11 @@ mod tests {
         assert!(w.hsts);
         assert_eq!(
             w.search_cache_entries,
-            dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES
+            dc4_web::DEFAULT_SEARCH_CACHE_ENTRIES
         );
         assert_eq!(
             w.search_cache_ttl,
-            Duration::from_secs(dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS)
+            Duration::from_secs(dc4_web::DEFAULT_SEARCH_CACHE_TTL_SECS)
         );
         assert_eq!(
             w.trusted_proxies,

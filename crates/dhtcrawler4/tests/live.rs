@@ -35,10 +35,10 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use common::{note, wait_until};
-use dc3_core::DhtKey;
-use dc3_dht::{DEFAULT_BOOTSTRAP, Dht, DhtConfig, Discovered, MIN_GOOD_NODES, Source};
-use dc3_peer::{FetchLimits, fetch_metadata};
-use dc3_search::{IndexDoc, SearchIndex, SearchQuery};
+use dc4_core::DhtKey;
+use dc4_dht::{DEFAULT_BOOTSTRAP, Dht, DhtConfig, Discovered, MIN_GOOD_NODES, Source};
+use dc4_peer::{FetchLimits, fetch_metadata};
+use dc4_search::{IndexDoc, SearchIndex, SearchQuery};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -52,7 +52,7 @@ fn require_live_env() {
 }
 
 /// Always-on progress line: unlike [`note`](common::note) this prints
-/// whether or not `DC3_E2E_VERBOSE` is set, so a pasted log from a failing
+/// whether or not `DC4_E2E_VERBOSE` is set, so a pasted log from a failing
 /// run tells the story on its own. Per-peer chatter stays behind `note`.
 fn announce(started: Instant, what: &str) {
     eprintln!("[{:>6.2}s] {what}", started.elapsed().as_secs_f64());
@@ -397,7 +397,7 @@ async fn fetch_from_live_peers(
 
 /// Test 4: metadata fetched from real peers is authentic and parses —
 /// `fetch_metadata` verifies the hash, and the test additionally pins the
-/// SHA-1 itself, parses with `dc3-torrent`, and checks the v1 `pieces`
+/// SHA-1 itself, parses with `dc4-torrent`, and checks the v1 `pieces`
 /// invariant on the raw dictionary.
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -430,9 +430,9 @@ async fn live_fetch_verifies_real_metadata() {
                 &key.as_bytes()[..],
                 "fetched bytes do not hash to the requested key"
             );
-            let meta = dc3_torrent::parse_info(info)
+            let meta = dc4_torrent::parse_info(info)
                 .unwrap_or_else(|e| panic!("live metadata for {key} must parse: {e:?}"));
-            let root = dc3_bencode::decode(info, &dc3_bencode::Limits::METADATA)
+            let root = dc4_bencode::decode(info, &dc4_bencode::Limits::METADATA)
                 .expect("live metadata is bencode");
             if let Some(pieces) = root.as_dict().and_then(|d| d.get_bytes(b"pieces")) {
                 assert_eq!(
@@ -490,7 +490,7 @@ async fn live_search_roundtrips_fetched_torrents() {
         let mut writer = index.writer(20 * 1024 * 1024).expect("an index writer");
         let mut names = Vec::new();
         for (i, (key, info)) in fetched.iter().enumerate() {
-            let meta = dc3_torrent::parse_info(info)
+            let meta = dc4_torrent::parse_info(info)
                 .unwrap_or_else(|e| panic!("live metadata for {key} must parse: {e:?}"));
             let id = i as i64 + 1;
             let files: Vec<&str> = meta.files.iter().map(|f| f.path.as_str()).collect();

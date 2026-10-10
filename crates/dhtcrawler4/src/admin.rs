@@ -3,8 +3,8 @@
 
 use std::io::Write;
 
-use dc3_core::AnyKey;
-use dc3_store::{Store, StoreError};
+use dc4_core::AnyKey;
+use dc4_store::{Store, StoreError};
 
 use crate::config::{Config, DbRole};
 

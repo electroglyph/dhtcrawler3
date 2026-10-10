@@ -25,11 +25,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use dc3_core::DhtKey;
-use dc3_dht::compact::canonical_addr;
-use dc3_peer::{BYTE_BUDGET_UNIT, FetchError, FetchLimits};
-use dc3_store::{FileRow, NewTorrent, PendingItem, StoreError};
-use dc3_torrent::TorrentMeta;
+use dc4_core::DhtKey;
+use dc4_dht::compact::canonical_addr;
+use dc4_peer::{BYTE_BUDGET_UNIT, FetchError, FetchLimits};
+use dc4_store::{FileRow, NewTorrent, PendingItem, StoreError};
+use dc4_torrent::TorrentMeta;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
@@ -103,19 +103,19 @@ pub const STORE_RETRY_MAX: Duration = Duration::from_secs(30);
 /// Shortest lease renewal period accepted (guards against a zero period).
 const MIN_RENEW_INTERVAL: Duration = Duration::from_millis(10);
 
-const METRIC_FETCH: &str = "dc3_fetch_total";
-const METRIC_DESTINATION_SKIPPED: &str = "dc3_destination_skipped_total";
-const METRIC_CLAIM_CHAN_DEPTH: &str = "dc3_claim_chan_depth";
+const METRIC_FETCH: &str = "dc4_fetch_total";
+const METRIC_DESTINATION_SKIPPED: &str = "dc4_destination_skipped_total";
+const METRIC_CLAIM_CHAN_DEPTH: &str = "dc4_claim_chan_depth";
 /// Claimed keys per scan, by liveness (`live=true` for `seeders_est > 0`,
 /// `false` for unscraped NULL and measured-dead 0). The step-2 gate reads
 /// `live` up / `false` down vs the pre-change hour. In-memory only,
 /// permanent, two series.
-const METRIC_CLAIMED: &str = "dc3_claimed_total";
+const METRIC_CLAIMED: &str = "dc4_claimed_total";
 /// Started peer dials, by claim-time estimate bucket (`null`/`dead`/`low`/
 /// `high`, see [`est_bucket`]). Read against [`METRIC_FETCH`] with the same
 /// label as ok per 10k dials per bucket — the step-4 gate. In-memory only,
 /// permanent, four series.
-const METRIC_DIALS: &str = "dc3_fetch_dials_total";
+const METRIC_DIALS: &str = "dc4_fetch_dials_total";
 
 /// Per-key fetch effort derived from the claim-time estimate (update.md
 /// step 4): junk gets a small dial budget and one lookup, proven swarms
@@ -268,7 +268,7 @@ impl Default for FetchTuning {
     }
 }
 
-/// How one key ended (the `outcome` label of `dc3_fetch_total`).
+/// How one key ended (the `outcome` label of `dc4_fetch_total`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FetchOutcome {
     /// Stored.
@@ -342,7 +342,7 @@ impl Default for DestLimits {
 }
 
 /// Why a destination was skipped (the `reason` label of
-/// `dc3_destination_skipped_total`).
+/// `dc4_destination_skipped_total`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestDenied {
     /// Already at the concurrent-connection limit.
@@ -566,10 +566,10 @@ pub enum Inspection {
 /// Verifies `info` against `key` and parses it. CPU-bound; run it off the
 /// async threads.
 pub fn inspect(key: &DhtKey, info: &[u8]) -> Inspection {
-    if dc3_torrent::verify(key, info).is_none() {
+    if dc4_torrent::verify(key, info).is_none() {
         return Inspection::Mismatch;
     }
-    let parsed = dc3_torrent::parse_info_visit(info, &mut |_| {});
+    let parsed = dc4_torrent::parse_info_visit(info, &mut |_| {});
     match parsed {
         Err(_) => Inspection::Invalid,
         Ok(meta) if meta.private => Inspection::Private,
@@ -867,7 +867,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         // first drains (update.md step 4); `scrape_peers` takes `&self`, so
         // every call is a fresh future. The caller's key deadline bounds the
         // pair — no new timeout knob.
-        let mut lookup: Option<Pin<Box<dyn Future<Output = dc3_dht::ScrapeReport> + Send>>> = Some(
+        let mut lookup: Option<Pin<Box<dyn Future<Output = dc4_dht::ScrapeReport> + Send>>> = Some(
             Box::pin(self.peers.scrape_peers(key, self.tuning.get_peers_timeout)),
         );
         let mut lookups_done: u8 = 0;
@@ -978,7 +978,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
             max_metadata: self.max_metadata,
             byte_budget: Some(Arc::clone(&self.byte_budget)),
         };
-        let result = dc3_peer::fetch_metadata(peer, key, &limits).await;
+        let result = dc4_peer::fetch_metadata(peer, key, &limits).await;
         let negative = matches!(result, Err(FetchError::Connect(_) | FetchError::Timeout));
         permit.finish(negative, Instant::now());
         result
@@ -1220,7 +1220,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use dc3_bencode::OwnedValue;
+    use dc4_bencode::OwnedValue;
     use tokio::net::TcpListener;
 
     use std::net::IpAddr;
@@ -1469,11 +1469,11 @@ mod tests {
         if private {
             d.insert(b"private".to_vec(), OwnedValue::Int(1));
         }
-        dc3_bencode::encode(&OwnedValue::Dict(d))
+        dc4_bencode::encode(&OwnedValue::Dict(d))
     }
 
     fn key_of(info: &[u8]) -> DhtKey {
-        dc3_torrent::parse_info(info).unwrap().info_hash_v1.unwrap()
+        dc4_torrent::parse_info(info).unwrap().info_hash_v1.unwrap()
     }
 
     #[test]
@@ -1493,14 +1493,14 @@ mod tests {
         assert_eq!(inspect(&DhtKey([0; 20]), &good), Inspection::Mismatch);
         let private = info_dict("tracker only", &["x.txt"], true);
         assert_eq!(inspect(&key_of(&private), &private), Inspection::Private);
-        // The test SHA-1 agrees with dc3-torrent.
+        // The test SHA-1 agrees with dc4-torrent.
         assert_eq!(DhtKey(sha1(&good)), k);
         assert_eq!(
             DhtKey(sha1(b"abc")).to_hex(),
             "a9993e364706816aba3e25717850c26c9cd0d89d"
         );
         // Verified but unparseable: not a torrent, or a negative length.
-        let junk = dc3_bencode::encode(&OwnedValue::Dict(BTreeMap::new()));
+        let junk = dc4_bencode::encode(&OwnedValue::Dict(BTreeMap::new()));
         assert_eq!(inspect(&DhtKey(sha1(&junk)), &junk), Inspection::Invalid);
         let negative = info_dict_sized("clean name", &[("a.txt", 5), ("b.txt", -1)], false);
         assert_eq!(
@@ -1516,10 +1516,10 @@ mod tests {
         async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
             self.0.clone()
         }
-        async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
-            dc3_dht::ScrapeReport {
+        async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc4_dht::ScrapeReport {
+            dc4_dht::ScrapeReport {
                 peers: self.0.clone(),
-                ..dc3_dht::ScrapeReport::default()
+                ..dc4_dht::ScrapeReport::default()
             }
         }
         fn own_ips(&self) -> Vec<IpAddr> {
@@ -1598,7 +1598,7 @@ mod tests {
     async fn seeder(info: &[u8]) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(dc3_peer::seeder::serve(
+        tokio::spawn(dc4_peer::seeder::serve(
             listener,
             key_of(info),
             info.to_vec(),
@@ -1744,16 +1744,16 @@ mod tests {
     impl CrawlStore for ScriptedClaims {
         async fn observe(
             &self,
-            _batch: &[dc3_store::Observation],
+            _batch: &[dc4_store::Observation],
             _max_pending: i64,
-        ) -> dc3_store::Result<dc3_store::ObserveOutcome> {
+        ) -> dc4_store::Result<dc4_store::ObserveOutcome> {
             unimplemented!()
         }
         async fn claim(
             &self,
             n: i64,
             _lease: Duration,
-        ) -> dc3_store::Result<Vec<PendingItem>> {
+        ) -> dc4_store::Result<Vec<PendingItem>> {
             self.calls.lock().unwrap().push(("claim", n));
             if self.fail_topup {
                 return Err(StoreError::Invalid("injected top-up failure".into()));
@@ -1764,7 +1764,7 @@ mod tests {
             &self,
             n: i64,
             _lease: Duration,
-        ) -> dc3_store::Result<Vec<PendingItem>> {
+        ) -> dc4_store::Result<Vec<PendingItem>> {
             self.calls.lock().unwrap().push(("claim_live", n));
             Ok(self.live.clone())
         }
@@ -1772,23 +1772,23 @@ mod tests {
             &self,
             _key: &DhtKey,
             _lease: Duration,
-        ) -> dc3_store::Result<bool> {
+        ) -> dc4_store::Result<bool> {
             unimplemented!()
         }
         async fn complete(
             &self,
             _key: &DhtKey,
             _t: &NewTorrent,
-        ) -> dc3_store::Result<i64> {
+        ) -> dc4_store::Result<i64> {
             unimplemented!()
         }
-        async fn fail(&self, _key: &DhtKey) -> dc3_store::Result<bool> {
+        async fn fail(&self, _key: &DhtKey) -> dc4_store::Result<bool> {
             unimplemented!()
         }
-        async fn give_up(&self, _key: &DhtKey) -> dc3_store::Result<bool> {
+        async fn give_up(&self, _key: &DhtKey) -> dc4_store::Result<bool> {
             unimplemented!()
         }
-        async fn pending_depth(&self) -> dc3_store::Result<i64> {
+        async fn pending_depth(&self) -> dc4_store::Result<i64> {
             unimplemented!()
         }
         async fn claim_scrape_due(
@@ -1796,7 +1796,7 @@ mod tests {
             _limit: i64,
             _live_interval: Duration,
             _unknown_interval: Duration,
-        ) -> dc3_store::Result<Vec<dc3_store::ScrapeItem>> {
+        ) -> dc4_store::Result<Vec<dc4_store::ScrapeItem>> {
             unimplemented!()
         }
         async fn record_scrape(
@@ -1804,13 +1804,13 @@ mod tests {
             _id: i64,
             _seeders_est: Option<u32>,
             _scrape_failures: u32,
-        ) -> dc3_store::Result<bool> {
+        ) -> dc4_store::Result<bool> {
             unimplemented!()
         }
         async fn record_scrapes(
             &self,
             _rows: &[(i64, Option<u32>, u32)],
-        ) -> dc3_store::Result<u64> {
+        ) -> dc4_store::Result<u64> {
             unimplemented!()
         }
         async fn tombstone_dead(
@@ -1818,33 +1818,33 @@ mod tests {
             _id: i64,
             _old_last_seen_at: chrono::DateTime<chrono::Utc>,
             _old_change_seq: i64,
-        ) -> dc3_store::Result<bool> {
+        ) -> dc4_store::Result<bool> {
             unimplemented!()
         }
         async fn purge_tombstoned(
             &self,
             _grace: Duration,
             _limit: i64,
-        ) -> dc3_store::Result<u64> {
+        ) -> dc4_store::Result<u64> {
             unimplemented!()
         }
         async fn purge_gave_up(
             &self,
             _older_than: Duration,
-        ) -> dc3_store::Result<u64> {
+        ) -> dc4_store::Result<u64> {
             unimplemented!()
         }
         async fn note_fetch_estimate(
             &self,
             _key: &DhtKey,
             _seeders_est: u32,
-        ) -> dc3_store::Result<()> {
+        ) -> dc4_store::Result<()> {
             unimplemented!()
         }
-        async fn trim_removed_keys(&self, _cap: i64) -> dc3_store::Result<u64> {
+        async fn trim_removed_keys(&self, _cap: i64) -> dc4_store::Result<u64> {
             unimplemented!()
         }
-        async fn removed_keys_count(&self) -> dc3_store::Result<i64> {
+        async fn removed_keys_count(&self) -> dc4_store::Result<i64> {
             unimplemented!()
         }
         async fn removal_cooldowns(
@@ -1852,19 +1852,19 @@ mod tests {
             _keys: &[DhtKey],
             _base_days: u64,
             _strong_evidence: &[DhtKey],
-        ) -> dc3_store::Result<Vec<dc3_store::RemovalCooldown>> {
+        ) -> dc4_store::Result<Vec<dc4_store::RemovalCooldown>> {
             unimplemented!()
         }
         async fn note_removed_sightings(
             &self,
             _keys: &[DhtKey],
-        ) -> dc3_store::Result<u64> {
+        ) -> dc4_store::Result<u64> {
             unimplemented!()
         }
-        async fn refresh_scraped(&self, _keys: &[DhtKey]) -> dc3_store::Result<u64> {
+        async fn refresh_scraped(&self, _keys: &[DhtKey]) -> dc4_store::Result<u64> {
             unimplemented!()
         }
-        async fn ping(&self) -> dc3_store::Result<()> {
+        async fn ping(&self) -> dc4_store::Result<()> {
             unimplemented!()
         }
     }
@@ -2005,13 +2005,13 @@ mod tests {
         async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
             Vec::new()
         }
-        async fn scrape_peers(&self, _: DhtKey, timeout: Duration) -> dc3_dht::ScrapeReport {
+        async fn scrape_peers(&self, _: DhtKey, timeout: Duration) -> dc4_dht::ScrapeReport {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             lock(&self.timeouts).push(timeout);
             let peers = lock(&self.scripts).pop_front().unwrap_or_default();
-            dc3_dht::ScrapeReport {
+            dc4_dht::ScrapeReport {
                 peers,
-                ..dc3_dht::ScrapeReport::default()
+                ..dc4_dht::ScrapeReport::default()
             }
         }
         fn own_ips(&self) -> Vec<IpAddr> {
@@ -2293,21 +2293,21 @@ mod tests {
         });
         let text = handle.render();
         assert!(
-            text.contains("dc3_fetch_dials_total{est=\"high\"} 1"),
+            text.contains("dc4_fetch_dials_total{est=\"high\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("dc3_fetch_dials_total{est=\"null\"} 1"),
+            text.contains("dc4_fetch_dials_total{est=\"null\"} 1"),
             "{text}"
         );
         let fetch_line = text
             .lines()
-            .find(|l| l.starts_with("dc3_fetch_total{") && l.contains("est=\"high\""))
+            .find(|l| l.starts_with("dc4_fetch_total{") && l.contains("est=\"high\""))
             .unwrap_or_else(|| panic!("no high-bucket fetch_total:\n{text}"));
         assert!(fetch_line.contains("outcome=\"fetch_failed\""), "{text}");
         let null_line = text
             .lines()
-            .find(|l| l.starts_with("dc3_fetch_total{") && l.contains("est=\"null\""))
+            .find(|l| l.starts_with("dc4_fetch_total{") && l.contains("est=\"null\""))
             .unwrap_or_else(|| panic!("no null-bucket fetch_total:\n{text}"));
         assert!(null_line.contains("outcome=\"fetch_failed\""), "{text}");
     }
@@ -2620,7 +2620,7 @@ mod tests {
         // bulk scan of 512 fits the store's 10 000-claim ceiling.
         assert_eq!(CLAIM_BULK, 512);
         const {
-            assert!(CLAIM_BULK < dc3_store::MAX_CLAIM);
+            assert!(CLAIM_BULK < dc4_store::MAX_CLAIM);
         }
         assert_eq!(CLAIM_CHAN_BATCHES, 256);
         assert_eq!(CLAIM_CHAN_BATCHES as i64 * CLAIM_BATCH, 2048);
@@ -2879,7 +2879,7 @@ mod tests {
             store.enqueue(k);
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
-            tokio::spawn(dc3_peer::seeder::serve(listener, k, info.clone()));
+            tokio::spawn(dc4_peer::seeder::serve(listener, k, info.clone()));
             let f = fetcher(&store, FixedPeers(vec![addr]));
             assert_eq!(f.process(&item(k)).await, expected);
             assert!(store.torrent(&k).is_none());
@@ -2954,13 +2954,13 @@ mod tests {
         fn own_endpoints(&self) -> Vec<SocketAddr> {
             Vec::new()
         }
-        async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
-            let mut sd = dc3_dht::bloom::ScrapeBloom::empty();
+        async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc4_dht::ScrapeReport {
+            let mut sd = dc4_dht::bloom::ScrapeBloom::empty();
             sd.insert_ip(&"127.0.0.1".parse().unwrap());
-            dc3_dht::ScrapeReport {
+            dc4_dht::ScrapeReport {
                 peers: Vec::new(),
                 seed_filters: vec![sd.0],
-                peer_filters: vec![[0u8; dc3_dht::bloom::BLOOM_LEN]],
+                peer_filters: vec![[0u8; dc4_dht::bloom::BLOOM_LEN]],
                 aware: 1,
                 unaware: 0,
                 families_attempted: 2,
@@ -3014,7 +3014,7 @@ mod tests {
         async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
             Vec::new()
         }
-        async fn scrape_peers(&self, key: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
+        async fn scrape_peers(&self, key: DhtKey, _: Duration) -> dc4_dht::ScrapeReport {
             let peers = self
                 .table
                 .lock()
@@ -3022,9 +3022,9 @@ mod tests {
                 .get(&key)
                 .cloned()
                 .unwrap_or_default();
-            dc3_dht::ScrapeReport {
+            dc4_dht::ScrapeReport {
                 peers,
-                ..dc3_dht::ScrapeReport::default()
+                ..dc4_dht::ScrapeReport::default()
             }
         }
         fn own_ips(&self) -> Vec<IpAddr> {
@@ -3140,7 +3140,7 @@ mod tests {
             store.enqueue(*k);
         }
 
-        let max_live = u32::try_from(dc3_store::MAX_FETCH_ATTEMPTS).unwrap_or(u32::MAX) - 1;
+        let max_live = u32::try_from(dc4_store::MAX_FETCH_ATTEMPTS).unwrap_or(u32::MAX) - 1;
         let mut rng = Lcg(seed);
         let mut completed = std::collections::HashSet::new();
         let mut gave_up = std::collections::HashSet::new();

@@ -10,7 +10,7 @@
 
 name: dhtcrawler4
 
-x-dc3: &dc3
+x-dc4: &dc4
   build:
     context: ..
     dockerfile: Dockerfile
@@ -21,13 +21,13 @@ x-dc3: &dc3
   pids_limit: 512
   tmpfs: ["/tmp:size=16m,mode=1777"]
   restart: unless-stopped
-  environment: &dc3-env
-    DC3_DATABASE__HOST: db
-    DC3_DATABASE__PASSWORD_FILE: /run/secrets/db_password
-    DC3_LOG__FORMAT: json
+  environment: &dc4-env
+    DC4_DATABASE__HOST: db
+    DC4_DATABASE__PASSWORD_FILE: /run/secrets/db_password
+    DC4_LOG__FORMAT: json
     # Metrics and health listen inside the container; only the internal backend
     # network can reach them.
-    DC3_METRICS__LISTEN: "0.0.0.0:9100"
+    DC4_METRICS__LISTEN: "0.0.0.0:9100"
 
 services:
   db:
@@ -46,36 +46,36 @@ services:
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/pg_superuser_password
-      DC3_OWNER_PASSWORD_FILE: /run/secrets/dc3_owner_password
-      DC3_CRAWLER_PASSWORD_FILE: /run/secrets/dc3_crawler_password
-      DC3_INDEXER_PASSWORD_FILE: /run/secrets/dc3_indexer_password
-      DC3_WEB_PASSWORD_FILE: /run/secrets/dc3_web_password
+      DC4_OWNER_PASSWORD_FILE: /run/secrets/dc4_owner_password
+      DC4_CRAWLER_PASSWORD_FILE: /run/secrets/dc4_crawler_password
+      DC4_INDEXER_PASSWORD_FILE: /run/secrets/dc4_indexer_password
+      DC4_WEB_PASSWORD_FILE: /run/secrets/dc4_web_password
     secrets:
       - pg_superuser_password
-      - dc3_owner_password
-      - dc3_crawler_password
-      - dc3_indexer_password
-      - dc3_web_password
+      - dc4_owner_password
+      - dc4_crawler_password
+      - dc4_indexer_password
+      - dc4_web_password
     volumes:
       - pgdata:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     networks: [backend]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d dc3"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dc4"]
       interval: 5s
       timeout: 5s
       retries: 20
     mem_limit: 4g
 
   migrate:
-    <<: *dc3
+    <<: *dc4
     command: ["migrate"]
     restart: "no"
     environment:
-      <<: *dc3-env
-      DC3_DATABASE__USER: dc3_owner
+      <<: *dc4-env
+      DC4_DATABASE__USER: dc4_owner
     secrets:
-      - source: dc3_owner_password
+      - source: dc4_owner_password
         target: db_password
     networks: [backend]
     depends_on:
@@ -84,15 +84,15 @@ services:
     mem_limit: 256m
 
   crawl:
-    <<: *dc3
+    <<: *dc4
     command: ["crawl"]
     environment:
-      <<: *dc3-env
-      DC3_DATABASE__USER: dc3_crawler
+      <<: *dc4-env
+      DC4_DATABASE__USER: dc4_crawler
       # 768 fetch workers plus admission and scrapes share this pool.
-      DC3_DATABASE__MAX_CONNECTIONS: "128"
+      DC4_DATABASE__MAX_CONNECTIONS: "128"
     secrets:
-      - source: dc3_crawler_password
+      - source: dc4_crawler_password
         target: db_password
     ports:
       - "6881:6881/udp"   # IPv4 and IPv6
@@ -114,14 +114,14 @@ services:
     mem_limit: 3g
 
   index:
-    <<: *dc3
+    <<: *dc4
     command: ["index"]
     environment:
-      <<: *dc3-env
-      DC3_DATABASE__USER: dc3_indexer
-      DC3_DATABASE__MAX_CONNECTIONS: "4"
+      <<: *dc4-env
+      DC4_DATABASE__USER: dc4_indexer
+      DC4_DATABASE__MAX_CONNECTIONS: "4"
     secrets:
-      - source: dc3_indexer_password
+      - source: dc4_indexer_password
         target: db_password
     volumes:
       - index:/var/lib/dhtcrawler4/index
@@ -138,17 +138,17 @@ services:
     mem_limit: 1g
 
   web:
-    <<: *dc3
+    <<: *dc4
     command: ["web"]
     environment:
-      <<: *dc3-env
-      DC3_DATABASE__USER: dc3_web
-      DC3_WEB__LISTEN: "0.0.0.0:8080"
+      <<: *dc4-env
+      DC4_DATABASE__USER: dc4_web
+      DC4_WEB__LISTEN: "0.0.0.0:8080"
       # Connections to the published port arrive from the frontend network's
       # gateway (docker-proxy), so that subnet is the trusted proxy.
-      DC3_WEB__TRUSTED_PROXIES: "172.30.80.0/24"
+      DC4_WEB__TRUSTED_PROXIES: "172.30.80.0/24"
     secrets:
-      - source: dc3_web_password
+      - source: dc4_web_password
         target: db_password
     ports:
       - "80:8080"
@@ -186,11 +186,11 @@ volumes:
 secrets:
   pg_superuser_password:
     file: ./secrets/pg_superuser_password
-  dc3_owner_password:
-    file: ./secrets/dc3_owner_password
-  dc3_crawler_password:
-    file: ./secrets/dc3_crawler_password
-  dc3_indexer_password:
-    file: ./secrets/dc3_indexer_password
-  dc3_web_password:
-    file: ./secrets/dc3_web_password
+  dc4_owner_password:
+    file: ./secrets/dc4_owner_password
+  dc4_crawler_password:
+    file: ./secrets/dc4_crawler_password
+  dc4_indexer_password:
+    file: ./secrets/dc4_indexer_password
+  dc4_web_password:
+    file: ./secrets/dc4_web_password

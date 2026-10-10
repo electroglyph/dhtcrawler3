@@ -13,7 +13,7 @@ dhtcrawler4 is a fork of [dhtcrawler3](https://github.com/poonasor/dhtcrawler3) 
 
 ## What changed since the dhtcrawler3 fork
 
-- **Removed content moderation:** report form, CSRF, `dc3-policy` crate, blocked-terms list, denylist/block pages, report/denylist tables, policy fuzz target.
+- **Removed content moderation:** report form, CSRF, `dc4-policy` crate, blocked-terms list, denylist/block pages, report/denylist tables, policy fuzz target.
 - **Added seeder scrapes (BEP 33):** the crawler now asks peers how many seeders each torrent has on its own bandwidth budget, shows seeder counts in search with `sort=seeders`, drops dead torrents, and remembers removed keys for 7→28→90 days.
 - **Server-sized crawl throughput:** a single claimer bulk-claims 512 keys per scan and feeds 8-key batches to the workers over a bounded channel (one queue scan per 512 keys instead of one per worker), each batch recorded in a single database transaction (falling back to one key at a time when a batch is rejected), with tighter fetch timeouts, a bigger scrape budget, 160 sampler workers, and a larger database connection pool plus gauges to watch it.
 - **Store durability:** deleted torrents stay reported-as-deleted so slow indexers still converge, database permissions repair themselves on migrate, refetched torrents come back to life with their liveness data intact, and counters can't overflow.
@@ -56,7 +56,7 @@ superuser access stays peer-authenticated, step 3 — one line each, no
 trailing-newline issues since `read_password_file` tolerates exactly one):
 
 ```sh
-for name in dc3_owner_password dc3_crawler_password dc3_indexer_password dc3_web_password; do
+for name in dc4_owner_password dc4_crawler_password dc4_indexer_password dc4_web_password; do
   head -c 60 /dev/urandom | base64 -w 0 | sudo tee /etc/dhtcrawler4/secrets/$name > /dev/null
 done
 sudo chown dhtcrawler4:dhtcrawler4 /etc/dhtcrawler4/secrets/*
@@ -90,23 +90,23 @@ host    all    all    127.0.0.1/32    scram-sha-256
 
 ### 3. Roles and database
 
-`deploy/postgres/init/10-roles.sh` creates the `dc3` database and the four
-least-privilege roles (`dc3_owner` for migrations, one service role each for
+`deploy/postgres/init/10-roles.sh` creates the `dc4` database and the four
+least-privilege roles (`dc4_owner` for migrations, one service role each for
 crawl/index/web, with connection limits and idle-transaction timeouts). It
 runs unchanged outside Docker, but `psql` reads the secret files client-side,
 so run it as the `postgres` OS user with throwaway copies it can read:
 
 ```sh
 cd dhtcrawler4   # your checkout
-sudo install -d -m 0700 -o postgres -g postgres /tmp/dc3sec
-sudo install -m 0600 -o postgres -g postgres /etc/dhtcrawler4/secrets/* /tmp/dc3sec/
+sudo install -d -m 0700 -o postgres -g postgres /tmp/dc4sec
+sudo install -m 0600 -o postgres -g postgres /etc/dhtcrawler4/secrets/* /tmp/dc4sec/
 sudo -u postgres env \
-  DC3_OWNER_PASSWORD_FILE=/tmp/dc3sec/dc3_owner_password \
-  DC3_CRAWLER_PASSWORD_FILE=/tmp/dc3sec/dc3_crawler_password \
-  DC3_INDEXER_PASSWORD_FILE=/tmp/dc3sec/dc3_indexer_password \
-  DC3_WEB_PASSWORD_FILE=/tmp/dc3sec/dc3_web_password \
+  DC4_OWNER_PASSWORD_FILE=/tmp/dc4sec/dc4_owner_password \
+  DC4_CRAWLER_PASSWORD_FILE=/tmp/dc4sec/dc4_crawler_password \
+  DC4_INDEXER_PASSWORD_FILE=/tmp/dc4sec/dc4_indexer_password \
+  DC4_WEB_PASSWORD_FILE=/tmp/dc4sec/dc4_web_password \
   bash deploy/postgres/init/10-roles.sh
-sudo rm -rf /tmp/dc3sec
+sudo rm -rf /tmp/dc4sec
 ```
 
 Superuser access stays peer-authenticated (`sudo -u postgres psql`), which
@@ -136,10 +136,10 @@ sudo install -m 0644 -o root -g root deploy/config/dhtcrawler4.toml /etc/dhtcraw
 sudoedit /etc/dhtcrawler4/dhtcrawler4.toml
 ```
 
-Change in `[database]`: `host = "127.0.0.1"` (leave port 5432, name `dc3`).
+Change in `[database]`: `host = "127.0.0.1"` (leave port 5432, name `dc4`).
 On a server, also raise `max_connections`: it sizes each role's database
 pool and the default 16 is lean for 768 fetch workers (the Docker deployment
-runs crawl at 128 via `DC3_DATABASE__MAX_CONNECTIONS`). Keep the sum across
+runs crawl at 128 via `DC4_DATABASE__MAX_CONNECTIONS`). Keep the sum across
 roles comfortably under PostgreSQL's own `max_connections` — the stock
 default of 100 leaves little headroom once you raise the crawl pool (the
 Docker deployment sets 200).
@@ -150,7 +150,7 @@ systemd unit (step 6), so one file serves all roles. Leave `hsts = false`
 step 1. One key has no usable default: the example ships
 `trusted_proxies = []`, which only warns on loopback but is rejected when
 the site listens on a real interface (as it does here on port 80) — the
-unit below supplies it via `DC3_WEB__TRUSTED_PROXIES` instead, so the file
+unit below supplies it via `DC4_WEB__TRUSTED_PROXIES` instead, so the file
 can keep the empty default.
 
 Validate (prints the config back without secrets, plus warnings):
@@ -163,8 +163,8 @@ Then apply the migrations as the owner:
 
 ```sh
 sudo -u dhtcrawler4 env \
-  DC3_DATABASE__USER=dc3_owner \
-  DC3_DATABASE__PASSWORD_FILE=/etc/dhtcrawler4/secrets/dc3_owner_password \
+  DC4_DATABASE__USER=dc4_owner \
+  DC4_DATABASE__PASSWORD_FILE=/etc/dhtcrawler4/secrets/dc4_owner_password \
   dhtcrawler4 --config /etc/dhtcrawler4/dhtcrawler4.toml migrate
 ```
 
@@ -189,8 +189,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-Environment=DC3_DATABASE__USER=dc3_owner
-Environment=DC3_DATABASE__PASSWORD_FILE=/etc/dhtcrawler4/secrets/dc3_owner_password
+Environment=DC4_DATABASE__USER=dc4_owner
+Environment=DC4_DATABASE__PASSWORD_FILE=/etc/dhtcrawler4/secrets/dc4_owner_password
 ExecStart=/usr/local/bin/dhtcrawler4 --config /etc/dhtcrawler4/dhtcrawler4.toml migrate
 ```
 
@@ -212,9 +212,9 @@ ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/dhtcrawler4
 MemoryMax=2G
-Environment=DC3_DATABASE__USER=dc3_crawler
-Environment=DC3_DATABASE__PASSWORD_FILE=/etc/dhtcrawler4/secrets/dc3_crawler_password
-Environment=DC3_LOG__FORMAT=json
+Environment=DC4_DATABASE__USER=dc4_crawler
+Environment=DC4_DATABASE__PASSWORD_FILE=/etc/dhtcrawler4/secrets/dc4_crawler_password
+Environment=DC4_LOG__FORMAT=json
 ExecStart=/usr/local/bin/dhtcrawler4 --config /etc/dhtcrawler4/dhtcrawler4.toml crawl
 TimeoutStopSec=70
 Restart=on-failure
@@ -225,20 +225,20 @@ WantedBy=multi-user.target
 ```
 
 `/etc/systemd/system/dhtcrawler4-index.service` — same, with
-`MemoryMax=1G`, `DC3_DATABASE__USER=dc3_indexer`,
-`DC3_DATABASE__MAX_CONNECTIONS=4`, the indexer password file, and `index`
+`MemoryMax=1G`, `DC4_DATABASE__USER=dc4_indexer`,
+`DC4_DATABASE__MAX_CONNECTIONS=4`, the indexer password file, and `index`
 as the command.
 
 `/etc/systemd/system/dhtcrawler4-web.service` — same, with `MemoryMax=512M`,
-`DC3_DATABASE__USER=dc3_web`, the web password file, the bind privilege for
+`DC4_DATABASE__USER=dc4_web`, the web password file, the bind privilege for
 port 80 (everything still runs as the unprivileged user — no root, no
 `setcap` on the binary, which would be wiped by every rebuild), and these
 (they override the TOML, so the file can keep defaults):
 
 ```ini
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-Environment=DC3_WEB__LISTEN=0.0.0.0:80
-Environment=DC3_WEB__TRUSTED_PROXIES=127.0.0.1
+Environment=DC4_WEB__LISTEN=0.0.0.0:80
+Environment=DC4_WEB__TRUSTED_PROXIES=127.0.0.1
 ```
 
 Enable and start (migrations were already applied by hand in step 5):
@@ -270,7 +270,7 @@ systemctl restart dhtcrawler4-web
 
 - **Metrics:** each role listens on `127.0.0.1:9100` per `[metrics]`
   (localhost only — scrape over an SSH tunnel, never publish the port).
-- **Totals:** `sudo -u dhtcrawler4` with the *owner* role's `DC3_DATABASE__*`
+- **Totals:** `sudo -u dhtcrawler4` with the *owner* role's `DC4_DATABASE__*`
   env (the web role cannot read the pending queue) plus
   `dhtcrawler4 --config /etc/dhtcrawler4/dhtcrawler4.toml stats`.
 - **Rebuild the search index:** `systemctl stop dhtcrawler4-index`, then run
@@ -278,7 +278,7 @@ systemctl restart dhtcrawler4-web
   it again.
 - **Upgrade:** `git pull`, rebuild, `install` the binary, run the migrate
   unit (`systemctl start dhtcrawler4-migrate`), restart the three roles.
-- **Back up:** `sudo -u postgres pg_dump dc3` (peer auth, no password
+- **Back up:** `sudo -u postgres pg_dump dc4` (peer auth, no password
   needed) plus `/etc/dhtcrawler4/secrets/`. `/var/lib/dhtcrawler4/index`
   and DHT state are disposable — the index rebuilds from the database.
 
@@ -340,8 +340,8 @@ cd dhtcrawler4
 ```
 
 This writes five random 40-character passwords to `deploy/secrets/` (one for
-the Postgres superuser, one for each of the `dc3_owner`, `dc3_crawler`,
-`dc3_indexer`, `dc3_web` roles). The directory is mode 0700 and ignored by
+the Postgres superuser, one for each of the `dc4_owner`, `dc4_crawler`,
+`dc4_indexer`, `dc4_web` roles). The directory is mode 0700 and ignored by
 git. Re-running the script is safe: existing files are kept. Back this
 directory up — losing the passwords means losing the database.
 
@@ -351,7 +351,7 @@ Skip this step for the default plain-HTTP setup. If you terminate TLS in
 front of the site yourself, set:
 
 ```yaml
-DC3_WEB__HSTS: "true"                             # HTTPS only
+DC4_WEB__HSTS: "true"                             # HTTPS only
 ```
 
 `hsts` makes the site send `Strict-Transport-Security`, so only enable it
@@ -360,7 +360,7 @@ worst tells browsers to refuse the site. Everything else already has sane
 defaults: the web UI serves host port 80 (plain HTTP), PostgreSQL
 has no published port at all, and each role connects with its own
 least-privilege database user (table privileges are granted by the
-migrations, which run as `dc3_owner`).
+migrations, which run as `dc4_owner`).
 
 ### 4. Open the firewall
 
@@ -397,9 +397,9 @@ docker compose up -d --build
 ```
 
 Startup order is enforced with health gates: `db` (Postgres 18 initialises
-the data directory, creates the `dc3` database and the four roles via
+the data directory, creates the `dc4` database and the four roles via
 `postgres/init/10-roles.sh`) → `migrate` (applies the SQL migrations in
-`crates/dc3-store`) → `crawl`, `index`, `web`. The crawl role publishes
+`crates/dc4-store`) → `crawl`, `index`, `web`. The crawl role publishes
 UDP 6881; the web role publishes host port 80 (plain HTTP).
 
 Check it came up:
@@ -483,7 +483,7 @@ curl -s http://your.domain/ -o /dev/null -w '%{redirect_url}\n'   # → https://
 Future config changes: edit `/etc/caddy/Caddyfile`, re-run `caddy validate`
 as above, then `sudo systemctl reload caddy` (zero-downtime; `restart` only
 if reload fails). Browse to `https://your.domain` — the home page shows zero
-torrents at first. That is normal (next step). Set `DC3_WEB__HSTS: "true"`
+torrents at first. That is normal (next step). Set `DC4_WEB__HSTS: "true"`
 (step 3) once HTTPS works.
 
 ### 7. What happens next (be patient)
@@ -515,12 +515,12 @@ docker compose ps                     # includes healthcheck status
   container (the compose file publishes none of them — scrape via an SSH
   tunnel, e.g. `ssh -L 9100:localhost:9100 host`, never by publishing the
   port).
-- **Database pool pressure:** `dc3_db_pool_size` vs `dc3_db_pool_idle` on the
+- **Database pool pressure:** `dc4_db_pool_size` vs `dc4_db_pool_idle` on the
   crawl role. Idle pinned near zero means the pool is saturated — raise
-  `DC3_DATABASE__MAX_CONNECTIONS` (compose sets 128) and PostgreSQL's
+  `DC4_DATABASE__MAX_CONNECTIONS` (compose sets 128) and PostgreSQL's
   `max_connections` (compose sets 200) together, never just one side.
   Queue write churn is already tamed where it matters: the crawler commits
-  asynchronously (`ALTER ROLE dc3_crawler SET synchronous_commit = off` in
+  asynchronously (`ALTER ROLE dc4_crawler SET synchronous_commit = off` in
   `deploy/postgres/init/10-roles.sh` — run it once by hand on an existing
   database, new installs get it automatically) and checkpoints are bigger
   (`checkpoint_timeout=900`, `max_wal_size=4GB` on the `db` command).
@@ -638,7 +638,7 @@ from cron (as a user in the `docker` group, or root's crontab):
 
 Slow indexing, a full disk, or a role that won't turn healthy — start with
 one command that collects everything worth looking at. Run it from
-`~/dhtcrawler4/deploy` and keep the file it writes (`/tmp/dc3-diag.txt`);
+`~/dhtcrawler4/deploy` and keep the file it writes (`/tmp/dc4-diag.txt`);
 paste it when asking for help, or hand it to an AI — it contains every
 number the checks below reason about.
 
@@ -655,27 +655,27 @@ cd ~/dhtcrawler4/deploy
   # mountpoint it reports instead:
   # docker volume inspect dhtcrawler4_pgdata --format '{{.Mountpoint}}'
   echo '### database ###'
-  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT * FROM stats_daily ORDER BY day DESC LIMIT 3;" -c "SELECT count(*) AS torrents FROM torrents;" -c "SELECT count(*) FILTER (WHERE NOT gave_up) AS queued, count(*) FILTER (WHERE gave_up) AS gave_up FROM pending;" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS size FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 6;" -c "SELECT now() - pg_postmaster_start_time() AS postmaster_uptime;"'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc4 -c "SELECT * FROM stats_daily ORDER BY day DESC LIMIT 3;" -c "SELECT count(*) AS torrents FROM torrents;" -c "SELECT count(*) FILTER (WHERE NOT gave_up) AS queued, count(*) FILTER (WHERE gave_up) AS gave_up FROM pending;" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS size FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 6;" -c "SELECT now() - pg_postmaster_start_time() AS postmaster_uptime;"'
 
-  echo '\di pending*' | docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3'
+  echo '\di pending*' | docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc4'
   echo '### database settings (source shows where each is set) ###'
-  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT name, setting, unit, source FROM pg_settings WHERE name IN ('"'"'synchronous_commit'"'"','"'"'checkpoint_timeout'"'"','"'"'max_wal_size'"'"','"'"'wal_writer_delay'"'"');" -c "SELECT rolname, unnest(rolconfig) AS setting FROM pg_roles WHERE rolname LIKE '"'"'dc3%'"'"';" -c "SELECT num_timed, num_requested, buffers_written, write_time, sync_time FROM pg_stat_checkpointer;" -c "SELECT wal_records, wal_fpi, pg_size_pretty(wal_bytes::bigint) AS wal_bytes FROM pg_stat_wal;"'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc4 -c "SELECT name, setting, unit, source FROM pg_settings WHERE name IN ('"'"'synchronous_commit'"'"','"'"'checkpoint_timeout'"'"','"'"'max_wal_size'"'"','"'"'wal_writer_delay'"'"');" -c "SELECT rolname, unnest(rolconfig) AS setting FROM pg_roles WHERE rolname LIKE '"'"'dc4%'"'"';" -c "SELECT num_timed, num_requested, buffers_written, write_time, sync_time FROM pg_stat_checkpointer;" -c "SELECT wal_records, wal_fpi, pg_size_pretty(wal_bytes::bigint) AS wal_bytes FROM pg_stat_wal;"'
   echo '### queue churn (compare two diag files for rates) ###'
-  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT relname, n_tup_ins, n_tup_upd, n_tup_hot_upd, n_dead_tup, last_autovacuum FROM pg_stat_user_tables WHERE relname IN ('"'"'pending'"'"','"'"'torrents'"'"');" -c "SELECT indexrelname, pg_size_pretty(pg_relation_size(indexrelid)) AS size, idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE relname = '"'"'pending'"'"';" -c "SELECT count(*) AS n, state, wait_event_type, wait_event, LEFT(query, 60) AS query FROM pg_stat_activity WHERE datname = current_database() GROUP BY 2, 3, 4, 5 ORDER BY 1 DESC LIMIT 8;"'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc4 -c "SELECT relname, n_tup_ins, n_tup_upd, n_tup_hot_upd, n_dead_tup, last_autovacuum FROM pg_stat_user_tables WHERE relname IN ('"'"'pending'"'"','"'"'torrents'"'"');" -c "SELECT indexrelname, pg_size_pretty(pg_relation_size(indexrelid)) AS size, idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE relname = '"'"'pending'"'"';" -c "SELECT count(*) AS n, state, wait_event_type, wait_event, LEFT(query, 60) AS query FROM pg_stat_activity WHERE datname = current_database() GROUP BY 2, 3, 4, 5 ORDER BY 1 DESC LIMIT 8;"'
   echo '### queue age (dead queue vs junk discovery) ###'
-  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT min(discovered_at) AS oldest, max(discovered_at) AS newest, avg(attempts) AS avg_attempts FROM pending WHERE NOT gave_up;" -c "SELECT attempts, count(*) FROM pending WHERE NOT gave_up GROUP BY 1 ORDER BY 1 LIMIT 10;" -c "SELECT count(*) FILTER (WHERE seeders_est IS NULL) AS null_est, count(*) FILTER (WHERE seeders_est = 0) AS dead_est, count(*) FILTER (WHERE seeders_est BETWEEN 1 AND 4) AS low_est, count(*) FILTER (WHERE seeders_est >= 5) AS high_est, count(*) AS queued FROM pending WHERE NOT gave_up;"'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc4 -c "SELECT min(discovered_at) AS oldest, max(discovered_at) AS newest, avg(attempts) AS avg_attempts FROM pending WHERE NOT gave_up;" -c "SELECT attempts, count(*) FROM pending WHERE NOT gave_up GROUP BY 1 ORDER BY 1 LIMIT 10;" -c "SELECT count(*) FILTER (WHERE seeders_est IS NULL) AS null_est, count(*) FILTER (WHERE seeders_est = 0) AS dead_est, count(*) FILTER (WHERE seeders_est BETWEEN 1 AND 4) AS low_est, count(*) FILTER (WHERE seeders_est >= 5) AS high_est, count(*) AS queued FROM pending WHERE NOT gave_up;"'
   echo '### crawl logs (last 500 lines) ###'
   echo -n 'pool timed out: '
   docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'pool timed out while waiting' || true
   echo -n 'claim failures: '
   docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'claiming queue items failed' || true
-  echo '### crawl metrics (all dc3_ series, present and future) ###'
-  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_" <&3'
+  echo '### crawl metrics (all dc4_ series, present and future) ###'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc4_" <&3'
   echo '### index metrics ###'
-  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/index/9100 && printf "GET /metrics HTTP/1.0\r\nHost: index\r\n\r\n" >&3 && grep -E "^dc3_" <&3'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/index/9100 && printf "GET /metrics HTTP/1.0\r\nHost: index\r\n\r\n" >&3 && grep -E "^dc4_" <&3'
   echo '### web metrics ###'
-  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/web/9100 && printf "GET /metrics HTTP/1.0\r\nHost: web\r\n\r\n" >&3 && grep -E "^dc3_" <&3'
-} 2>&1 | tee /tmp/dc3-diag.txt
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/web/9100 && printf "GET /metrics HTTP/1.0\r\nHost: web\r\n\r\n" >&3 && grep -E "^dc4_" <&3'
+} 2>&1 | tee /tmp/dc4-diag.txt
 ```
 
 Two things in there need explaining. The database lives in a container
@@ -696,7 +696,7 @@ How to read the output:
   already bound. `curl -s http://127.0.0.1/healthz` checks the web role
   from the host.
 - **Crawl logs full of `pool timed out`?** The DB cannot serve the pool:
-  `dc3_db_pool_idle` pinned at zero confirms it, and the snippet's log
+  `dc4_db_pool_idle` pinned at zero confirms it, and the snippet's log
   counts say it outright. The `pg_stat_activity` grouping in the churn
   leg shows what the backends are doing right now: a wall of `active`
   on one query means fix the query/plan, not the knobs (historically the
@@ -716,40 +716,40 @@ How to read the output:
   not data — look at `pg_wal` inside the volume and `n_dead_tup` in
   `pg_stat_user_tables`, then run `CHECKPOINT` to let recycled WAL go.
 - **Nothing indexed after a night?** Compare `discovered` vs `fetched`
-  vs `fetch_failed` in `stats_daily`, then `dc3_fetch_total`:
+  vs `fetch_failed` in `stats_daily`, then `dc4_fetch_total`:
   `no_peers` dominating means lookups find nobody holding the keys
   (stale keys); `fetch_failed` dominating means peers exist but TCP
   connects/handshakes die (firewalled internet, or timeouts too tight).
-  If `dc3_fetch_total` is missing entirely a while after a restart,
+  If `dc4_fetch_total` is missing entirely a while after a restart,
   workers have not finished a single key — the stall is upstream
   (pool, DB), not the DHT. The queue-age leg says which kind of slow:
   oldest `discovered_at` weeks old with attempts piled at max means a
   dead queue (fix admission/expiry, not fetch knobs); everything young
-  with attempts near 0 means junk discovery, and `dc3_admitted_total` by
+  with attempts near 0 means junk discovery, and `dc4_admitted_total` by
   `source` shows where it comes from.
-- **Is the DHT side healthy?** `dc3_dht_good_nodes` in the hundreds with
-  `dc3_dht_timeouts_total` a small fraction of `dc3_dht_samples_total` is fine.
-  `dc3_dht_queries_received_total` climbing (especially `get_peers`) proves
+- **Is the DHT side healthy?** `dc4_dht_good_nodes` in the hundreds with
+  `dc4_dht_timeouts_total` a small fraction of `dc4_dht_samples_total` is fine.
+  `dc4_dht_queries_received_total` climbing (especially `get_peers`) proves
   inbound UDP 6881 works — near zero means the internet cannot reach
   the node: fix the firewall/security group, no config knob compensates.
   All-zero `v6` lines just mean no working IPv6 (harmless).
-- **Is the queue moving?** `dc3_claim_chan_depth` fluctuating under 256
-  is healthy backpressure; pinned at 256 with `dc3_fetch_total` frozen means
-  the workers are stuck, not the claimer. `dc3_claimed_total{live="true"}`
+- **Is the queue moving?** `dc4_claim_chan_depth` fluctuating under 256
+  is healthy backpressure; pinned at 256 with `dc4_fetch_total` frozen means
+  the workers are stuck, not the claimer. `dc4_claimed_total{live="true"}`
   climbing means live keys jump the queue; `live="false"` dominating a
   NULL-heavy queue means estimates never land. Per-bucket pay is
-  `dc3_fetch_total{outcome="ok",est} / dc3_fetch_dials_total{est}` — expect
+  `dc4_fetch_total{outcome="ok",est} / dc4_fetch_dials_total{est}` — expect
   `high` up, `null`/`dead` dials down (measured dials drop less than the
-  62% budget cut: peerless keys cost ~0 either way). `dc3_purge_gave_up_total`
+  62% budget cut: peerless keys cost ~0 either way). `dc4_purge_gave_up_total`
   climbing once per sweep proves the hourly corpse purge runs; flat at
   zero an hour after a restart means the sweep is not firing. While corpses
-  pile up, `dc3_blocked_total{reason="queue_full"}` climbs — that stops once
+  pile up, `dc4_blocked_total{reason="queue_full"}` climbs — that stops once
   the purge catches depth below the cap.
-- **Index and web alive?** `dc3_index_lag` near zero with `dc3_index_docs`
+- **Index and web alive?** `dc4_index_lag` near zero with `dc4_index_docs`
   tracking the torrent count means the indexer keeps up;
-  `dc3_scrape_due_depth` stuck high means the scrape queue never catches
-  up. On web, `dc3_http_requests_total` climbing with cache hits well
-  above misses is healthy; `dc3_rate_limited_total` climbing alone means
+  `dc4_scrape_due_depth` stuck high means the scrape queue never catches
+  up. On web, `dc4_http_requests_total` climbing with cache hits well
+  above misses is healthy; `dc4_rate_limited_total` climbing alone means
   clients hit the rate limit, not an outage.
 
 ## License

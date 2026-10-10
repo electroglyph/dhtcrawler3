@@ -95,7 +95,7 @@ Change (claimer-side only, no `ORDER BY` change, no migration, no depth gate):
   NULLs still flow when the live pool is dry.
 - Instrument: `RETURNING p.seeders_est`, emit `live_n`/`null_n` per bulk
   next to `emit()` (`fetch.rs:727-734`). In-memory only, permanent.
-  No `dc3_queue_depth`-style gauge query.
+  No `dc4_queue_depth`-style gauge query.
 
 1-hour gate: `live_n` per bulk > 0 while the live pool exists; `null_n`
 per bulk down vs the pre-change hour; `claim_chan_depth` still flickers
@@ -168,7 +168,7 @@ Change — effort buckets by estimate (one helper, `effort_for(est)`):
   `tokio::pin!(lookup)` + `lookup_done: bool` became
   a re-creatable future + `lookups_done: u8` (`fetch.rs:870-873`) — feasible because
   `PeerSource::scrape_peers` takes `&self` and returns a fresh future per
-  call (`peers.rs:28-32`, `dc3-dht/src/lib.rs:255`), and `obtain()` has a
+  call (`peers.rs:28-32`, `dc4-dht/src/lib.rs:255`), and `obtain()` has a
   single caller (`fetch.rs:790`, grep-proven), so no other path changes.
   Also update the `Deferred` bound comment ("attempt budget plus one
   lookup", `fetch.rs:384`) to plus two — the termination argument gains
@@ -191,9 +191,9 @@ Change — effort buckets by estimate (one helper, `effort_for(est)`):
 - Metrics (both needed — the old text added only a dial counter, which
   can't split the gate "on high-est keys"): add `est` bucket label
   (`null`/`dead`/`low`/`high`, 4 values) to a new
-  `dc3_fetch_dials_total{est}` (`fetch.rs:118`) incremented once per started dial next to
+  `dc4_fetch_dials_total{est}` (`fetch.rs:118`) incremented once per started dial next to
   the `try_acquire` success (`fetch.rs:884-888`), and the same `est` label
-  on `dc3_fetch_total` in `emit()` (`fetch.rs:830-839`; the old
+  on `dc4_fetch_total` in `emit()` (`fetch.rs:830-839`; the old
   `fetch.rs:727-734`/`728,774` refs are stale post-step-2). Label value is
   the claim-time `item.seeders_est` bucket on both counters — the
   mid-fetch piggyback writes the DB row, never the in-hand item, so
@@ -206,9 +206,9 @@ Change — effort buckets by estimate (one helper, `effort_for(est)`):
 within `est="high"` down; ok per 10k dials in `high` up; dial *budget*
 on `null`/`dead` down 62% with measured dials down less (peerless keys
 unchanged at ~0); `no_peers` per claim flat or up (junk correctly finding
-nobody faster); pool idle (`dc3_db_pool_idle`) and
-`dc3_dht_timeouts_total` (`crawl.rs:377`) flat (no new saturation). All
-series are in the diag (bare `^dc3_` grep). Volume caveat: `high` keys
+nobody faster); pool idle (`dc4_db_pool_idle`) and
+`dc4_dht_timeouts_total` (`crawl.rs:377`) flat (no new saturation). All
+series are in the diag (bare `^dc4_` grep). Volume caveat: `high` keys
 are rare (300/105k in the repro mix) — if `est="high"` N/hour < ~1k,
 the share is noisy; gate then on dial-direction + no saturation and
 extend the read, don't ship on noise.
@@ -227,7 +227,7 @@ Change:
 - Attempt 1 stays fast; attempt 2+ uses generous timeouts (e.g. connect
   3s→6s, handshake 4s→8s) inside the same 45s key deadline.
 - Branch in `attempt()` (`fetch.rs:826-846`) on `item.attempts`.
-- Add an `attempt` label (0/1) to `dc3_fetch_total` and an overrun counter
+- Add an `attempt` label (0/1) to `dc4_fetch_total` and an overrun counter
   on the key-deadline timeout (`fetch.rs:689`): attempts today exist only
   in a debug log (`fetch.rs:729-733`), so attempt-2 conversion and deadline
   overruns are both unmeasurable without them. In-memory only, permanent,
@@ -246,7 +246,7 @@ Problem: `HINT_KEYS = 100k`, `HINT_PEERS_PER_KEY = 8`, `HINT_TTL = 5min`
 
 Change:
 - Raise keys 100k→500k and TTL 5min→30min first; peers-per-key 8→16 only if
-  memory allows. Watch `dc3_dht_peer_store_keys` (`crawl.rs:382`) and hint
+  memory allows. Watch `dc4_dht_peer_store_keys` (`crawl.rs:382`) and hint
   hit rate in `obtain()` (`fetch.rs:746-752`).
 
 1-hour gate: `peer_store_keys` up; overall second-half `NoPeers` share down

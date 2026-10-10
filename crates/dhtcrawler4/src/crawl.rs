@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dc3_dht::{DhtConfig, DhtStatsSnapshot, DhtTuning, Family, MIN_GOOD_NODES};
+use dc4_dht::{DhtConfig, DhtStatsSnapshot, DhtTuning, Family, MIN_GOOD_NODES};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -35,9 +35,9 @@ pub const READINESS_PING_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long shutdown waits for fetches in progress.
 pub const SHUTDOWN_FETCH_WAIT: Duration = Duration::from_secs(30);
 
-const METRIC_QUEUE_DEPTH: &str = "dc3_queue_depth";
-const METRIC_DB_POOL_SIZE: &str = "dc3_db_pool_size";
-const METRIC_DB_POOL_IDLE: &str = "dc3_db_pool_idle";
+const METRIC_QUEUE_DEPTH: &str = "dc4_queue_depth";
+const METRIC_DB_POOL_SIZE: &str = "dc4_db_pool_size";
+const METRIC_DB_POOL_IDLE: &str = "dc4_db_pool_idle";
 
 /// Everything the crawl role needs besides the store.
 #[derive(Debug, Clone)]
@@ -114,7 +114,7 @@ impl CrawlOptions {
             sampler_concurrency: c.sampler_concurrency,
             read_only: c.read_only,
             allow_private_addrs: false,
-            client_version: dc3_dht::DEFAULT_CLIENT_VERSION,
+            client_version: dc4_dht::DEFAULT_CLIENT_VERSION,
             tuning: DhtTuning::default(),
         };
         dht.tuning.scrape_early_exit_quorum =
@@ -142,7 +142,7 @@ impl CrawlOptions {
 #[derive(Debug, thiserror::Error)]
 pub enum CrawlError {
     #[error("cannot start the DHT node: {0}")]
-    Dht(#[from] dc3_dht::Error),
+    Dht(#[from] dc4_dht::Error),
     #[error("crawl task failed: {0}")]
     Task(String),
 }
@@ -150,7 +150,7 @@ pub enum CrawlError {
 /// A running crawl role.
 #[derive(Debug)]
 pub struct Crawler {
-    dht: dc3_dht::Dht,
+    dht: dc4_dht::Dht,
     supervisor: JoinHandle<Result<(), CrawlError>>,
 }
 
@@ -165,7 +165,7 @@ impl Crawler {
         cancel: CancellationToken,
     ) -> Result<Crawler, CrawlError> {
         let (tx, rx) = mpsc::channel(DISCOVERED_CHANNEL_CAPACITY);
-        let dht = dc3_dht::Dht::start(opts.dht.clone(), tx).await?;
+        let dht = dc4_dht::Dht::start(opts.dht.clone(), tx).await?;
         tracing::info!(
             sockets = dht.local_addrs().len(),
             sampler = opts.dht.sampler,
@@ -248,7 +248,7 @@ impl Crawler {
     }
 
     /// The DHT node (it stops when the crawler stops).
-    pub fn dht(&self) -> &dc3_dht::Dht {
+    pub fn dht(&self) -> &dc4_dht::Dht {
         &self.dht
     }
 
@@ -274,7 +274,7 @@ pub async fn run<S: CrawlStore>(
 }
 
 struct Supervised {
-    dht: dc3_dht::Dht,
+    dht: dc4_dht::Dht,
     stop: CancellationToken,
     workers: JoinSet<()>,
     admission_stop: CancellationToken,
@@ -357,32 +357,32 @@ pub fn export_snapshot(s: &DhtStatsSnapshot) {
     for family in Family::ALL {
         let f = s.family(family);
         let label = family.as_str();
-        metrics::counter!("dc3_dht_packets_in_total", "family" => label).absolute(f.packets_in);
-        metrics::counter!("dc3_dht_packets_out_total", "family" => label).absolute(f.packets_out);
+        metrics::counter!("dc4_dht_packets_in_total", "family" => label).absolute(f.packets_in);
+        metrics::counter!("dc4_dht_packets_out_total", "family" => label).absolute(f.packets_out);
         for (reason, n) in f.dropped.iter() {
             metrics::counter!(
-                "dc3_dht_packets_dropped_total",
+                "dc4_dht_packets_dropped_total",
                 "family" => label,
                 "reason" => reason.as_str()
             )
             .absolute(n);
         }
-        metrics::counter!("dc3_dht_samples_total", "family" => label).absolute(f.samples);
-        metrics::gauge!("dc3_dht_routing_nodes", "family" => label).set(f.routing_nodes as f64);
-        metrics::gauge!("dc3_dht_good_nodes", "family" => label).set(f.good_nodes as f64);
+        metrics::counter!("dc4_dht_samples_total", "family" => label).absolute(f.samples);
+        metrics::gauge!("dc4_dht_routing_nodes", "family" => label).set(f.routing_nodes as f64);
+        metrics::gauge!("dc4_dht_good_nodes", "family" => label).set(f.good_nodes as f64);
     }
     for (method, n) in s.queries_received.iter() {
-        metrics::counter!("dc3_dht_queries_received_total", "method" => method).absolute(n);
+        metrics::counter!("dc4_dht_queries_received_total", "method" => method).absolute(n);
     }
-    metrics::counter!("dc3_dht_timeouts_total").absolute(s.timeouts);
-    metrics::counter!("dc3_dht_sampler_early_total").absolute(s.sampler_early);
-    metrics::counter!("dc3_dht_sampler_visited_full_total").absolute(s.sampler_visited_full);
-    metrics::counter!("dc3_dht_responder_dropped_total").absolute(s.responder_dropped);
-    metrics::counter!("dc3_dht_discovered_dropped_total").absolute(s.discovered_dropped);
-    metrics::gauge!("dc3_dht_peer_store_keys").set(s.peer_store_keys as f64);
+    metrics::counter!("dc4_dht_timeouts_total").absolute(s.timeouts);
+    metrics::counter!("dc4_dht_sampler_early_total").absolute(s.sampler_early);
+    metrics::counter!("dc4_dht_sampler_visited_full_total").absolute(s.sampler_visited_full);
+    metrics::counter!("dc4_dht_responder_dropped_total").absolute(s.responder_dropped);
+    metrics::counter!("dc4_dht_discovered_dropped_total").absolute(s.discovered_dropped);
+    metrics::gauge!("dc4_dht_peer_store_keys").set(s.peer_store_keys as f64);
 }
 
-async fn export_dht_stats(dht: dc3_dht::Dht, every: Duration, stop: CancellationToken) {
+async fn export_dht_stats(dht: dc4_dht::Dht, every: Duration, stop: CancellationToken) {
     let mut ticker = tokio::time::interval(every.max(Duration::from_millis(1)));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -429,7 +429,7 @@ async fn export_queue_depth<S: CrawlStore>(store: S, every: Duration, stop: Canc
 
 async fn track_readiness<S: CrawlStore>(
     store: S,
-    dht: dc3_dht::Dht,
+    dht: dc4_dht::Dht,
     min_good_nodes: usize,
     ready: Arc<AtomicBool>,
     every: Duration,
@@ -577,28 +577,28 @@ mod tests {
 
         let store = MemoryStore::new();
         assert_eq!(snapshot_queue_depth(&store).await, (Some(0), None));
-        store.enqueue(dc3_core::DhtKey([21; 20]));
-        store.enqueue(dc3_core::DhtKey([22; 20]));
+        store.enqueue(dc4_core::DhtKey([21; 20]));
+        store.enqueue(dc4_core::DhtKey([22; 20]));
         assert_eq!(snapshot_queue_depth(&store).await, (Some(2), None));
     }
 
     /// A pool that never connected: size/idle are observable with no
     /// database, and depth reads fail deterministically (the pool is
     /// closed, so nothing is even dialled).
-    async fn dead_store() -> dc3_store::Store {
+    async fn dead_store() -> dc4_store::Store {
         let pool =
-            dc3_store::sqlx::PgPool::connect_lazy("postgres://dc3:secret@127.0.0.1:1/unused")
+            dc4_store::sqlx::PgPool::connect_lazy("postgres://dc4:secret@127.0.0.1:1/unused")
                 .unwrap();
         pool.close().await;
-        dc3_store::Store::from_pool(pool)
+        dc4_store::Store::from_pool(pool)
     }
 
     #[tokio::test]
     async fn store_pool_status_reports_pool_size() {
         let pool =
-            dc3_store::sqlx::PgPool::connect_lazy("postgres://dc3:secret@127.0.0.1:1/unused")
+            dc4_store::sqlx::PgPool::connect_lazy("postgres://dc4:secret@127.0.0.1:1/unused")
                 .unwrap();
-        let store = dc3_store::Store::from_pool(pool);
+        let store = dc4_store::Store::from_pool(pool);
         assert_eq!(store.pool_status(), Some((0, 0)));
     }
 

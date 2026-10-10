@@ -651,7 +651,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c286de4e81ea2590afc24d754e0f83810c566f50a1388fa75ebd57928c0d9745"
 
 [[package]]
-name = "dc3-bencode"
+name = "dc4-bencode"
 version = "0.4.0"
 dependencies = [
  "proptest",
@@ -659,7 +659,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-core"
+name = "dc4-core"
 version = "0.4.0"
 dependencies = [
  "data-encoding",
@@ -673,12 +673,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-dht"
+name = "dc4-dht"
 version = "0.4.0"
 dependencies = [
  "crc32c",
- "dc3-bencode",
- "dc3-core",
+ "dc4-bencode",
+ "dc4-core",
  "futures",
  "hex",
  "ipnet",
@@ -697,12 +697,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-peer"
+name = "dc4-peer"
 version = "0.4.0"
 dependencies = [
  "bytes",
- "dc3-bencode",
- "dc3-core",
+ "dc4-bencode",
+ "dc4-core",
  "proptest",
  "rand 0.9.5",
  "sha1",
@@ -713,10 +713,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-search"
+name = "dc4-search"
 version = "0.4.0"
 dependencies = [
- "dc3-core",
+ "dc4-core",
  "proptest",
  "serde",
  "serde_json",
@@ -729,11 +729,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-store"
+name = "dc4-store"
 version = "0.4.0"
 dependencies = [
  "chrono",
- "dc3-core",
+ "dc4-core",
  "serde",
  "serde_json",
  "sqlx",
@@ -743,11 +743,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-torrent"
+name = "dc4-torrent"
 version = "0.4.0"
 dependencies = [
- "dc3-bencode",
- "dc3-core",
+ "dc4-bencode",
+ "dc4-core",
  "encoding_rs",
  "proptest",
  "sha1",
@@ -756,16 +756,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-web"
+name = "dc4-web"
 version = "0.4.0"
 dependencies = [
  "askama",
  "askama_web",
  "axum",
  "chrono",
- "dc3-core",
- "dc3-search",
- "dc3-store",
+ "dc4-core",
+ "dc4-search",
+ "dc4-store",
  "ipnet",
  "lru 0.18.5",
  "metrics",
@@ -798,14 +798,14 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
- "dc3-bencode",
- "dc3-core",
- "dc3-dht",
- "dc3-peer",
- "dc3-search",
- "dc3-store",
- "dc3-torrent",
- "dc3-web",
+ "dc4-bencode",
+ "dc4-core",
+ "dc4-dht",
+ "dc4-peer",
+ "dc4-search",
+ "dc4-store",
+ "dc4-torrent",
+ "dc4-web",
  "futures",
  "ipnet",
  "lru 0.18.5",

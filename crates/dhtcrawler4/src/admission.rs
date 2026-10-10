@@ -25,10 +25,10 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use dc3_core::DhtKey;
-use dc3_dht::compact::canonical_ip;
-use dc3_dht::{Discovered, Family, Source};
-use dc3_store::{Observation, ObserveOutcome};
+use dc4_core::DhtKey;
+use dc4_dht::compact::canonical_ip;
+use dc4_dht::{Discovered, Family, Source};
+use dc4_store::{Observation, ObserveOutcome};
 use lru::LruCache;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -80,10 +80,10 @@ pub const OWN_ADDRS_REFRESH: Duration = Duration::from_secs(5);
 /// Shortest flush period accepted (a zero period would spin).
 const MIN_FLUSH_INTERVAL: Duration = Duration::from_millis(1);
 
-const METRIC_DISCOVERED: &str = "dc3_discovered_total";
-const METRIC_ADMITTED: &str = "dc3_admitted_total";
+const METRIC_DISCOVERED: &str = "dc4_discovered_total";
+const METRIC_ADMITTED: &str = "dc4_admitted_total";
 /// Pipeline blocks, by reason (also used by `fetch`).
-pub const METRIC_BLOCKED: &str = "dc3_blocked_total";
+pub const METRIC_BLOCKED: &str = "dc4_blocked_total";
 
 /// Capacities of zero are rejected loudly: a zero-capacity LRU cannot exist,
 /// so silently running with room for one key would be a worse surprise.
@@ -728,7 +728,7 @@ impl<S: CrawlStore> Admission<S> {
     ///
     /// Before writing, the batch passes the removal-memory gate (§4a):
     /// keys still in cooldown are dropped (counted as
-    /// `dc3_blocked_total{reason="removal_cooldown"}`) and counted as
+    /// `dc4_blocked_total{reason="removal_cooldown"}`) and counted as
     /// post-removal sightings; keys announced with `seed=1` refresh their
     /// scrape clock first (§4b win 6). A failed removal-memory query drops
     /// the batch keys for recheck on re-announce (fail closed: unknown
@@ -911,8 +911,8 @@ mod tests {
         }
     }
 
-    fn stored_torrent(k: DhtKey) -> dc3_store::NewTorrent {
-        dc3_store::NewTorrent {
+    fn stored_torrent(k: DhtKey) -> dc4_store::NewTorrent {
+        dc4_store::NewTorrent {
             dht_key: k,
             info_hash_v1: Some(k),
             info_hash_v2: None,
@@ -1457,8 +1457,8 @@ mod tests {
             async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
                 Vec::new()
             }
-            async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
-                dc3_dht::ScrapeReport::default()
+            async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc4_dht::ScrapeReport {
+                dc4_dht::ScrapeReport::default()
             }
             fn own_ips(&self) -> Vec<IpAddr> {
                 Vec::new()

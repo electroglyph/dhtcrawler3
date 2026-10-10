@@ -8,7 +8,7 @@
 //!   queue entries; [`fetch`] turns queue entries into stored torrents.
 //!   [`peers`] is the address chokepoint for peers.
 //! * [`index`]: the index role, which projects the database into Tantivy.
-//! * [`web`]: the web role, which serves `dc3-web`.
+//! * [`web`]: the web role, which serves `dc4-web`.
 //! * [`admin`]: the admin subcommands; [`healthcheck`]: the container
 //!   health check.
 //! * [`roles`]: runs one role, or all three, with its metrics listener

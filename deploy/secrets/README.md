@@ -9,5 +9,5 @@ Create them with:
 scripts/gen-secrets.sh
 ```
 
-Files: `pg_superuser_password`, `dc3_owner_password`, `dc3_crawler_password`,
-`dc3_indexer_password`, `dc3_web_password`.
+Files: `pg_superuser_password`, `dc4_owner_password`, `dc4_crawler_password`,
+`dc4_indexer_password`, `dc4_web_password`.

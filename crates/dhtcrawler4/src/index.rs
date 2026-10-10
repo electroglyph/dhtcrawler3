@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dc3_search::{IndexDoc, IndexRoot, IndexWriterHandle, SearchError, SearchIndex};
-use dc3_store::{IndexRow, StoreError};
+use dc4_search::{IndexDoc, IndexRoot, IndexWriterHandle, SearchError, SearchIndex};
+use dc4_store::{IndexRow, StoreError};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -32,9 +32,9 @@ pub const REBUILD_GRACE: Duration = Duration::from_secs(30);
 /// enough.
 const GRACE_MARGIN: Duration = Duration::from_millis(50);
 
-const METRIC_LAG: &str = "dc3_index_lag";
-const METRIC_LAG_SECONDS: &str = "dc3_index_lag_seconds";
-const METRIC_DOCS: &str = "dc3_index_docs";
+const METRIC_LAG: &str = "dc4_index_lag";
+const METRIC_LAG_SECONDS: &str = "dc4_index_lag_seconds";
+const METRIC_DOCS: &str = "dc4_index_docs";
 
 /// Settings of the index role.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,8 +505,8 @@ mod tests {
     use std::sync::Mutex;
 
     use chrono::{TimeZone, Utc};
-    use dc3_core::DhtKey;
-    use dc3_search::{SearchHandle, SearchQuery};
+    use dc4_core::DhtKey;
+    use dc4_search::{SearchHandle, SearchQuery};
 
     use super::*;
 
@@ -576,7 +576,7 @@ mod tests {
     }
 
     impl ChangeFeed for FakeFeed {
-        async fn high_water_mark(&self) -> dc3_store::Result<Option<i64>> {
+        async fn high_water_mark(&self) -> dc4_store::Result<Option<i64>> {
             let s = self.inner.lock().unwrap();
             if s.failing {
                 return Err(StoreError::Invalid("injected feed failure".into()));
@@ -589,7 +589,7 @@ mod tests {
             after: i64,
             upto: i64,
             limit: i64,
-        ) -> dc3_store::Result<Vec<IndexRow>> {
+        ) -> dc4_store::Result<Vec<IndexRow>> {
             let mut s = self.inner.lock().unwrap();
             if s.failing {
                 return Err(StoreError::Invalid("injected feed failure".into()));
@@ -610,7 +610,7 @@ mod tests {
     fn options(dir: &std::path::Path) -> IndexOptions {
         IndexOptions {
             path: dir.to_path_buf(),
-            writer_heap_bytes: dc3_search::WRITER_PROBE_HEAP_BYTES * 2,
+            writer_heap_bytes: dc4_search::WRITER_PROBE_HEAP_BYTES * 2,
             batch_size: 1000,
             poll_interval: Duration::from_millis(20),
             ready_max_lag: READY_MAX_LAG,
@@ -839,7 +839,7 @@ mod tests {
         {
             let root = IndexRoot::open(dir.path()).unwrap();
             let index = root.open_current().unwrap();
-            let mut w = index.writer(dc3_search::WRITER_PROBE_HEAP_BYTES).unwrap();
+            let mut w = index.writer(dc4_search::WRITER_PROBE_HEAP_BYTES).unwrap();
             w.upsert(&IndexDoc {
                 id: 99,
                 name: "fedora stale".into(),
@@ -856,7 +856,7 @@ mod tests {
         {
             let root = IndexRoot::open(dir.path()).unwrap();
             let index = root.open_current().unwrap();
-            let _writer = index.writer(dc3_search::WRITER_PROBE_HEAP_BYTES).unwrap();
+            let _writer = index.writer(dc4_search::WRITER_PROBE_HEAP_BYTES).unwrap();
             let result = rebuild(
                 options(dir.path()),
                 feed.clone(),

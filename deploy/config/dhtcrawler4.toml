@@ -1,29 +1,29 @@
 # dhtcrawler4 configuration.
 #
 # Every key can be overridden with an environment variable named
-#   DC3_<SECTION>__<KEY>        e.g.  DC3_DATABASE__USER=dc3_web
+#   DC4_<SECTION>__<KEY>        e.g.  DC4_DATABASE__USER=dc4_web
 # List values are given as comma-separated strings in the environment.
 # Secrets are never written here: point *_file keys at mounted secret files.
 
 [database]
 host = "db"
 port = 5432
-name = "dc3"
+name = "dc4"
 # Each role connects as its own least-privilege user (see deploy/docker-compose.yml).
-user = "dc3_crawler"
+user = "dc4_crawler"
 password_file = "/run/secrets/db_password"
 max_connections = 16
 
 # Optional per-role credentials, used by `dhtcrawler4 all` (one pool per role).
 # [database.crawler]
-# user = "dc3_crawler"
-# password_file = "/run/secrets/dc3_crawler_password"
+# user = "dc4_crawler"
+# password_file = "/run/secrets/dc4_crawler_password"
 # [database.indexer]
-# user = "dc3_indexer"
-# password_file = "/run/secrets/dc3_indexer_password"
+# user = "dc4_indexer"
+# password_file = "/run/secrets/dc4_indexer_password"
 # [database.web]
-# user = "dc3_web"
-# password_file = "/run/secrets/dc3_web_password"
+# user = "dc4_web"
+# password_file = "/run/secrets/dc4_web_password"
 
 [crawl]
 # UDP port for the DHT. dhtcrawler4 never listens on TCP: it only dials peers.

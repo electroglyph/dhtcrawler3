@@ -2,7 +2,7 @@
 //! Any byte string must decode to a value or an error, never a panic, and a
 //! successful decode must re-encode to the same bytes when keys were canonical.
 
-use dc3_bencode::{Limits, decode, decode_prefix, encode};
+use dc4_bencode::{Limits, decode, decode_prefix, encode};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -17,17 +17,17 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-fn has_unsorted_nested(v: &dc3_bencode::Value<'_>) -> bool {
+fn has_unsorted_nested(v: &dc4_bencode::Value<'_>) -> bool {
     let mut stack = vec![v];
     while let Some(v) = stack.pop() {
         match v {
-            dc3_bencode::Value::Dict(d) => {
+            dc4_bencode::Value::Dict(d) => {
                 if !d.is_canonical_order() {
                     return true;
                 }
                 stack.extend(d.iter().map(|(_, v)| v));
             }
-            dc3_bencode::Value::List(l) => stack.extend(l.iter()),
+            dc4_bencode::Value::List(l) => stack.extend(l.iter()),
             _ => {}
         }
     }

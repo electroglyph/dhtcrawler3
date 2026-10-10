@@ -1,9 +1,9 @@
 #![no_main]
-//! Query parsing and the dc3 tokenizers must never panic, must respect their
+//! Query parsing and the dc4 tokenizers must never panic, must respect their
 //! limits, and must give token offsets that slice the input.
 
-use dc3_search::{
-    Cjk1Tokenizer, Dc3Tokenizer, MAX_QUERY_CHARS, MAX_TERMS, MAX_TOKEN_BYTES, is_cjk_unigram,
+use dc4_search::{
+    Cjk1Tokenizer, Dc4Tokenizer, MAX_QUERY_CHARS, MAX_TERMS, MAX_TOKEN_BYTES, is_cjk_unigram,
     parse_query,
 };
 use libfuzzer_sys::fuzz_target;
@@ -31,8 +31,8 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let mut dc3 = Dc3Tokenizer::new();
-    for t in dc3.tokens(&text) {
+    let mut dc4 = Dc4Tokenizer::new();
+    for t in dc4.tokens(&text) {
         assert!(!t.text.is_empty() && t.text.len() <= MAX_TOKEN_BYTES);
         assert!(t.offset_from <= t.offset_to);
         assert!(

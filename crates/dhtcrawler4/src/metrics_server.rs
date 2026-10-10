@@ -21,11 +21,11 @@ use tokio_util::sync::CancellationToken;
 pub const UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
 /// Content type of the Prometheus text format.
 pub const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
-/// Histogram buckets (seconds) for `dc3_search_seconds`.
+/// Histogram buckets (seconds) for `dc4_search_seconds`.
 pub const SEARCH_SECONDS_BUCKETS: [f64; 11] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
 ];
-const SEARCH_SECONDS_METRIC: &str = "dc3_search_seconds";
+const SEARCH_SECONDS_METRIC: &str = "dc4_search_seconds";
 
 /// Why the metrics listener could not start.
 #[derive(Debug, thiserror::Error)]
@@ -228,11 +228,11 @@ mod tests {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            metrics::counter!("dc3_fetch_total", "outcome" => "ok").increment(2);
-            metrics::gauge!("dc3_queue_depth").set(7.0);
+            metrics::counter!("dc4_fetch_total", "outcome" => "ok").increment(2);
+            metrics::gauge!("dc4_queue_depth").set(7.0);
         });
         let text = handle.render();
-        assert!(text.contains("dc3_fetch_total{outcome=\"ok\"} 2"), "{text}");
-        assert!(text.contains("dc3_queue_depth 7"), "{text}");
+        assert!(text.contains("dc4_fetch_total{outcome=\"ok\"} 2"), "{text}");
+        assert!(text.contains("dc4_queue_depth 7"), "{text}");
     }
 }

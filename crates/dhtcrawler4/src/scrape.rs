@@ -23,8 +23,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dc3_dht::{Dht, ScrapeReport};
-use dc3_store::ScrapeItem;
+use dc4_dht::{Dht, ScrapeReport};
+use dc4_store::ScrapeItem;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -37,19 +37,19 @@ pub const SCRAPE_IDLE_MIN: Duration = Duration::from_secs(60);
 /// Longest pause of an idle scrape worker.
 pub const SCRAPE_IDLE_MAX: Duration = Duration::from_secs(600);
 /// Cap of `removed_keys` rows (bep33.md §4a: ~1M LRU).
-pub const SCRAPE_REMOVED_KEYS_CAP: i64 = dc3_store::MAX_REMOVED_KEYS;
+pub const SCRAPE_REMOVED_KEYS_CAP: i64 = dc4_store::MAX_REMOVED_KEYS;
 /// Most tombstones one sweep deletes (bounds one sweep's write load; the
 /// rest go on the next sweep, biggest first).
 pub const MAX_PURGE_BATCH: i64 = 10_000;
 
-const METRIC_SCRAPES: &str = "dc3_scrape_total";
-const METRIC_TOMBSTONES: &str = "dc3_scrape_tombstones_total";
-const METRIC_PURGED: &str = "dc3_purge_tombstoned_total";
-const METRIC_PURGED_GAVE_UP: &str = "dc3_purge_gave_up_total";
-const METRIC_DUE_DEPTH: &str = "dc3_scrape_due_depth";
-const METRIC_REMOVED_KEYS: &str = "dc3_removed_keys_count";
-const METRIC_ZERO_SEEDER_SHARE: &str = "dc3_scrape_zero_seeder_share";
-const METRIC_UNAWARE_SHARE: &str = "dc3_scrape_unaware_share";
+const METRIC_SCRAPES: &str = "dc4_scrape_total";
+const METRIC_TOMBSTONES: &str = "dc4_scrape_tombstones_total";
+const METRIC_PURGED: &str = "dc4_purge_tombstoned_total";
+const METRIC_PURGED_GAVE_UP: &str = "dc4_purge_gave_up_total";
+const METRIC_DUE_DEPTH: &str = "dc4_scrape_due_depth";
+const METRIC_REMOVED_KEYS: &str = "dc4_removed_keys_count";
+const METRIC_ZERO_SEEDER_SHARE: &str = "dc4_scrape_zero_seeder_share";
+const METRIC_UNAWARE_SHARE: &str = "dc4_scrape_unaware_share";
 
 /// Everything the scrape worker needs from `[crawl]`.
 #[derive(Debug, Clone)]
@@ -141,7 +141,7 @@ pub fn classify(report: &ScrapeReport, threshold: u64) -> ScrapeVerdict {
 /// ago and returns the rows removed. Split out for tests (a [`Scraper`]
 /// needs a DHT node, which unit tests do not start); [`Scraper::sweep`]
 /// only moves the count into metrics and logs.
-async fn sweep_gave_up<S: CrawlStore>(store: &S, older_than: Duration) -> dc3_store::Result<u64> {
+async fn sweep_gave_up<S: CrawlStore>(store: &S, older_than: Duration) -> dc4_store::Result<u64> {
     store.purge_gave_up(older_than).await
 }
 
@@ -393,14 +393,14 @@ mod tests {
 
     fn live_report(seeds: &[&str]) -> ScrapeReport {
         use std::net::IpAddr;
-        let mut sd = dc3_dht::bloom::ScrapeBloom::empty();
+        let mut sd = dc4_dht::bloom::ScrapeBloom::empty();
         for s in seeds {
             sd.insert_ip(&s.parse::<IpAddr>().unwrap());
         }
         ScrapeReport {
             peers: Vec::new(),
             seed_filters: vec![sd.0],
-            peer_filters: vec![[0u8; dc3_dht::bloom::BLOOM_LEN]],
+            peer_filters: vec![[0u8; dc4_dht::bloom::BLOOM_LEN]],
             aware: 1,
             unaware: 0,
             families_attempted: 2,
@@ -417,8 +417,8 @@ mod tests {
         // Dead: aware estimate at or below the threshold over both families.
         let mut dead = live_report(&[]);
         dead.aware = 2;
-        dead.seed_filters = vec![[0u8; dc3_dht::bloom::BLOOM_LEN]; 2];
-        dead.peer_filters = vec![[0u8; dc3_dht::bloom::BLOOM_LEN]; 2];
+        dead.seed_filters = vec![[0u8; dc4_dht::bloom::BLOOM_LEN]; 2];
+        dead.peer_filters = vec![[0u8; dc4_dht::bloom::BLOOM_LEN]; 2];
         assert_eq!(classify(&dead, 0), ScrapeVerdict::Dead { est: 0 });
         // The same zero over one family is unknown, never dead.
         let mut single = dead.clone();
@@ -451,8 +451,8 @@ mod tests {
     /// DHT node involved.
     #[tokio::test(start_paused = true)]
     async fn sweep_gave_up_purges_only_old_gave_up_rows() {
-        fn key(n: u8) -> dc3_core::DhtKey {
-            dc3_core::DhtKey([n; 20])
+        fn key(n: u8) -> dc4_core::DhtKey {
+            dc4_core::DhtKey([n; 20])
         }
         let store = MemoryStore::new();
         for k in [key(41), key(42), key(43)] {

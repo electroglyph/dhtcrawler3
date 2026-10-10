@@ -279,14 +279,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c286de4e81ea2590afc24d754e0f83810c566f50a1388fa75ebd57928c0d9745"
 
 [[package]]
-name = "dc3-bencode"
+name = "dc4-bencode"
 version = "0.1.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
-name = "dc3-core"
+name = "dc4-core"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
@@ -298,12 +298,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-dht"
+name = "dc4-dht"
 version = "0.1.0"
 dependencies = [
  "crc32c",
- "dc3-bencode",
- "dc3-core",
+ "dc4-bencode",
+ "dc4-core",
  "futures",
  "hex",
  "ipnet",
@@ -320,12 +320,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-peer"
+name = "dc4-peer"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "dc3-bencode",
- "dc3-core",
+ "dc4-bencode",
+ "dc4-core",
  "rand",
  "sha1",
  "sha2",
@@ -335,10 +335,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-search"
+name = "dc4-search"
 version = "0.1.0"
 dependencies = [
- "dc3-core",
+ "dc4-core",
  "serde",
  "serde_json",
  "tantivy",
@@ -350,11 +350,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "dc3-torrent"
+name = "dc4-torrent"
 version = "0.1.0"
 dependencies = [
- "dc3-bencode",
- "dc3-core",
+ "dc4-bencode",
+ "dc4-core",
  "encoding_rs",
  "sha1",
  "sha2",
@@ -374,12 +374,12 @@ dependencies = [
 name = "dhtcrawler4-fuzz"
 version = "0.0.0"
 dependencies = [
- "dc3-bencode",
- "dc3-core",
- "dc3-dht",
- "dc3-peer",
- "dc3-search",
- "dc3-torrent",
+ "dc4-bencode",
+ "dc4-core",
+ "dc4-dht",
+ "dc4-peer",
+ "dc4-search",
+ "dc4-torrent",
  "libfuzzer-sys",
  "sha1",
 ]

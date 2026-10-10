@@ -1,8 +1,8 @@
 #![no_main]
 //! The peer-wire parsers must never panic on anything a peer can send.
 
-use dc3_peer::fuzzing;
-use dc3_peer::{MAX_FRAME_AFTER_EXT_HANDSHAKE, MAX_FRAME_BEFORE_EXT_HANDSHAKE};
+use dc4_peer::fuzzing;
+use dc4_peer::{MAX_FRAME_AFTER_EXT_HANDSHAKE, MAX_FRAME_BEFORE_EXT_HANDSHAKE};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -32,7 +32,7 @@ fuzz_target!(|data: &[u8]| {
     );
     fuzzing::message(data);
     if let Some((id, size)) = fuzzing::ext_handshake(data) {
-        assert!(id != 0 && size > 0 && size <= dc3_peer::DEFAULT_MAX_METADATA);
+        assert!(id != 0 && size > 0 && size <= dc4_peer::DEFAULT_MAX_METADATA);
     }
     let _ = fuzzing::metadata_message(data);
 });

@@ -12,7 +12,7 @@ dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../deploy" && pwd)/secrets"
 mkdir -p "$dir"
 chmod 700 "$dir"
 
-for name in pg_superuser_password dc3_owner_password dc3_crawler_password dc3_indexer_password dc3_web_password; do
+for name in pg_superuser_password dc4_owner_password dc4_crawler_password dc4_indexer_password dc4_web_password; do
   file="$dir/$name"
   if [[ -s "$file" ]]; then
     chmod 644 "$file"

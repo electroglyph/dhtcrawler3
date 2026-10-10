@@ -1,0 +1,34 @@
+[package]
+name = "dc4-dht"
+description = "Mainline DHT node: KRPC, routing table, BEP 42 node IDs, tokens, BEP 51 sampler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dc4-bencode.workspace = true
+dc4-core.workspace = true
+crc32c.workspace = true
+futures.workspace = true
+hex.workspace = true
+ipnet.workspace = true
+lru.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+socket2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

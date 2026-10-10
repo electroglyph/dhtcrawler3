@@ -2,14 +2,14 @@
 resolver = "3"
 exclude = ["fuzz"]
 members = [
-    "crates/dc3-core",
-    "crates/dc3-bencode",
-    "crates/dc3-torrent",
-    "crates/dc3-dht",
-    "crates/dc3-peer",
-    "crates/dc3-store",
-    "crates/dc3-search",
-    "crates/dc3-web",
+    "crates/dc4-core",
+    "crates/dc4-bencode",
+    "crates/dc4-torrent",
+    "crates/dc4-dht",
+    "crates/dc4-peer",
+    "crates/dc4-store",
+    "crates/dc4-search",
+    "crates/dc4-web",
     "crates/dhtcrawler4",
 ]
 
@@ -32,14 +32,14 @@ panic = "warn"
 indexing_slicing = "warn"
 
 [workspace.dependencies]
-dc3-core = { path = "crates/dc3-core" }
-dc3-bencode = { path = "crates/dc3-bencode" }
-dc3-torrent = { path = "crates/dc3-torrent" }
-dc3-dht = { path = "crates/dc3-dht" }
-dc3-peer = { path = "crates/dc3-peer" }
-dc3-store = { path = "crates/dc3-store" }
-dc3-search = { path = "crates/dc3-search" }
-dc3-web = { path = "crates/dc3-web" }
+dc4-core = { path = "crates/dc4-core" }
+dc4-bencode = { path = "crates/dc4-bencode" }
+dc4-torrent = { path = "crates/dc4-torrent" }
+dc4-dht = { path = "crates/dc4-dht" }
+dc4-peer = { path = "crates/dc4-peer" }
+dc4-store = { path = "crates/dc4-store" }
+dc4-search = { path = "crates/dc4-search" }
+dc4-web = { path = "crates/dc4-web" }
 
 anyhow = "1.0.104"
 askama = "0.16.1"

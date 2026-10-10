@@ -23,13 +23,13 @@ use common::{
     NETWORK_NODES, Network, Seeder, announce, crawl_options, http, info_dict, note,
     wait_for_tables, wait_until,
 };
-use dc3_core::AnyKey;
-use dc3_dht::Dht;
-use dc3_search::{SearchHandle, SearchQuery};
-use dc3_store::sqlx::postgres::PgConnection;
-use dc3_store::sqlx::{self, AssertSqlSafe, Connection};
-use dc3_store::{PgConnectOptions, Store};
-use dc3_web::{WebConfig, WebDeps};
+use dc4_core::AnyKey;
+use dc4_dht::Dht;
+use dc4_search::{SearchHandle, SearchQuery};
+use dc4_store::sqlx::postgres::PgConnection;
+use dc4_store::sqlx::{self, AssertSqlSafe, Connection};
+use dc4_store::{PgConnectOptions, Store};
+use dc4_web::{WebConfig, WebDeps};
 use dhtcrawler4::admin;
 use dhtcrawler4::crawl::Crawler;
 use dhtcrawler4::index::{self, IndexOptions, READY_MAX_LAG};
@@ -62,7 +62,7 @@ impl TestDatabase {
             .unwrap()
             .as_nanos();
         // Only digits and underscores: safe to put in the statement.
-        let name = format!("dc3_e2e_{}_{nanos}", std::process::id());
+        let name = format!("dc4_e2e_{}_{nanos}", std::process::id());
         let mut conn = PgConnection::connect_with(&admin)
             .await
             .expect("cannot connect with DATABASE_URL");
@@ -234,7 +234,7 @@ async fn scenario(options: PgConnectOptions) {
     let indexer = tokio::spawn(index::run(
         IndexOptions {
             path: index_dir.path().to_path_buf(),
-            writer_heap_bytes: dc3_search::WRITER_PROBE_HEAP_BYTES * 2,
+            writer_heap_bytes: dc4_search::WRITER_PROBE_HEAP_BYTES * 2,
             batch_size: 1000,
             poll_interval: Duration::from_millis(100),
             ready_max_lag: READY_MAX_LAG,
@@ -266,10 +266,10 @@ async fn scenario(options: PgConnectOptions) {
         hsts: false,
         trusted_proxies: Vec::new(),
         seeder_freshness: Duration::from_secs(7 * 24 * 60 * 60),
-        search_cache_entries: dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES,
-        search_cache_ttl: Duration::from_secs(dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS),
+        search_cache_entries: dc4_web::DEFAULT_SEARCH_CACHE_ENTRIES,
+        search_cache_ttl: Duration::from_secs(dc4_web::DEFAULT_SEARCH_CACHE_TTL_SECS),
     };
-    let app = dc3_web::router(
+    let app = dc4_web::router(
         web_cfg,
         WebDeps {
             backend: store.clone(),

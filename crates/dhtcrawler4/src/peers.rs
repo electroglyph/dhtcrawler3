@@ -3,17 +3,17 @@
 //!
 //! Every peer the crawler would dial, from an announce (the hint map) or a
 //! `get_peers` lookup, passes [`PeerFilter::accept`]: it must pass
-//! [`dc3_dht::is_dialable`] and must not be one of our own addresses.
+//! [`dc4_dht::is_dialable`] and must not be one of our own addresses.
 
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use dc3_core::DhtKey;
-use dc3_dht::ScrapeReport;
-use dc3_dht::compact::canonical_addr;
+use dc4_core::DhtKey;
+use dc4_dht::ScrapeReport;
+use dc4_dht::compact::canonical_addr;
 
-/// What the crawler needs from a DHT node. Implemented by [`dc3_dht::Dht`];
+/// What the crawler needs from a DHT node. Implemented by [`dc4_dht::Dht`];
 /// tests may substitute their own.
 pub trait PeerSource: Clone + Send + Sync + 'static {
     /// Peers for `key`, found within `timeout`.
@@ -36,13 +36,13 @@ pub trait PeerSource: Clone + Send + Sync + 'static {
     fn own_endpoints(&self) -> Vec<SocketAddr>;
 }
 
-impl PeerSource for dc3_dht::Dht {
+impl PeerSource for dc4_dht::Dht {
     fn get_peers(
         &self,
         key: DhtKey,
         timeout: Duration,
     ) -> impl Future<Output = Vec<SocketAddr>> + Send {
-        dc3_dht::Dht::get_peers(self, key, timeout)
+        dc4_dht::Dht::get_peers(self, key, timeout)
     }
 
     fn scrape_peers(
@@ -50,7 +50,7 @@ impl PeerSource for dc3_dht::Dht {
         key: DhtKey,
         timeout: Duration,
     ) -> impl Future<Output = ScrapeReport> + Send {
-        dc3_dht::Dht::scrape(self, key, timeout)
+        dc4_dht::Dht::scrape(self, key, timeout)
     }
 
     fn own_ips(&self) -> Vec<IpAddr> {
@@ -80,7 +80,7 @@ impl OwnAddrs {
         Self {
             ips: ips
                 .into_iter()
-                .map(dc3_dht::compact::canonical_ip)
+                .map(dc4_dht::compact::canonical_ip)
                 .collect(),
             endpoints: endpoints.into_iter().map(canonical_addr).collect(),
         }
@@ -108,7 +108,7 @@ impl PeerFilter {
     /// `peer` in canonical form if the crawler may dial it.
     pub fn accept(&self, peer: SocketAddr, own: &OwnAddrs) -> Option<SocketAddr> {
         let peer = canonical_addr(peer);
-        if !dc3_dht::is_dialable(peer, self.allow_private) {
+        if !dc4_dht::is_dialable(peer, self.allow_private) {
             return None;
         }
         let ours = if self.by_endpoint {

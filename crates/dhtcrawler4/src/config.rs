@@ -5,8 +5,8 @@
 //! file (allowed only when `--config` was not given) yields a working
 //! development configuration.
 //!
-//! Environment variables named `DC3_<SECTION>__<KEY>`, or
-//! `DC3_DATABASE__<ROLE>__<KEY>` for `[database.crawler]`,
+//! Environment variables named `DC4_<SECTION>__<KEY>`, or
+//! `DC4_DATABASE__<ROLE>__<KEY>` for `[database.crawler]`,
 //! `[database.indexer]` and `[database.web]`, override the file. Only names
 //! containing `__` are considered. The value type comes from the defaults:
 //! integers, booleans, strings, and lists given as comma-separated strings.
@@ -23,14 +23,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use dc3_store::PgConnectOptions;
+use dc4_store::PgConnectOptions;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 /// The config file read when `--config` is not given.
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/dhtcrawler4/dhtcrawler4.toml";
 /// Prefix of environment overrides.
-pub const ENV_PREFIX: &str = "DC3_";
+pub const ENV_PREFIX: &str = "DC4_";
 /// Separator between section, role and key in an override name.
 pub const ENV_SEPARATOR: &str = "__";
 /// Separator between list items in an override value.
@@ -56,11 +56,11 @@ pub const MAX_PEER_CONNECTIONS: usize = 65_536;
 /// Most entries in `crawl.bootstrap`.
 pub const MAX_BOOTSTRAP_HOSTS: usize = 64;
 /// Smallest `index.writer_heap_bytes` (Tantivy needs 15 MB per thread).
-pub const MIN_WRITER_HEAP_BYTES: usize = dc3_search::WRITER_PROBE_HEAP_BYTES;
+pub const MIN_WRITER_HEAP_BYTES: usize = dc4_search::WRITER_PROBE_HEAP_BYTES;
 /// Largest `index.writer_heap_bytes`.
 pub const MAX_WRITER_HEAP_BYTES: usize = 3 * 1024 * 1024 * 1024;
 /// Largest `index.batch_size`.
-pub const MAX_INDEX_BATCH: i64 = dc3_store::MAX_FEED_PAGE;
+pub const MAX_INDEX_BATCH: i64 = dc4_store::MAX_FEED_PAGE;
 /// Largest `index.poll_interval_ms` (one hour).
 pub const MAX_POLL_INTERVAL_MS: u64 = 3_600_000;
 /// Largest `web.site_name`, in characters.
@@ -139,8 +139,8 @@ impl Default for DatabaseConfig {
         Self {
             host: "db".into(),
             port: 5432,
-            name: "dc3".into(),
-            user: "dc3_crawler".into(),
+            name: "dc4".into(),
+            user: "dc4_crawler".into(),
             password_file: PathBuf::from("/run/secrets/db_password"),
             max_connections: 16,
             url: None,
@@ -223,20 +223,20 @@ pub struct CrawlConfig {
 impl Default for CrawlConfig {
     fn default() -> Self {
         Self {
-            dht_port: dc3_dht::DEFAULT_PORT,
+            dht_port: dc4_dht::DEFAULT_PORT,
             bind_v4: Ipv4Addr::UNSPECIFIED.to_string(),
             bind_v6: Ipv6Addr::UNSPECIFIED.to_string(),
-            bootstrap: dc3_dht::DEFAULT_BOOTSTRAP
+            bootstrap: dc4_dht::DEFAULT_BOOTSTRAP
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),
             state_dir: PathBuf::from("/var/lib/dhtcrawler4"),
-            max_packets_per_sec: dc3_dht::DEFAULT_MAX_PACKETS_PER_SEC,
-            sampler_concurrency: dc3_dht::DEFAULT_SAMPLER_CONCURRENCY,
+            max_packets_per_sec: dc4_dht::DEFAULT_MAX_PACKETS_PER_SEC,
+            sampler_concurrency: dc4_dht::DEFAULT_SAMPLER_CONCURRENCY,
             read_only: false,
             fetch_workers: 768,
             max_connections: 3072,
-            max_metadata_bytes: dc3_peer::DEFAULT_MAX_METADATA,
+            max_metadata_bytes: dc4_peer::DEFAULT_MAX_METADATA,
             max_inflight_metadata_bytes: 512 * 1024 * 1024,
             max_pending: 5_000_000,
             scrape_workers: 1,
@@ -247,7 +247,7 @@ impl Default for CrawlConfig {
             scrape_query_timeout_secs: 10,
             scrape_lookup_timeout_secs: 60,
             scrape_concurrency: 3,
-            scrape_packets_per_sec: dc3_dht::DEFAULT_SCRAPE_PACKETS_PER_SEC,
+            scrape_packets_per_sec: dc4_dht::DEFAULT_SCRAPE_PACKETS_PER_SEC,
             removal_cooldown_days: 7,
             tombstone_purge_hours: 1,
             gave_up_purge_hours: 1,
@@ -273,7 +273,7 @@ impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             path: PathBuf::from("/var/lib/dhtcrawler4/index"),
-            writer_heap_bytes: dc3_search::DEFAULT_WRITER_HEAP_BYTES,
+            writer_heap_bytes: dc4_search::DEFAULT_WRITER_HEAP_BYTES,
             batch_size: 1000,
             poll_interval_ms: 1000,
         }
@@ -304,8 +304,8 @@ impl Default for WebSettings {
             site_name: "dhtcrawler4".into(),
             hsts: false,
             trusted_proxies: Vec::new(),
-            search_cache_size: dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES,
-            search_cache_ttl_secs: dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS,
+            search_cache_size: dc4_web::DEFAULT_SEARCH_CACHE_ENTRIES,
+            search_cache_ttl_secs: dc4_web::DEFAULT_SEARCH_CACHE_TTL_SECS,
         }
     }
 }
@@ -751,7 +751,7 @@ impl Config {
             "crawl.sampler_concurrency",
             c.sampler_concurrency,
             1,
-            dc3_dht::MAX_SAMPLER_CONCURRENCY,
+            dc4_dht::MAX_SAMPLER_CONCURRENCY,
         )?;
         check_range("crawl.fetch_workers", c.fetch_workers, 1, MAX_FETCH_WORKERS)?;
         check_range(
@@ -891,7 +891,7 @@ impl Config {
                 "web.trusted_proxies has more than {MAX_TRUSTED_PROXIES} entries"
             )));
         }
-        dc3_web::validate_search_cache(w.search_cache_size, w.search_cache_ttl_secs)
+        dc4_web::validate_search_cache(w.search_cache_size, w.search_cache_ttl_secs)
             .map_err(invalid)?;
         self.trusted_proxies()?;
         Ok(())
@@ -1202,11 +1202,11 @@ mod tests {
         assert!(EXAMPLE.contains("search_cache_ttl_secs"));
         assert_eq!(
             parsed.web.search_cache_size,
-            dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES
+            dc4_web::DEFAULT_SEARCH_CACHE_ENTRIES
         );
         assert_eq!(
             parsed.web.search_cache_ttl_secs,
-            dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS
+            dc4_web::DEFAULT_SEARCH_CACHE_TTL_SECS
         );
         // No environment and no file at all gives the same result.
         assert_eq!(from_toml_str("", env(&[])).unwrap(), Config::default());
@@ -1216,12 +1216,12 @@ mod tests {
             .replace("# user = ", "user = ")
             .replace("# password_file = ", "password_file = ");
         let parsed = from_toml_str(&roles, env(&[])).unwrap();
-        assert_eq!(parsed.credentials(DbRole::Indexer).0, "dc3_indexer");
+        assert_eq!(parsed.credentials(DbRole::Indexer).0, "dc4_indexer");
         assert_eq!(
             parsed.credentials(DbRole::Web).1,
-            Path::new("/run/secrets/dc3_web_password")
+            Path::new("/run/secrets/dc4_web_password")
         );
-        assert_eq!(parsed.credentials(DbRole::Main).0, "dc3_crawler");
+        assert_eq!(parsed.credentials(DbRole::Main).0, "dc4_crawler");
     }
 
     #[test]
@@ -1233,19 +1233,19 @@ mod tests {
             "max_connections=200",
             "checkpoint_timeout=900",
             "max_wal_size=4GB",
-            "DC3_DATABASE__MAX_CONNECTIONS: \"128\"",
+            "DC4_DATABASE__MAX_CONNECTIONS: \"128\"",
         ] {
             assert!(COMPOSE.contains(needle), "compose lost {needle}");
         }
         assert!(
-            ROLES_SH.contains("ALTER ROLE dc3_crawler SET synchronous_commit = off;"),
+            ROLES_SH.contains("ALTER ROLE dc4_crawler SET synchronous_commit = off;"),
             "crawler async-commit setting missing from 10-roles.sh"
         );
         assert!(
-            ROLES_SH.contains("ALTER ROLE dc3_crawler CONNECTION LIMIT 200;"),
+            ROLES_SH.contains("ALTER ROLE dc4_crawler CONNECTION LIMIT 200;"),
             "crawler connection limit moved in 10-roles.sh"
         );
-        for role in ["dc3_indexer", "dc3_web"] {
+        for role in ["dc4_indexer", "dc4_web"] {
             assert!(
                 !ROLES_SH.contains(&format!("{role} SET synchronous_commit")),
                 "{role} must keep full durability"
@@ -1344,25 +1344,25 @@ mod tests {
     #[test]
     fn env_overrides_of_each_type() {
         let c = with_env(&[
-            ("DC3_DATABASE__USER", "dc3_web"),
-            ("DC3_DATABASE__MAX_CONNECTIONS", " 4 "),
-            ("DC3_CRAWL__READ_ONLY", "TRUE"),
-            ("DC3_CRAWL__BOOTSTRAP", "a.example:1, b.example:2,"),
-            ("DC3_WEB__TRUSTED_PROXIES", "172.30.80.0/24,10.0.0.1"),
-            ("DC3_WEB__LISTEN", "0.0.0.0:8080"),
-            ("DC3_LOG__FORMAT", "pretty"),
-            ("DC3_LOG__LEVEL", "debug"),
-            ("DC3_CRAWL__BIND_V6", ""),
-            ("DC3_DATABASE__CRAWLER__USER", "crawler2"),
-            ("DC3_DATABASE__URL", "postgres://h:5433/other"),
+            ("DC4_DATABASE__USER", "dc4_web"),
+            ("DC4_DATABASE__MAX_CONNECTIONS", " 4 "),
+            ("DC4_CRAWL__READ_ONLY", "TRUE"),
+            ("DC4_CRAWL__BOOTSTRAP", "a.example:1, b.example:2,"),
+            ("DC4_WEB__TRUSTED_PROXIES", "172.30.80.0/24,10.0.0.1"),
+            ("DC4_WEB__LISTEN", "0.0.0.0:8080"),
+            ("DC4_LOG__FORMAT", "pretty"),
+            ("DC4_LOG__LEVEL", "debug"),
+            ("DC4_CRAWL__BIND_V6", ""),
+            ("DC4_DATABASE__CRAWLER__USER", "crawler2"),
+            ("DC4_DATABASE__URL", "postgres://h:5433/other"),
             // Ignored: no double underscore.
-            ("DC3_TARGET", "x"),
-            ("DC3_TEST_DATABASE_URL", "x"),
-            ("DC3_E2E_VERBOSE", "1"),
+            ("DC4_TARGET", "x"),
+            ("DC4_TEST_DATABASE_URL", "x"),
+            ("DC4_E2E_VERBOSE", "1"),
             ("OTHER__THING", "x"),
         ])
         .unwrap();
-        assert_eq!(c.database.user, "dc3_web");
+        assert_eq!(c.database.user, "dc4_web");
         assert_eq!(c.database.max_connections, 4);
         assert!(c.crawl.read_only);
         assert_eq!(c.crawl.bootstrap, ["a.example:1", "b.example:2"]);
@@ -1379,10 +1379,10 @@ mod tests {
         assert_eq!(c.dht_binds().unwrap().1, None);
         assert!(c.dht_binds().unwrap().0.is_some());
         assert_eq!(c.credentials(DbRole::Crawler).0, "crawler2");
-        assert_eq!(c.credentials(DbRole::Indexer).0, "dc3_web");
+        assert_eq!(c.credentials(DbRole::Indexer).0, "dc4_web");
         assert_eq!(c.database.url.as_deref(), Some("postgres://h:5433/other"));
         // An empty list override clears the list.
-        let c = with_env(&[("DC3_CRAWL__BOOTSTRAP", "")]).unwrap();
+        let c = with_env(&[("DC4_CRAWL__BOOTSTRAP", "")]).unwrap();
         assert!(c.crawl.bootstrap.is_empty());
     }
 
@@ -1390,26 +1390,26 @@ mod tests {
     fn bad_overrides_are_errors_without_their_values() {
         for (name, value, needle) in [
             (
-                "DC3_DATABASE__PASSWORD",
+                "DC4_DATABASE__PASSWORD",
                 "hunter2",
                 "unknown key `database.password`",
             ),
-            ("DC3_NOPE__KEY", "hunter2", "unknown section `nope`"),
+            ("DC4_NOPE__KEY", "hunter2", "unknown section `nope`"),
             (
-                "DC3_DATABASE__OWNER__USER",
+                "DC4_DATABASE__OWNER__USER",
                 "hunter2",
                 "unknown section `database.owner`",
             ),
-            ("DC3_DATABASE", "hunter2", ""),
-            ("DC3_DATABASE__CRAWLER", "hunter2", "is a section"),
-            ("DC3_CRAWL__DHT_PORT", "hunter2", "expected an integer"),
-            ("DC3_CRAWL__READ_ONLY", "hunter2", "expected true or false"),
+            ("DC4_DATABASE", "hunter2", ""),
+            ("DC4_DATABASE__CRAWLER", "hunter2", "is a section"),
+            ("DC4_CRAWL__DHT_PORT", "hunter2", "expected an integer"),
+            ("DC4_CRAWL__READ_ONLY", "hunter2", "expected true or false"),
             (
-                "DC3_CRAWL__BOOTSTRAP__X",
+                "DC4_CRAWL__BOOTSTRAP__X",
                 "hunter2",
                 "unknown section `crawl.bootstrap`",
             ),
-            ("DC3___PORT", "hunter2", "unknown section ``"),
+            ("DC4___PORT", "hunter2", "unknown section ``"),
         ] {
             let result = with_env(&[(name, value)]);
             if needle.is_empty() {
@@ -1425,9 +1425,9 @@ mod tests {
             assert!(!text.contains("hunter2"), "{text}");
         }
         // A value of the right type that fails validation.
-        let err = with_env(&[("DC3_CRAWL__DHT_PORT", "70000")]).unwrap_err();
+        let err = with_env(&[("DC4_CRAWL__DHT_PORT", "70000")]).unwrap_err();
         assert!(matches!(err, ConfigError::Parse(_)), "{err}");
-        let err = with_env(&[("DC3_CRAWL__FETCH_WORKERS", "0")]).unwrap_err();
+        let err = with_env(&[("DC4_CRAWL__FETCH_WORKERS", "0")]).unwrap_err();
         assert!(err.to_string().contains("crawl.fetch_workers"), "{err}");
     }
 
@@ -1437,7 +1437,7 @@ mod tests {
         {
             use std::os::unix::ffi::OsStringExt;
             let vars = vec![(
-                OsString::from("DC3_DATABASE__USER"),
+                OsString::from("DC4_DATABASE__USER"),
                 OsString::from_vec(vec![0xff, 0xfe]),
             )];
             let err = from_toml_str(EXAMPLE, vars).unwrap_err();
@@ -1448,53 +1448,53 @@ mod tests {
     #[test]
     fn validation_rules() {
         let bad: &[(&str, &str)] = &[
-            ("DC3_CRAWL__DHT_PORT", "0"),
-            ("DC3_DATABASE__PORT", "0"),
-            ("DC3_DATABASE__MAX_CONNECTIONS", "0"),
-            ("DC3_CRAWL__MAX_CONNECTIONS", "0"),
-            ("DC3_CRAWL__MAX_INFLIGHT_METADATA_BYTES", "65535"),
-            ("DC3_CRAWL__MAX_METADATA_BYTES", "100"),
-            ("DC3_CRAWL__BIND_V4", "::"),
-            ("DC3_CRAWL__BIND_V6", "0.0.0.0"),
-            ("DC3_CRAWL__MAX_PENDING", "-1"),
-            ("DC3_CRAWL__SCRAPE_WORKERS", "0"),
-            ("DC3_CRAWL__SCRAPE_WORKERS", "65"),
-            ("DC3_CRAWL__SCRAPE_BATCH", "0"),
-            ("DC3_CRAWL__SCRAPE_BATCH", "1001"),
-            ("DC3_CRAWL__MAX_SCRAPE_FAILURES", "0"),
-            ("DC3_CRAWL__MAX_SCRAPE_FAILURES", "11"),
-            ("DC3_CRAWL__SCRAPE_SEEDER_THRESHOLD", "1001"),
-            ("DC3_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "0"),
-            ("DC3_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "61"),
-            ("DC3_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "9"),
-            ("DC3_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "301"),
-            ("DC3_CRAWL__SCRAPE_CONCURRENCY", "0"),
-            ("DC3_CRAWL__SCRAPE_CONCURRENCY", "17"),
-            ("DC3_CRAWL__SCRAPE_PACKETS_PER_SEC", "0"),
-            ("DC3_CRAWL__SCRAPE_PACKETS_PER_SEC", "251"),
-            ("DC3_CRAWL__REMOVAL_COOLDOWN_DAYS", "0"),
-            ("DC3_CRAWL__REMOVAL_COOLDOWN_DAYS", "366"),
-            ("DC3_CRAWL__TOMBSTONE_PURGE_HOURS", "169"),
-            ("DC3_CRAWL__GAVE_UP_PURGE_HOURS", "169"),
-            ("DC3_CRAWL__SCRAPE_SWEEP_SECS", "59"),
-            ("DC3_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "86399"),
-            ("DC3_CRAWL__SCRAPE_NODE_CACHE_KEYS", "65537"),
-            ("DC3_CRAWL__SCRAPE_EARLY_EXIT_QUORUM", "1"),
-            ("DC3_CRAWL__SCRAPE_EARLY_EXIT_QUORUM", "6"),
-            ("DC3_CRAWL__BOOTSTRAP", "no-port"),
-            ("DC3_CRAWL__SAMPLER_CONCURRENCY", "1025"),
-            ("DC3_CRAWL__SAMPLER_CONCURRENCY", "0"),
-            ("DC3_INDEX__BATCH_SIZE", "1001"),
-            ("DC3_INDEX__WRITER_HEAP_BYTES", "1000"),
-            ("DC3_INDEX__POLL_INTERVAL_MS", "0"),
-            ("DC3_WEB__SITE_NAME", ""),
-            ("DC3_WEB__TRUSTED_PROXIES", "not-a-net"),
-            ("DC3_WEB__SEARCH_CACHE_SIZE", "10001"),
-            ("DC3_WEB__SEARCH_CACHE_TTL_SECS", "604801"),
-            ("DC3_METRICS__LISTEN", "127.0.0.1:8080"),
-            ("DC3_DATABASE__URL", "mysql://h/db"),
-            ("DC3_DATABASE__USER", ""),
-            ("DC3_DATABASE__WEB__USER", " "),
+            ("DC4_CRAWL__DHT_PORT", "0"),
+            ("DC4_DATABASE__PORT", "0"),
+            ("DC4_DATABASE__MAX_CONNECTIONS", "0"),
+            ("DC4_CRAWL__MAX_CONNECTIONS", "0"),
+            ("DC4_CRAWL__MAX_INFLIGHT_METADATA_BYTES", "65535"),
+            ("DC4_CRAWL__MAX_METADATA_BYTES", "100"),
+            ("DC4_CRAWL__BIND_V4", "::"),
+            ("DC4_CRAWL__BIND_V6", "0.0.0.0"),
+            ("DC4_CRAWL__MAX_PENDING", "-1"),
+            ("DC4_CRAWL__SCRAPE_WORKERS", "0"),
+            ("DC4_CRAWL__SCRAPE_WORKERS", "65"),
+            ("DC4_CRAWL__SCRAPE_BATCH", "0"),
+            ("DC4_CRAWL__SCRAPE_BATCH", "1001"),
+            ("DC4_CRAWL__MAX_SCRAPE_FAILURES", "0"),
+            ("DC4_CRAWL__MAX_SCRAPE_FAILURES", "11"),
+            ("DC4_CRAWL__SCRAPE_SEEDER_THRESHOLD", "1001"),
+            ("DC4_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "0"),
+            ("DC4_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "61"),
+            ("DC4_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "9"),
+            ("DC4_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "301"),
+            ("DC4_CRAWL__SCRAPE_CONCURRENCY", "0"),
+            ("DC4_CRAWL__SCRAPE_CONCURRENCY", "17"),
+            ("DC4_CRAWL__SCRAPE_PACKETS_PER_SEC", "0"),
+            ("DC4_CRAWL__SCRAPE_PACKETS_PER_SEC", "251"),
+            ("DC4_CRAWL__REMOVAL_COOLDOWN_DAYS", "0"),
+            ("DC4_CRAWL__REMOVAL_COOLDOWN_DAYS", "366"),
+            ("DC4_CRAWL__TOMBSTONE_PURGE_HOURS", "169"),
+            ("DC4_CRAWL__GAVE_UP_PURGE_HOURS", "169"),
+            ("DC4_CRAWL__SCRAPE_SWEEP_SECS", "59"),
+            ("DC4_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "86399"),
+            ("DC4_CRAWL__SCRAPE_NODE_CACHE_KEYS", "65537"),
+            ("DC4_CRAWL__SCRAPE_EARLY_EXIT_QUORUM", "1"),
+            ("DC4_CRAWL__SCRAPE_EARLY_EXIT_QUORUM", "6"),
+            ("DC4_CRAWL__BOOTSTRAP", "no-port"),
+            ("DC4_CRAWL__SAMPLER_CONCURRENCY", "1025"),
+            ("DC4_CRAWL__SAMPLER_CONCURRENCY", "0"),
+            ("DC4_INDEX__BATCH_SIZE", "1001"),
+            ("DC4_INDEX__WRITER_HEAP_BYTES", "1000"),
+            ("DC4_INDEX__POLL_INTERVAL_MS", "0"),
+            ("DC4_WEB__SITE_NAME", ""),
+            ("DC4_WEB__TRUSTED_PROXIES", "not-a-net"),
+            ("DC4_WEB__SEARCH_CACHE_SIZE", "10001"),
+            ("DC4_WEB__SEARCH_CACHE_TTL_SECS", "604801"),
+            ("DC4_METRICS__LISTEN", "127.0.0.1:8080"),
+            ("DC4_DATABASE__URL", "mysql://h/db"),
+            ("DC4_DATABASE__USER", ""),
+            ("DC4_DATABASE__WEB__USER", " "),
         ];
         for (name, value) in bad {
             let err = with_env(&[(name, value)]).unwrap_err();
@@ -1505,20 +1505,20 @@ mod tests {
         }
         // Out-of-range cache knobs name the limit, never the rejected value.
         for (name, value) in [
-            ("DC3_WEB__SEARCH_CACHE_SIZE", "10001"),
-            ("DC3_WEB__SEARCH_CACHE_TTL_SECS", "604801"),
+            ("DC4_WEB__SEARCH_CACHE_SIZE", "10001"),
+            ("DC4_WEB__SEARCH_CACHE_TTL_SECS", "604801"),
         ] {
             let err = with_env(&[(name, value)]).unwrap_err();
             assert!(!err.to_string().contains(value), "{err}");
         }
-        let both_off = with_env(&[("DC3_CRAWL__BIND_V4", ""), ("DC3_CRAWL__BIND_V6", "")]);
+        let both_off = with_env(&[("DC4_CRAWL__BIND_V4", ""), ("DC4_CRAWL__BIND_V6", "")]);
         assert!(both_off.is_err());
         // With a URL, host and name may be empty.
         assert!(
             with_env(&[
-                ("DC3_DATABASE__URL", "postgresql://h/db"),
-                ("DC3_DATABASE__HOST", ""),
-                ("DC3_DATABASE__NAME", ""),
+                ("DC4_DATABASE__URL", "postgresql://h/db"),
+                ("DC4_DATABASE__HOST", ""),
+                ("DC4_DATABASE__NAME", ""),
             ])
             .is_ok()
         );
@@ -1528,13 +1528,13 @@ mod tests {
     fn scrape_intervals_are_ordered() {
         // Equal is allowed (not faster); only strictly less is refused.
         let ok = with_env(&[
-            ("DC3_CRAWL__SCRAPE_INTERVAL_SECS", "604800"),
-            ("DC3_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "604800"),
+            ("DC4_CRAWL__SCRAPE_INTERVAL_SECS", "604800"),
+            ("DC4_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "604800"),
         ]);
         assert!(ok.is_ok(), "{ok:?}");
         let err = with_env(&[
-            ("DC3_CRAWL__SCRAPE_INTERVAL_SECS", "1209600"),
-            ("DC3_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "604800"),
+            ("DC4_CRAWL__SCRAPE_INTERVAL_SECS", "1209600"),
+            ("DC4_CRAWL__SCRAPE_UNKNOWN_INTERVAL_SECS", "604800"),
         ])
         .unwrap_err();
         assert!(
@@ -1544,8 +1544,8 @@ mod tests {
 
         // The overall lookup deadline must exceed the per-RPC timeout.
         let err = with_env(&[
-            ("DC3_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "10"),
-            ("DC3_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "10"),
+            ("DC4_CRAWL__SCRAPE_QUERY_TIMEOUT_SECS", "10"),
+            ("DC4_CRAWL__SCRAPE_LOOKUP_TIMEOUT_SECS", "10"),
         ])
         .unwrap_err();
         assert!(
@@ -1558,23 +1558,23 @@ mod tests {
     fn search_cache_defaults_and_env_overrides() {
         let w = Config::default().web;
         assert_eq!(w.search_cache_size, 100);
-        assert_eq!(w.search_cache_size, dc3_web::DEFAULT_SEARCH_CACHE_ENTRIES);
+        assert_eq!(w.search_cache_size, dc4_web::DEFAULT_SEARCH_CACHE_ENTRIES);
         assert_eq!(w.search_cache_ttl_secs, 900);
         assert_eq!(
             w.search_cache_ttl_secs,
-            dc3_web::DEFAULT_SEARCH_CACHE_TTL_SECS
+            dc4_web::DEFAULT_SEARCH_CACHE_TTL_SECS
         );
         let c = with_env(&[
-            ("DC3_WEB__SEARCH_CACHE_SIZE", "50"),
-            ("DC3_WEB__SEARCH_CACHE_TTL_SECS", "60"),
+            ("DC4_WEB__SEARCH_CACHE_SIZE", "50"),
+            ("DC4_WEB__SEARCH_CACHE_TTL_SECS", "60"),
         ])
         .unwrap();
         assert_eq!(c.web.search_cache_size, 50);
         assert_eq!(c.web.search_cache_ttl_secs, 60);
         // Zero of either knob disables the cache instead of erroring.
         let c = with_env(&[
-            ("DC3_WEB__SEARCH_CACHE_SIZE", "0"),
-            ("DC3_WEB__SEARCH_CACHE_TTL_SECS", "0"),
+            ("DC4_WEB__SEARCH_CACHE_SIZE", "0"),
+            ("DC4_WEB__SEARCH_CACHE_TTL_SECS", "0"),
         ])
         .unwrap();
         assert_eq!(c.web.search_cache_size, 0);
@@ -1610,8 +1610,8 @@ mod tests {
         assert!(w[0].contains("trusted_proxies"));
 
         let c = with_env(&[
-            ("DC3_WEB__HSTS", "true"),
-            ("DC3_WEB__LISTEN", "0.0.0.0:8080"),
+            ("DC4_WEB__HSTS", "true"),
+            ("DC4_WEB__LISTEN", "0.0.0.0:8080"),
         ])
         .unwrap();
         let w = c.warnings();
@@ -1620,9 +1620,9 @@ mod tests {
         assert!(w[1].contains("loopback"));
 
         let c = with_env(&[
-            ("DC3_WEB__HSTS", "true"),
-            ("DC3_WEB__TRUSTED_PROXIES", "172.30.80.0/24"),
-            ("DC3_WEB__LISTEN", "0.0.0.0:8080"),
+            ("DC4_WEB__HSTS", "true"),
+            ("DC4_WEB__TRUSTED_PROXIES", "172.30.80.0/24"),
+            ("DC4_WEB__LISTEN", "0.0.0.0:8080"),
         ])
         .unwrap();
         assert!(c.warnings().is_empty(), "{:?}", c.warnings());
@@ -1658,50 +1658,50 @@ mod tests {
         // connect_options reads the right file per role.
         let crawler_pw = write("crawler", b"crawlerpw\n");
         let c = with_env(&[
-            ("DC3_DATABASE__PASSWORD_FILE", plain.to_str().unwrap()),
+            ("DC4_DATABASE__PASSWORD_FILE", plain.to_str().unwrap()),
             (
-                "DC3_DATABASE__CRAWLER__PASSWORD_FILE",
+                "DC4_DATABASE__CRAWLER__PASSWORD_FILE",
                 crawler_pw.to_str().unwrap(),
             ),
-            ("DC3_DATABASE__CRAWLER__USER", "dc3_crawler2"),
+            ("DC4_DATABASE__CRAWLER__USER", "dc4_crawler2"),
         ])
         .unwrap();
         let main = c.connect_options(DbRole::Main).unwrap();
-        assert_eq!(main.get_username(), "dc3_crawler");
+        assert_eq!(main.get_username(), "dc4_crawler");
         assert_eq!(main.get_host(), "db");
         assert_eq!(main.get_port(), 5432);
-        assert_eq!(main.get_database(), Some("dc3"));
+        assert_eq!(main.get_database(), Some("dc4"));
         let crawler = c.connect_options(DbRole::Crawler).unwrap();
-        assert_eq!(crawler.get_username(), "dc3_crawler2");
+        assert_eq!(crawler.get_username(), "dc4_crawler2");
         // An empty password file is refused for every role that uses it.
-        let c = with_env(&[("DC3_DATABASE__PASSWORD_FILE", empty.to_str().unwrap())]).unwrap();
+        let c = with_env(&[("DC4_DATABASE__PASSWORD_FILE", empty.to_str().unwrap())]).unwrap();
         assert!(c.connect_options(DbRole::Web).is_err());
         // No password file at all: connect without a password.
-        let c = with_env(&[("DC3_DATABASE__PASSWORD_FILE", "")]).unwrap();
+        let c = with_env(&[("DC4_DATABASE__PASSWORD_FILE", "")]).unwrap();
         assert!(c.connect_options(DbRole::Main).is_ok());
     }
 
     #[test]
     fn url_overrides_host_but_not_credentials() {
         let mut c = with_env(&[
-            ("DC3_DATABASE__URL", "postgres://pg.internal:6543/other"),
-            ("DC3_DATABASE__USER", "dc3_owner"),
-            ("DC3_DATABASE__PASSWORD_FILE", ""),
+            ("DC4_DATABASE__URL", "postgres://pg.internal:6543/other"),
+            ("DC4_DATABASE__USER", "dc4_owner"),
+            ("DC4_DATABASE__PASSWORD_FILE", ""),
         ])
         .unwrap();
         let o = c.connect_options(DbRole::Main).unwrap();
         assert_eq!(o.get_host(), "pg.internal");
         assert_eq!(o.get_port(), 6543);
         assert_eq!(o.get_database(), Some("other"));
-        assert_eq!(o.get_username(), "dc3_owner");
+        assert_eq!(o.get_username(), "dc4_owner");
         // A URL password is refused at load: passwords come from files.
         let err = with_env(&[
             (
-                "DC3_DATABASE__URL",
+                "DC4_DATABASE__URL",
                 "postgres://someone:urlpw@pg.internal:6543/other",
             ),
-            ("DC3_DATABASE__USER", "dc3_owner"),
-            ("DC3_DATABASE__PASSWORD_FILE", ""),
+            ("DC4_DATABASE__USER", "dc4_owner"),
+            ("DC4_DATABASE__PASSWORD_FILE", ""),
         ])
         .unwrap_err();
         assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
@@ -1766,7 +1766,7 @@ mod tests {
         let (v4, v6) = c.dht_binds().unwrap();
         assert_eq!(v4, Some("0.0.0.0:6881".parse().unwrap()));
         assert_eq!(v6, Some("[::]:6881".parse().unwrap()));
-        let c = with_env(&[("DC3_CRAWL__STATE_DIR", "")]).unwrap();
+        let c = with_env(&[("DC4_CRAWL__STATE_DIR", "")]).unwrap();
         assert_eq!(c.dht_state_file(), None);
         assert_eq!(line_and_column("ab\ncd", 4), (2, 2));
         assert!(is_host_port("[::1]:6881"));

@@ -4,11 +4,11 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use dc3_dht::compact::{
+use dc4_dht::compact::{
     COMPACT_PEER_V4_LEN, COMPACT_PEER_V6_LEN, canonical_addr, canonical_ip, decode_nodes,
     decode_peer, encode_nodes, encode_peer, is_global_ip,
 };
-use dc3_dht::{Family, is_dialable};
+use dc4_dht::{Family, is_dialable};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

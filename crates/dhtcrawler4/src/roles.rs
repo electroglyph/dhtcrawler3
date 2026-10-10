@@ -5,7 +5,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use dc3_store::Store;
+use dc4_store::Store;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 

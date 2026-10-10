@@ -1,6 +1,6 @@
 //! An in-memory [`CrawlStore`] for tests and experiments.
 //!
-//! It follows the queue rules of `dc3-store` closely enough for the pipeline
+//! It follows the queue rules of `dc4-store` closely enough for the pipeline
 //! tests: observations queue new keys, claims lease them, `complete` stores a
 //! torrent, and `fail` backs off and gives up. Nothing is persisted.
 
@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use dc3_core::DhtKey;
-use dc3_store::{
+use dc4_core::DhtKey;
+use dc4_store::{
     MAX_FETCH_ATTEMPTS, NewTorrent, Observation, ObserveOutcome, PendingItem,
     REMOVAL_STRONG_EVIDENCE_SIGHTINGS, RemovalCooldown, Result, ScrapeItem, StoreError,
 };
@@ -74,7 +74,7 @@ struct MemScrape {
     version: u64,
 }
 
-/// Removal memory of one DHT key (see `removed_keys` in `dc3-store`).
+/// Removal memory of one DHT key (see `removed_keys` in `dc4-store`).
 #[derive(Debug, Clone)]
 struct RemovedEntry {
     removed_at: Instant,
@@ -818,7 +818,7 @@ impl CrawlStore for MemoryStore {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use dc3_store::FileRow;
+    use dc4_store::FileRow;
 
     fn key(n: u8) -> DhtKey {
         DhtKey([n; 20])
@@ -1118,7 +1118,7 @@ mod scrape_tests {
             name: "x".into(),
             total_size: 1,
             file_count: 1,
-            files: vec![dc3_store::FileRow {
+            files: vec![dc4_store::FileRow {
                 path: "x".into(),
                 size: 1,
             }],

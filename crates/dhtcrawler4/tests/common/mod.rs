@@ -16,9 +16,9 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use dc3_bencode::OwnedValue;
-use dc3_core::DhtKey;
-use dc3_dht::{Dht, DhtConfig, DhtTuning, Discovered};
+use dc4_bencode::OwnedValue;
+use dc4_core::DhtKey;
+use dc4_dht::{Dht, DhtConfig, DhtTuning, Discovered};
 use dhtcrawler4::admission::AdmissionTuning;
 use dhtcrawler4::crawl::CrawlOptions;
 use dhtcrawler4::fetch::{DestLimits, FetchLimitsConfig, FetchTuning};
@@ -33,9 +33,9 @@ pub const NETWORK_NODES: usize = 15;
 const SINK_CAPACITY: usize = 4096;
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Prints progress when `DC3_E2E_VERBOSE` is set.
+/// Prints progress when `DC4_E2E_VERBOSE` is set.
 pub fn note(started: Instant, what: &str) {
-    if std::env::var_os("DC3_E2E_VERBOSE").is_some() {
+    if std::env::var_os("DC4_E2E_VERBOSE").is_some() {
         eprintln!("[{:>6.2}s] {what}", started.elapsed().as_secs_f64());
     }
 }
@@ -178,7 +178,7 @@ pub fn info_dict(name: &str, files: &[(&str, i64)]) -> Vec<u8> {
         })
         .collect();
     d.insert(b"files".to_vec(), OwnedValue::List(list));
-    dc3_bencode::encode(&OwnedValue::Dict(d))
+    dc4_bencode::encode(&OwnedValue::Dict(d))
 }
 
 /// A torrent served over BEP 9 on 127.0.0.1.
@@ -192,13 +192,13 @@ pub struct Seeder {
 impl Seeder {
     /// Serves `info` until dropped.
     pub async fn start(info: Vec<u8>) -> Seeder {
-        let key = dc3_torrent::parse_info(&info)
+        let key = dc4_torrent::parse_info(&info)
             .expect("a valid test torrent")
             .info_hash_v1
             .expect("a v1 test torrent");
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(dc3_peer::seeder::serve(listener, key, info.clone()));
+        let task = tokio::spawn(dc4_peer::seeder::serve(listener, key, info.clone()));
         Seeder {
             key,
             info,
@@ -304,7 +304,7 @@ pub async fn http(
 ) -> HttpResponse {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let mut request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nUser-Agent: dc3-e2e\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nUser-Agent: dc4-e2e\r\n"
     );
     for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));

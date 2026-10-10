@@ -4,7 +4,7 @@
 //! `MAX_DATAGRAM_OUT` bytes and decode again to the same message (responses
 //! may lose trailing list entries to trimming; error text may be re-truncated).
 
-use dc3_dht::krpc::{Body, MAX_DATAGRAM_OUT, MAX_ERROR_TEXT_LEN, Message, decode, encode};
+use dc4_dht::krpc::{Body, MAX_DATAGRAM_OUT, MAX_ERROR_TEXT_LEN, Message, decode, encode};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

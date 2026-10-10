@@ -3,8 +3,8 @@
 //! Parsed metadata must respect the documented caps, and `verify` must accept
 //! the input under its own SHA-1.
 
-use dc3_core::DhtKey;
-use dc3_torrent::{
+use dc4_core::DhtKey;
+use dc4_torrent::{
     MAX_FILES_PARSED, MAX_FILES_STORED, NAME_MAX_CHARS, PATH_MAX_CHARS, UNNAMED, Verified,
     parse_info_visit, verify,
 };

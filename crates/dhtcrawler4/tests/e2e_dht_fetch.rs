@@ -20,7 +20,7 @@ use common::{
     NETWORK_NODES, Network, Seeder, announce, crawl_options, info_dict, note, wait_for_tables,
     wait_until,
 };
-use dc3_dht::Dht;
+use dc4_dht::Dht;
 use dhtcrawler4::crawl::Crawler;
 use dhtcrawler4::memstore::MemoryStore;
 use tokio::time::Instant;
