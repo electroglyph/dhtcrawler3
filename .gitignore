@@ -10,3 +10,4 @@
 /data
 /deploy/secrets/*
 !/deploy/secrets/README.md
+/deploy/docker-compose.override.yml

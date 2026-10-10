@@ -532,7 +532,8 @@ docker compose ps                     # includes healthcheck status
   `check-config`.
 - **Rebuild the search index from scratch:** stop the index role first, then
   `docker compose run --rm index index --rebuild`.
-- **Upgrade:** `git pull`, `docker compose up -d --build`. Migrations run
+- **Upgrade:** [Standard update](#standard-update-docker) (`git pull` with
+  local edits parked, then `up -d --build`). Migrations run
   automatically on every start via the `migrate` service; the Tantivy index
   on its volume survives restarts and is rebuilt only when you ask.
 - **Back up:** the `pgdata` volume (the database) and `deploy/secrets/`
@@ -571,9 +572,9 @@ first and stay there.
 
 ```sh
 cd ~/dhtcrawler4
-git stash push -- deploy/docker-compose.yml 2>/dev/null || true  # park local edits, if any
+git stash push -- deploy/config/dhtcrawler4.toml deploy/docker-compose.yml 2>/dev/null || true  # park local edits, if any
 git pull
-git stash pop 2>/dev/null || true                                # re-apply them
+git stash pop 2>/dev/null || true   # re-apply them; on conflict see below
 cd deploy
 df -h / | tail -1              # the build needs several GB free
 docker compose up -d --build
@@ -609,8 +610,38 @@ Rules of thumb for what needs a rebuild:
   `up -d` (containers read them at startup).
 
 If `git stash pop` reports a conflict (upstream touched the same lines you
-edited), open `deploy/docker-compose.yml`, keep your values for the
-conflicted hunks, then `up -d --build` as usual.
+edited — e.g. a release that changes the same TOML defaults you tuned),
+don't force it: save your values first, then re-apply them by hand onto the
+new files:
+
+```sh
+git diff -- deploy/config/dhtcrawler4.toml deploy/docker-compose.yml > ~/tuning-backup.patch
+git checkout -- deploy/config/dhtcrawler4.toml deploy/docker-compose.yml
+git stash drop              # drop the conflicted stash; your values are in the patch
+git pull
+```
+
+Then open `~/tuning-backup.patch`, and for each key you changed set your
+value in the new file (take upstream's value where you never meant to
+differ). Validate with `docker compose run --rm crawl check-config` before
+`up -d --build`.
+
+To stop this happening at all, keep machine-specific tuning out of tracked
+files: put it in the untracked `deploy/docker-compose.override.yml`, which
+Compose merges automatically and git ignores. Every TOML key has a
+`DC4_<SECTION>__<KEY>` equivalent, so tuning never needs a TOML edit:
+
+```yaml
+# deploy/docker-compose.override.yml — your server's tuning, never committed
+services:
+  crawl:
+    environment:
+      DC4_CRAWL__FETCH_WORKERS: "768"
+      DC4_CRAWL__MAX_PACKETS_PER_SEC: "3000"
+```
+
+With tuning there, `deploy/config/dhtcrawler4.toml` and
+`deploy/docker-compose.yml` stay pristine and `git pull` just works.
 
 ### Before you upgrade: back up
 
