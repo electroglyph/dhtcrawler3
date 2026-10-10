@@ -169,7 +169,14 @@ async fn fetch_inner(
                 total_size,
                 payload,
             } => {
-                budget.acquire(payload.len()).await?;
+                // Redundant copies of a stored piece are free: charge the
+                // shared byte budget only for data not yet kept, so a peer
+                // answering our own retry (or spamming duplicates) cannot
+                // drain it and starve other fetches. No await runs between
+                // the probe and `accept`, so the check is exact.
+                if !assembly.is_received(piece) {
+                    budget.acquire(payload.len()).await?;
+                }
                 assembly.accept(piece, total_size, payload)?;
                 if assembly.is_complete() {
                     break;

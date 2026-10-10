@@ -77,6 +77,16 @@ impl Assembly {
             .is_some_and(|i| i < self.piece_count())
     }
 
+    /// True when `piece` was already received and stored: a redundant copy
+    /// carries no new data. Used to skip the byte-budget charge for
+    /// duplicates (see `fetch_inner`).
+    pub(crate) fn is_received(&self, piece: i64) -> bool {
+        usize::try_from(piece)
+            .ok()
+            .and_then(|i| self.state.get(i))
+            .is_some_and(|s| *s == PieceState::Received)
+    }
+
     /// Exact length that piece `index` must have.
     fn expected_len(&self, index: usize) -> usize {
         let start = index.saturating_mul(METADATA_PIECE_LEN);
@@ -239,6 +249,28 @@ mod tests {
         for slot in a.requested_at.iter_mut().flatten() {
             *slot = past;
         }
+    }
+
+    #[test]
+    fn is_received_tracks_stored_pieces_only() {
+        let size = 2 * METADATA_PIECE_LEN + 10;
+        let mut a = Assembly::new(size).unwrap();
+        let total = size as i64;
+        let full = vec![7u8; METADATA_PIECE_LEN];
+        assert!(!a.is_received(0));
+        assert!(!a.is_received(1));
+        assert!(!a.is_received(2));
+        assert!(!a.is_received(99));
+        assert!(!a.is_received(-1));
+        // Requested but not yet stored: not received.
+        assert_eq!(a.next_requests(), vec![0, 1, 2]);
+        assert!(!a.is_received(0));
+        a.accept(0, total, &full).unwrap();
+        assert!(a.is_received(0));
+        assert!(!a.is_received(1));
+        // A redundant copy leaves the probe true.
+        a.accept(0, total, &full).unwrap();
+        assert!(a.is_received(0));
     }
 
     #[test]

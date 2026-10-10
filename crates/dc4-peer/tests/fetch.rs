@@ -190,6 +190,27 @@ async fn duplicate_piece_is_ignored() {
 }
 
 #[tokio::test]
+async fn duplicate_pieces_do_not_consume_the_shared_budget() {
+    // Every piece arrives twice, but the shared budget holds exactly one
+    // copy of every piece: with per-copy charging the second wave would
+    // exhaust it mid-fetch and stall on `total`. Each duplicate must be
+    // free, so the fetch completes on the tight budget.
+    let info = info_of_len(2 * PIECE + 100);
+    let key = v1_key(&info);
+    let (addr, task) = start_seeder(key, info.clone(), Misbehaviour::DuplicatePiece).await;
+    let permits = info.len().div_ceil(BYTE_BUDGET_UNIT);
+    let limits = FetchLimits {
+        byte_budget: Some(Arc::new(Semaphore::new(permits))),
+        ..test_limits()
+    };
+    let got = tokio::time::timeout(Duration::from_secs(10), fetch_metadata(addr, key, &limits))
+        .await
+        .expect("fetch stalled: duplicates consumed the shared budget");
+    assert_eq!(got.unwrap(), info);
+    task.abort();
+}
+
+#[tokio::test]
 async fn short_last_piece_is_rejected() {
     let info = info_of_len(1);
     let key = v1_key(&info);

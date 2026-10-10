@@ -81,8 +81,9 @@ pub struct FetchLimits {
     /// Largest `metadata_size` accepted, in bytes.
     pub max_metadata: usize,
     /// Shared budget for metadata bytes in flight, in permits of
-    /// [`BYTE_BUDGET_UNIT`] (KiB). Each received piece takes its size in KiB,
-    /// rounded up, before it is kept; the permits are released when
+    /// [`BYTE_BUDGET_UNIT`] (KiB). Each piece not yet kept takes its size
+    /// in KiB, rounded up, before it is stored; redundant copies of an
+    /// already-stored piece are free. The permits are released when
     /// [`fetch_metadata`] returns. Waiting counts against `total`.
     /// `None` means no budget.
     pub byte_budget: Option<Arc<tokio::sync::Semaphore>>,
