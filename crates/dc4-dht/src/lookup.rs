@@ -269,9 +269,11 @@ impl Lookup {
                 }
                 let peer = canonical_addr(peer);
                 // A response on this socket's family must not seed the
-                // traversal with the other family's peers.
+                // traversal with the other family's peers, nor with our
+                // own addresses (mirrors the `own` filter in `add`).
                 if Family::of(&peer) == self.family
                     && self.policy.dialable(&peer)
+                    && !self.own.contains(&peer, self.policy)
                     && self.peer_set.insert(peer)
                 {
                     self.peers.push(peer);
@@ -670,6 +672,28 @@ mod tests {
             })
             .is_some()
         );
+    }
+
+    #[test]
+    fn returned_peers_exclude_our_own_addresses() {
+        let target = NodeId([0; 20]);
+        let mut own = OwnAddrs::default();
+        let ours: SocketAddr = "8.8.200.1:6881".parse().unwrap();
+        own.add(ours);
+        let mut l = lookup(target, Kind::GetPeers, own);
+        let responder = CompactNode {
+            id: NodeId([7; 20]),
+            addr: SocketAddr::from(([9, 9, 9, 9], 6881)),
+        };
+        assert!(l.add(responder).is_some());
+        let good: SocketAddr = "8.8.8.8:6881".parse().unwrap();
+        let response = Response {
+            id: responder.id,
+            values: Some(vec![ours, good]),
+            ..Response::default()
+        };
+        l.complete(responder.addr, Ok(response), None);
+        assert_eq!(l.peers, vec![good]);
     }
 
     #[test]
