@@ -45,11 +45,13 @@ struct State {
     observe_calls: usize,
     observed: Vec<Observation>,
     claim_calls: usize,
+    live_claim_calls: usize,
     failing_observes: usize,
     failing_completes: usize,
     failing_removals: usize,
     failing_batches: usize,
     failing_depths: usize,
+    failing_claims: usize,
     renewals: usize,
     fails: HashMap<DhtKey, u32>,
     /// `None` means [`MEMORY_FAIL_BACKOFF`].
@@ -186,6 +188,11 @@ impl MemoryStore {
         self.lock().claim_calls
     }
 
+    /// Number of `claim_live` calls (the live-first phase of each bulk).
+    pub fn live_claim_calls(&self) -> usize {
+        self.lock().live_claim_calls
+    }
+
     /// Every observation of every successful `observe` call, in order.
     pub fn observed(&self) -> Vec<Observation> {
         self.lock().observed.clone()
@@ -222,6 +229,12 @@ impl MemoryStore {
         self.lock().failing_depths = n;
     }
 
+    /// Makes the next `n` `claim`/`claim_live` calls fail (as if the
+    /// database hiccuped mid-claim). The claimer backs off; no leases move.
+    pub fn fail_next_claims(&self, n: usize) {
+        self.lock().failing_claims = n;
+    }
+
     /// Number of successful lease renewals.
     pub fn renewals(&self) -> usize {
         self.lock().renewals
@@ -248,6 +261,63 @@ impl MemoryStore {
     /// The piggybacked seeder estimate queued for `key`, if any.
     pub fn pending_seeders(&self, key: &DhtKey) -> Option<u32> {
         self.lock().pending.get(key).and_then(|p| p.seeders)
+    }
+
+    async fn claim_with(&self, n: i64, lease: Duration, live_only: bool) -> Result<Vec<PendingItem>> {
+        if n <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut state = self.lock();
+        state.claim_calls = state.claim_calls.saturating_add(1);
+        if live_only {
+            state.live_claim_calls = state.live_claim_calls.saturating_add(1);
+        }
+        if state.failing_claims > 0 {
+            state.failing_claims = state.failing_claims.saturating_sub(1);
+            return Err(StoreError::Invalid("injected claim failure".into()));
+        }
+        let now = Instant::now();
+        let limit = usize::try_from(n.max(0)).unwrap_or(0);
+        // Fresh keys first, then liveness (known-live keys), then oldest
+        // attempt: mirrors CLAIM_SQL's ORDER BY attempts ASC,
+        // seeders_est DESC NULLS LAST, next_attempt_at. The live phase
+        // keeps only `seeders_est > 0` (mirrors CLAIM_LIVE_SQL: `Some(0)`
+        // is measured dead, `None` unscraped).
+        let mut due: Vec<(u32, Option<u32>, Instant, DhtKey)> = state
+            .pending
+            .iter()
+            .filter(|(_, p)| {
+                !p.gave_up
+                    && p.next_attempt <= now
+                    && p.lease_until.is_none_or(|l| l < now)
+                    && (!live_only || p.seeders.is_some_and(|e| e > 0))
+            })
+            .map(|(k, p)| (p.attempts, p.seeders, p.next_attempt, *k))
+            .collect();
+        due.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| match (a.1, b.1) {
+                    (Some(x), Some(y)) => y.cmp(&x),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
+        let mut out = Vec::new();
+        for (_, _, _, key) in due.into_iter().take(limit) {
+            if let Some(p) = state.pending.get_mut(&key) {
+                p.lease_until = Some(now + lease);
+                out.push(PendingItem {
+                    dht_key: key,
+                    attempts: p.attempts,
+                    seen_count: p.seen,
+                    seeders_est: p.seeders,
+                });
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -310,44 +380,11 @@ impl CrawlStore for MemoryStore {
     }
 
     async fn claim(&self, n: i64, lease: Duration) -> Result<Vec<PendingItem>> {
-        let mut state = self.lock();
-        state.claim_calls = state.claim_calls.saturating_add(1);
-        let now = Instant::now();
-        let limit = usize::try_from(n.max(0)).unwrap_or(0);
-        // Fresh keys first, then liveness (known-live keys), then oldest
-        // attempt: mirrors CLAIM_SQL's ORDER BY attempts ASC,
-        // seeders_est DESC NULLS LAST, next_attempt_at.
-        let mut due: Vec<(u32, Option<u32>, Instant, DhtKey)> = state
-            .pending
-            .iter()
-            .filter(|(_, p)| {
-                !p.gave_up && p.next_attempt <= now && p.lease_until.is_none_or(|l| l < now)
-            })
-            .map(|(k, p)| (p.attempts, p.seeders, p.next_attempt, *k))
-            .collect();
-        due.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| match (a.1, b.1) {
-                    (Some(x), Some(y)) => y.cmp(&x),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                })
-                .then_with(|| a.2.cmp(&b.2))
-                .then_with(|| a.3.cmp(&b.3))
-        });
-        let mut out = Vec::new();
-        for (_, _, _, key) in due.into_iter().take(limit) {
-            if let Some(p) = state.pending.get_mut(&key) {
-                p.lease_until = Some(now + lease);
-                out.push(PendingItem {
-                    dht_key: key,
-                    attempts: p.attempts,
-                    seen_count: p.seen,
-                });
-            }
-        }
-        Ok(out)
+        self.claim_with(n, lease, false).await
+    }
+
+    async fn claim_live(&self, n: i64, lease: Duration) -> Result<Vec<PendingItem>> {
+        self.claim_with(n, lease, true).await
     }
 
     async fn renew(&self, key: &DhtKey, lease: Duration) -> Result<bool> {
@@ -946,6 +983,116 @@ mod tests {
         let one = s.claim(1, Duration::from_secs(60)).await.unwrap();
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].dht_key, key(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_carries_the_piggybacked_estimate() {
+        let s = MemoryStore::new();
+        s.observe(&[obs(key(1), false), obs(key(2), false)], 10)
+            .await
+            .unwrap();
+        s.note_fetch_estimate(&key(1), 7).await.unwrap();
+        let claimed = s.claim(10, Duration::from_secs(120)).await.unwrap();
+        assert_eq!(claimed.len(), 2);
+        let est = |k: DhtKey| {
+            claimed.iter().find(|i| i.dht_key == k).unwrap().seeders_est
+        };
+        assert_eq!(est(key(1)), Some(7));
+        assert_eq!(est(key(2)), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_live_takes_only_live_ordered_by_estimate() {
+        let s = MemoryStore::new();
+        s.observe(
+            &[
+                obs(key(1), false),
+                obs(key(2), false),
+                obs(key(3), false),
+                obs(key(4), false),
+            ],
+            10,
+        )
+        .await
+        .unwrap();
+        s.note_fetch_estimate(&key(1), 3).await.unwrap();
+        s.note_fetch_estimate(&key(2), 50).await.unwrap();
+        // Measured dead (aware, no seeds) — never live.
+        s.note_fetch_estimate(&key(3), 0).await.unwrap();
+        // key(4) stays NULL (unscraped).
+        let live = s.claim_live(10, Duration::from_secs(120)).await.unwrap();
+        assert_eq!(live.len(), 2);
+        assert_eq!(live[0].dht_key, key(2));
+        assert_eq!(live[1].dht_key, key(1));
+        assert!(
+            live.iter()
+                .all(|i| i.seeders_est.is_some_and(|e| e > 0))
+        );
+        // Leased by the live phase: the follow-up unfiltered claim cannot
+        // re-lease them, so the pair never double-leases.
+        let rest = s.claim(10, Duration::from_secs(120)).await.unwrap();
+        assert_eq!(rest.len(), 2);
+        assert!(
+            rest.iter()
+                .all(|i| !i.seeders_est.is_some_and(|e| e > 0))
+        );
+        assert_eq!(s.live_claim_calls(), 1);
+        assert_eq!(s.claim_calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_live_empty_pool_leaves_everything_for_the_top_up() {
+        let s = MemoryStore::new();
+        s.observe(&[obs(key(1), false), obs(key(2), false)], 10)
+            .await
+            .unwrap();
+        assert!(
+            s.claim_live(10, Duration::from_secs(120))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let rest = s.claim(10, Duration::from_secs(120)).await.unwrap();
+        assert_eq!(rest.len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_rejects_nonpositive_n_without_a_scan() {
+        let s = MemoryStore::new();
+        s.observe(&[obs(key(1), false)], 10).await.unwrap();
+        assert!(
+            s.claim(0, Duration::from_secs(120))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.claim_live(0, Duration::from_secs(120))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.claim(-5, Duration::from_secs(120))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(s.claim_calls(), 0);
+        assert_eq!(s.live_claim_calls(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_failures_move_no_leases() {
+        let s = MemoryStore::new();
+        s.observe(&[obs(key(1), false)], 10).await.unwrap();
+        s.fail_next_claims(2);
+        assert!(s.claim_live(10, Duration::from_secs(120)).await.is_err());
+        assert!(s.claim(10, Duration::from_secs(120)).await.is_err());
+        // Nothing was leased: the next try claims the key.
+        let claimed = s.claim(10, Duration::from_secs(120)).await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].dht_key, key(1));
     }
 }
 

@@ -26,6 +26,12 @@ pub trait CrawlStore: Clone + Send + Sync + 'static {
         n: i64,
         lease: Duration,
     ) -> impl Future<Output = Result<Vec<PendingItem>>> + Send;
+    /// See [`Store::claim_live`].
+    fn claim_live(
+        &self,
+        n: i64,
+        lease: Duration,
+    ) -> impl Future<Output = Result<Vec<PendingItem>>> + Send;
     /// See [`Store::renew`].
     fn renew(&self, key: &DhtKey, lease: Duration) -> impl Future<Output = Result<bool>> + Send;
     /// See [`Store::complete`].
@@ -149,6 +155,14 @@ impl CrawlStore for Store {
         lease: Duration,
     ) -> impl Future<Output = Result<Vec<PendingItem>>> + Send {
         Store::claim(self, n, lease)
+    }
+
+    fn claim_live(
+        &self,
+        n: i64,
+        lease: Duration,
+    ) -> impl Future<Output = Result<Vec<PendingItem>>> + Send {
+        Store::claim_live(self, n, lease)
     }
 
     fn renew(&self, key: &DhtKey, lease: Duration) -> impl Future<Output = Result<bool>> + Send {

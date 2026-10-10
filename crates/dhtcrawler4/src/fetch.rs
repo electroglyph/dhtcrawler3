@@ -92,6 +92,11 @@ const MIN_RENEW_INTERVAL: Duration = Duration::from_millis(10);
 const METRIC_FETCH: &str = "dc3_fetch_total";
 const METRIC_DESTINATION_SKIPPED: &str = "dc3_destination_skipped_total";
 const METRIC_CLAIM_CHAN_DEPTH: &str = "dc3_claim_chan_depth";
+/// Claimed keys per scan, by liveness (`live=true` for `seeders_est > 0`,
+/// `false` for unscraped NULL and measured-dead 0). The step-2 gate reads
+/// `live` up / `false` down vs the pre-change hour. In-memory only,
+/// permanent, two series.
+const METRIC_CLAIMED: &str = "dc3_claimed_total";
 
 /// The claim channel's receiving end, shared by every fetch worker. The
 /// mutex serialises only the handoff: a worker holds it while waiting for
@@ -112,6 +117,35 @@ pub fn claim_channel() -> (mpsc::Sender<Vec<PendingItem>>, ClaimRx) {
 /// a depth gauge.
 fn claim_chan_depth(tx: &mpsc::Sender<Vec<PendingItem>>) -> usize {
     tx.max_capacity().saturating_sub(tx.capacity())
+}
+
+/// One bulk scan for the single claimer (update.md step 2): leases up to
+/// `n` live keys (`seeders_est > 0`) first, then tops up with the
+/// unfiltered claim so workers never idle. The live leases exclude those
+/// keys from the top-up, so the pair never double-leases; when the live
+/// pool is dry the top-up is the whole bulk (today's behavior exactly).
+/// Counts both halves into [`METRIC_CLAIMED`] by liveness.
+pub async fn claim_bulk<S: CrawlStore>(
+    store: &S,
+    n: i64,
+    lease: Duration,
+) -> Result<Vec<PendingItem>, StoreError> {
+    let mut items = store.claim_live(n, lease).await?;
+    if (items.len() as i64) < n {
+        let rest = n.saturating_sub(items.len() as i64);
+        items.extend(store.claim(rest, lease).await?);
+    }
+    // Liveness is read off the items, so a concurrent piggyback write
+    // between the two phases still counts exactly.
+    let live_now = items.iter().filter(|i| i.seeders_est.is_some_and(|e| e > 0)).count();
+    let unproven = items.len().saturating_sub(live_now);
+    if live_now > 0 {
+        metrics::counter!(METRIC_CLAIMED, "live" => "true").increment(live_now as u64);
+    }
+    if unproven > 0 {
+        metrics::counter!(METRIC_CLAIMED, "live" => "false").increment(unproven as u64);
+    }
+    Ok(items)
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -911,7 +945,7 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                 break;
             }
             metrics::gauge!(METRIC_CLAIM_CHAN_DEPTH).set(claim_chan_depth(&tx) as f64);
-            match self.store.claim(CLAIM_BULK, self.tuning.lease).await {
+            match claim_bulk(&self.store, CLAIM_BULK, self.tuning.lease).await {
                 Ok(items) if items.is_empty() => {
                     backoff = base;
                     let pause = self.idle_pause();
@@ -1446,7 +1480,116 @@ mod tests {
             dht_key: key,
             attempts: 0,
             seen_count: 1,
+            seeders_est: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bulk_puts_live_keys_first_and_tops_up() {
+        let store = MemoryStore::new();
+        let live_lo = DhtKey([21; 20]);
+        let live_hi = DhtKey([22; 20]);
+        let dead = DhtKey([23; 20]);
+        let fresh = DhtKey([24; 20]);
+        for k in [live_lo, live_hi, dead, fresh] {
+            store.enqueue(k);
+        }
+        store.note_fetch_estimate(&live_lo, 5).await.unwrap();
+        store.note_fetch_estimate(&live_hi, 50).await.unwrap();
+        // Measured dead: aware lookup, no seeds — never live.
+        store.note_fetch_estimate(&dead, 0).await.unwrap();
+        // Bulk of 3: both live keys first (higher estimate first), then
+        // one top-up. The dead key flows via the top-up, never jumping
+        // the queue (`NULLS LAST` puts `Some(0)` before `None`).
+        let bulk = claim_bulk(&store, 3, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(bulk.len(), 3);
+        assert_eq!(bulk[0].dht_key, live_hi);
+        assert_eq!(bulk[1].dht_key, live_lo);
+        assert_eq!(bulk[2].dht_key, dead);
+        // No double-lease across the two phases.
+        let mut keys: Vec<DhtKey> = bulk.iter().map(|i| i.dht_key).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), 3);
+        // Two store round trips while the live pool was short.
+        assert_eq!(store.live_claim_calls(), 1);
+        assert_eq!(store.claim_calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bulk_without_live_keys_is_one_unfiltered_bulk() {
+        let store = MemoryStore::new();
+        let a = DhtKey([31; 20]);
+        let b = DhtKey([32; 20]);
+        store.enqueue(a);
+        store.enqueue(b);
+        // No estimates anywhere: the live phase is empty and the top-up
+        // is the whole bulk — today's behavior exactly, workers never idle.
+        let bulk = claim_bulk(&store, 8, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(bulk.len(), 2);
+        assert!(bulk.iter().all(|i| i.seeders_est.is_none()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bulk_full_live_pool_skips_the_top_up() {
+        let store = MemoryStore::new();
+        for n in 0..4u8 {
+            let k = DhtKey([40 + n; 20]);
+            store.enqueue(k);
+            store
+                .note_fetch_estimate(&k, u32::from(n) + 1)
+                .await
+                .unwrap();
+        }
+        let bulk = claim_bulk(&store, 3, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(bulk.len(), 3);
+        assert!(
+            bulk.iter()
+                .all(|i| i.seeders_est.is_some_and(|e| e > 0))
+        );
+        // The live phase covered the bulk: no second round trip.
+        assert_eq!(store.live_claim_calls(), 1);
+        assert_eq!(store.claim_calls(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bulk_propagates_store_errors_without_leasing() {
+        let store = MemoryStore::new();
+        store.enqueue(DhtKey([51; 20]));
+        store.fail_next_claims(1);
+        assert!(
+            claim_bulk(&store, 8, Duration::from_secs(120))
+                .await
+                .is_err()
+        );
+        // The failed live phase leased nothing: the retry claims the key.
+        let bulk = claim_bulk(&store, 8, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(bulk.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bulk_empty_or_nonpositive_is_empty() {
+        let store = MemoryStore::new();
+        assert!(
+            claim_bulk(&store, 8, Duration::from_secs(120))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            claim_bulk(&store, 0, Duration::from_secs(120))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1938,14 +2081,16 @@ mod tests {
         let stop = CancellationToken::new();
         let claimer = tokio::spawn(Arc::clone(&f).run_claimer(tx, stop.clone()));
         // One scan of 48 keys, then parked on the full channel: no second
-        // scan, no spin.
+        // scan, no spin. One scan is two store round trips (live phase +
+        // top-up, the live pool being empty).
         tokio::time::sleep(Duration::from_millis(200)).await;
         stop.cancel();
         tokio::time::timeout(Duration::from_secs(5), claimer)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(store.claim_calls(), 1);
+        assert_eq!(store.live_claim_calls(), 1);
+        assert_eq!(store.claim_calls(), 2);
         drop(rx);
         tokio::time::sleep(Duration::from_secs(3)).await;
         let again = store.claim(48, Duration::from_secs(60)).await.unwrap();
@@ -1975,9 +2120,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
         // A spinning claimer would scan thousands of times; the idle cadence
         // gives a handful (first scan immediate, then one per 20–40 ms).
-        let calls = store.claim_calls();
-        assert!(calls >= 1, "the claimer never scanned");
-        assert!(calls <= 10, "claim storm on an empty queue: {calls} scans");
+        // Scans are counted off the live phase (one per scan); each scan is
+        // two store calls while the live pool is dry (live + top-up).
+        let scans = store.live_claim_calls();
+        assert!(scans >= 1, "the claimer never scanned");
+        assert!(scans <= 10, "claim storm on an empty queue: {scans} scans");
+        assert_eq!(store.claim_calls(), scans * 2);
         assert_eq!(store.torrent_count(), 0);
         assert!(!claimer.is_finished(), "the claimer must park, not exit");
         for w in &workers {

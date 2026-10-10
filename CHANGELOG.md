@@ -2,6 +2,10 @@
 
 Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 
+## 0.3.0
+
+- Claim prefers live keys: the claimer leases `seeders_est > 0` keys first (`Store::claim_live`, same ordering and `pending_claim` index as the claim, no migration) and tops up with the unfiltered claim so workers never idle — live retries jump ahead of the fresh-NULL flood, NULLs still flow when the live pool is dry. Claimed keys carry their estimate (`PendingItem.seeders_est`) and each bulk counts `dc3_claimed_total{live="true"|"false"}` for the 1-hour gate.
+
 ## 0.2.0
 
 - Admission sheds sampler-first: only `Announce` is priority now (`Sample` joins `GetPeers` as non-priority, still admitted at once since the sighting is our own sampler's rather than a stranger's claim needing corroboration), and sampled discoveries shed pre-batch while the last flush saw queue depth at or above `max_pending` — the same outcome as the store's priority-only gate, without the round-trips that `queue_full` drops used to pay. Shed keys skip the dedup set so recovery is instant; the shed volume shows as the new `shed_sampler` reason on `dc3_blocked_total`.

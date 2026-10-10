@@ -176,6 +176,10 @@ pub struct PendingItem {
     /// Failed attempts so far.
     pub attempts: u32,
     pub seen_count: u64,
+    /// Last piggybacked seeder estimate (`None` means unscraped or an
+    /// unaware lookup; `Some(0)` means measured dead). Carried so the
+    /// claimer can prefer live keys without a second round trip.
+    pub seeders_est: Option<u32>,
 }
 
 /// A stored torrent claimed for a BEP 33 scrape (see

@@ -107,7 +107,25 @@ UPDATE pending p
         ORDER BY q.attempts ASC, q.seeders_est DESC NULLS LAST, q.next_attempt_at
         LIMIT $1
           FOR UPDATE SKIP LOCKED)
-RETURNING p.dht_key, p.attempts, p.seen_count";
+RETURNING p.dht_key, p.attempts, p.seen_count, p.seeders_est";
+
+/// Live-first half of the step-2 claim: identical to [`CLAIM_SQL`] plus
+/// `seeders_est > 0` (`Some(0)` is measured dead, NULL is unscraped —
+/// neither is live). Shares the `pending_claim` index as an `Index Cond`
+/// (repro-proven, no migration).
+const CLAIM_LIVE_SQL: &str = "\
+UPDATE pending p
+   SET lease_until = now() + make_interval(secs => $2)
+ WHERE p.dht_key IN (
+       SELECT q.dht_key FROM pending q
+        WHERE NOT q.gave_up
+          AND q.next_attempt_at <= now()
+          AND (q.lease_until IS NULL OR q.lease_until < now())
+          AND q.seeders_est > 0
+        ORDER BY q.attempts ASC, q.seeders_est DESC NULLS LAST, q.next_attempt_at
+        LIMIT $1
+          FOR UPDATE SKIP LOCKED)
+RETURNING p.dht_key, p.attempts, p.seen_count, p.seeders_est";
 
 /// Extends a lease that has not expired; never shortens it.
 const RENEW_SQL: &str = "\
@@ -358,10 +376,23 @@ impl Store {
     /// Leases up to `n` due queue items for `lease`. Items whose lease expires
     /// (a crashed worker) become claimable again.
     pub async fn claim(&self, n: i64, lease: Duration) -> Result<Vec<PendingItem>> {
+        self.claim_with(false, n, lease).await
+    }
+
+    /// Leases up to `n` due queue items with `seeders_est > 0` for `lease`:
+    /// the live-first half of the step-2 claim. Same ordering as
+    /// [`Store::claim`]; keys it leases are excluded from a follow-up
+    /// [`Store::claim`] by their fresh lease, so the pair never double-leases.
+    pub async fn claim_live(&self, n: i64, lease: Duration) -> Result<Vec<PendingItem>> {
+        self.claim_with(true, n, lease).await
+    }
+
+    async fn claim_with(&self, live_only: bool, n: i64, lease: Duration) -> Result<Vec<PendingItem>> {
         if n <= 0 {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query(CLAIM_SQL)
+        let sql = if live_only { CLAIM_LIVE_SQL } else { CLAIM_SQL };
+        let rows = sqlx::query(sql)
             .bind(n.min(MAX_CLAIM))
             .bind(secs(lease))
             .fetch_all(&self.pool)
@@ -370,11 +401,18 @@ impl Store {
         for row in &rows {
             let attempts: i32 = get(row, "attempts")?;
             let seen: i64 = get(row, "seen_count")?;
+            let est: Option<i32> = get(row, "seeders_est")?;
             items.push(PendingItem {
                 dht_key: crate::types::dht_key_col(row, "dht_key")?,
                 attempts: u32::try_from(attempts)
                     .map_err(|_| StoreError::Corrupt(format!("attempts {attempts}")))?,
                 seen_count: crate::to_u64("seen_count", seen)?,
+                seeders_est: est
+                    .map(|e| {
+                        u32::try_from(e)
+                            .map_err(|_| StoreError::Corrupt(format!("negative seeders_est: {e}")))
+                    })
+                    .transpose()?,
             });
         }
         Ok(items)

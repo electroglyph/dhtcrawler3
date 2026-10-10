@@ -1939,6 +1939,52 @@ async fn fetch_queue_prefers_fresh_keys_over_retried(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn claim_live_takes_only_live_and_carries_estimates(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    for n in [83u8, 84, 85, 86] {
+        s.observe(
+            &[Observation {
+                key: key(n),
+                sightings: 1,
+                priority: false,
+            }],
+            NO_LIMIT,
+        )
+        .await
+        .unwrap();
+    }
+    s.note_fetch_estimate(&key(83), 50).await.unwrap();
+    s.note_fetch_estimate(&key(84), 3).await.unwrap();
+    // Measured dead: aware lookup, no seeds — never live.
+    s.note_fetch_estimate(&key(85), 0).await.unwrap();
+    // key(86) stays NULL (unscraped).
+    let est = |items: &[PendingItem], k: DhtKey| {
+        items.iter().find(|i| i.dht_key == k).unwrap().seeders_est
+    };
+    let all = s.claim(4, Duration::from_secs(120)).await.unwrap();
+    assert_eq!(all.len(), 4);
+    assert_eq!(est(&all, key(83)), Some(50));
+    assert_eq!(est(&all, key(84)), Some(3));
+    assert_eq!(est(&all, key(85)), Some(0));
+    assert_eq!(est(&all, key(86)), None);
+    sqlx::query("UPDATE pending SET lease_until = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let live = s.claim_live(10, Duration::from_secs(120)).await.unwrap();
+    assert_eq!(live.len(), 2);
+    assert_eq!(live[0].dht_key, key(83));
+    assert_eq!(live[0].seeders_est, Some(50));
+    assert_eq!(live[1].dht_key, key(84));
+    assert_eq!(live[1].seeders_est, Some(3));
+    // Leased by the live phase: the follow-up unfiltered claim cannot
+    // re-lease them.
+    let rest = s.claim(10, Duration::from_secs(120)).await.unwrap();
+    assert_eq!(rest.len(), 2);
+    assert!(rest.iter().all(|i| i.dht_key != key(83) && i.dht_key != key(84)));
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn removal_cooldowns_and_sightings_batch(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let a = key(91);
