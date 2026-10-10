@@ -616,6 +616,33 @@ mod tests {
     }
 
     #[test]
+    fn a_full_sweep_keeps_buckets_still_in_debt() {
+        // Directly pins the sweep predicate: buckets whose GCRA debt is
+        // not yet repaid survive a full sweep; only refilled ones go. No
+        // debt is forgiven early (a dropped-then-recreated bucket would
+        // hand out a fresh burst).
+        let t0 = Instant::now();
+        let mut st = State {
+            buckets: HashMap::new(),
+            overflow: HashMap::new(),
+            last_sweep: None,
+        };
+        let indebted = (RateClass::Page, Prefix::V4(0xC633_6401));
+        st.buckets.insert(
+            indebted,
+            Bucket {
+                tat: t0 + Duration::from_secs(8),
+                seen: t0,
+            },
+        );
+        let repaid = (RateClass::Page, Prefix::V4(0xC633_6402));
+        st.buckets.insert(repaid, Bucket { tat: t0, seen: t0 });
+        st.sweep_if_due(t0 + Duration::from_secs(2), RATE_LIMIT_IDLE_EXPIRY, true);
+        assert!(st.buckets.contains_key(&indebted));
+        assert!(!st.buckets.contains_key(&repaid));
+    }
+
+    #[test]
     fn ipv6_request_partly_in_overflow_charges_overflow_once() {
         // Room for one entry: the /64 gets it, the wider prefixes overflow.
         let l = RateLimiter::new(1, RATE_LIMIT_IDLE_EXPIRY);
