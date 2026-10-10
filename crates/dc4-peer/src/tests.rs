@@ -268,14 +268,16 @@ fn ext_handshake_parse_and_validate() {
         Err(FetchError::MetadataSizeInvalid(_))
     ));
 
-    // `m` of the wrong type means no support, not a crash.
-    assert_eq!(
-        wire::parse_ext_handshake(b"d1:mi5ee").unwrap(),
-        ExtHandshake {
-            ut_metadata: None,
-            metadata_size: None
-        }
-    );
+    // `m` of the wrong type is malformed, not "no support".
+    assert!(matches!(
+        wire::parse_ext_handshake(b"d1:mi5ee"),
+        Err(FetchError::Protocol(_))
+    ));
+    // So is a wrong-typed `ut_metadata` inside a well-formed `m`.
+    assert!(matches!(
+        wire::parse_ext_handshake(b"d1:md11:ut_metadata1:xe1:ei5ee"),
+        Err(FetchError::Protocol(_))
+    ));
     assert!(matches!(
         wire::parse_ext_handshake(b"i5e"),
         Err(FetchError::Protocol(_))

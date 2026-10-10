@@ -314,7 +314,25 @@ pub(crate) fn parse_ext_handshake(body: &[u8]) -> Result<ExtHandshake, FetchErro
             "trailing bytes in extended handshake".into(),
         ));
     }
-    let ut_metadata = dict.get_dict(b"m").and_then(|m| m.get_int(b"ut_metadata"));
+    let ut_metadata = match dict.get(b"m") {
+        None => None,
+        Some(Value::Dict(m)) => match m.get(b"ut_metadata") {
+            None => None,
+            Some(Value::Int(id)) => Some(*id),
+            // Present but wrong-typed: malformed, not "no support".
+            Some(_) => {
+                return Err(FetchError::Protocol(
+                    "`ut_metadata` in extended handshake is not an integer".into(),
+                ));
+            }
+        },
+        // Present but not a dictionary: malformed, not "no support".
+        Some(_) => {
+            return Err(FetchError::Protocol(
+                "`m` in extended handshake is not a dictionary".into(),
+            ));
+        }
+    };
     Ok(ExtHandshake {
         ut_metadata,
         metadata_size: dict.get_int(b"metadata_size"),
