@@ -197,7 +197,10 @@ impl<'v> Collector<'v> {
         }
     }
 
-    /// From now on, checks and shows entries without recording them.
+    /// From now on, checks and shows entries without recording them. The
+    /// per-listing [`MAX_FILES_PARSED`](crate::MAX_FILES_PARSED) count
+    /// restarts: the v2 tree and the v1 list are capped independently (see
+    /// the constant docs).
     fn shadow(&mut self) {
         self.record = false;
         self.parsed = 0;

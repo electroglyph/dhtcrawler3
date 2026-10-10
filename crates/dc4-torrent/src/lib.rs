@@ -29,7 +29,11 @@ pub use parse::{parse_info, parse_info_visit};
 pub const NAME_MAX_CHARS: usize = 1024;
 /// Maximum characters of a file path (components joined with `/`) after sanitising.
 pub const PATH_MAX_CHARS: usize = 4096;
-/// Maximum file entries (including padding files) parsed from one info dictionary.
+/// Maximum file entries (including padding files) parsed from one file
+/// listing: the v2 `file tree` and the v1 `files` list each get this many.
+/// A hybrid walks both, so one info dictionary can parse up to twice this
+/// many entries in total (still bounded, and the bencode item limit is
+/// normally reached first); only the v2 walk records entries.
 pub const MAX_FILES_PARSED: usize = 200_000;
 /// Maximum file entries kept in [`TorrentMeta::files`].
 pub const MAX_FILES_STORED: usize = 2_000;
