@@ -669,8 +669,12 @@ cd ~/dhtcrawler4/deploy
   docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'pool timed out while waiting' || true
   echo -n 'claim failures: '
   docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'claiming queue items failed' || true
-  echo '### crawl metrics ###'
-  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_(fetch_total|claimed_total|queue_depth|db_pool_size|db_pool_idle|claim_chan_depth|discovered_total|admitted_total|blocked_total|scrape_total|scrape_zero_seeder_share|scrape_unaware_share|destination_skipped_total|purge_gave_up_total)|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total|sampler_early_total|sampler_visited_full_total|responder_dropped_total|discovered_dropped_total|peer_store_keys)" <&3'
+  echo '### crawl metrics (all dc3_ series, present and future) ###'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_" <&3'
+  echo '### index metrics ###'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/index/9100 && printf "GET /metrics HTTP/1.0\r\nHost: index\r\n\r\n" >&3 && grep -E "^dc3_" <&3'
+  echo '### web metrics ###'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/web/9100 && printf "GET /metrics HTTP/1.0\r\nHost: web\r\n\r\n" >&3 && grep -E "^dc3_" <&3'
 } 2>&1 | tee /tmp/dc3-diag.txt
 ```
 
@@ -766,6 +770,14 @@ How to read the output:
   after a restart means the sweep is not firing, not that there is
   nothing to purge. After the purge catches up, depth drops below the
   cap and the `queue_full` drops stop.
+- **Scrape/index/web roles alive?** `dc3_scrape_tombstones_total` and
+  `dc3_purge_tombstoned_total` climbing means dead torrents get tombstoned
+  and reaped; `dc3_scrape_due_depth` stuck high means the scrape queue
+  never catches up. `dc3_index_lag` near zero with `dc3_index_docs`
+  tracking the torrent count means the indexer keeps up. On web,
+  `dc3_http_requests_total` climbing with `dc3_search_cache_hits_total`
+  well above misses means serving is healthy; `dc3_rate_limited_total`
+  climbing alone means clients hit the rate limit, not an outage.
 - **Disk filling up?** `docker system df` first: gigabytes of reclaimable
   build cache is normal after repeated `--build` updates — `docker
   builder prune -f` drops it. Of the volumes, `pgdata` is always the
