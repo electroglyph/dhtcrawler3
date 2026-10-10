@@ -11,8 +11,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use dc4_core::DhtKey;
 use dc4_store::{
-    MAX_FETCH_ATTEMPTS, NewTorrent, Observation, ObserveOutcome, PendingItem,
-    REMOVAL_STRONG_EVIDENCE_SIGHTINGS, RemovalCooldown, Result, ScrapeItem, StoreError,
+    MAX_COMPLETE_BATCH, MAX_FETCH_ATTEMPTS, MAX_OBSERVE_BATCH, NewTorrent, Observation,
+    ObserveOutcome, PendingItem, REMOVAL_STRONG_EVIDENCE_SIGHTINGS, RemovalCooldown, Result,
+    ScrapeItem, StoreError,
 };
 use tokio::time::Instant;
 
@@ -263,7 +264,12 @@ impl MemoryStore {
         self.lock().pending.get(key).and_then(|p| p.seeders)
     }
 
-    async fn claim_with(&self, n: i64, lease: Duration, live_only: bool) -> Result<Vec<PendingItem>> {
+    async fn claim_with(
+        &self,
+        n: i64,
+        lease: Duration,
+        live_only: bool,
+    ) -> Result<Vec<PendingItem>> {
         if n <= 0 {
             return Ok(Vec::new());
         }
@@ -334,6 +340,12 @@ impl CrawlStore for MemoryStore {
             let entry = merged.entry(o.key).or_insert((0, false));
             entry.0 = entry.0.saturating_add(u64::from(o.sightings));
             entry.1 |= o.priority;
+        }
+        if merged.len() > MAX_OBSERVE_BATCH {
+            return Err(StoreError::Invalid(format!(
+                "observe batch of {} exceeds the limit of {MAX_OBSERVE_BATCH}",
+                merged.len()
+            )));
         }
         // Production counts every row, corpses included
         // (`Store::pending_depth`); the stand-in must gate on the same
@@ -771,6 +783,12 @@ impl CrawlStore for MemoryStore {
     }
 
     async fn complete_batch(&self, items: &[(DhtKey, NewTorrent)]) -> Result<Vec<i64>> {
+        if items.len() > MAX_COMPLETE_BATCH {
+            return Err(StoreError::Invalid(format!(
+                "complete batch of {} exceeds the limit of {MAX_COMPLETE_BATCH}",
+                items.len()
+            )));
+        }
         {
             let mut state = self.lock();
             if state.failing_batches > 0 {
@@ -847,6 +865,33 @@ mod tests {
             sightings: 1,
             priority,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversized_batches_fail_loudly() {
+        let s = MemoryStore::new();
+        let big_key = |i: usize| {
+            let mut b = [0u8; 20];
+            b[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            DhtKey(b)
+        };
+        let big: Vec<(DhtKey, NewTorrent)> = (0..MAX_COMPLETE_BATCH + 1)
+            .map(|i| {
+                let k = big_key(i);
+                (k, torrent(k))
+            })
+            .collect();
+        assert!(matches!(
+            s.complete_batch(&big).await,
+            Err(StoreError::Invalid(_))
+        ));
+        let many: Vec<Observation> = (0..MAX_OBSERVE_BATCH + 1)
+            .map(|i| obs(big_key(i), false))
+            .collect();
+        assert!(matches!(
+            s.observe(&many, i64::MAX).await,
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     #[tokio::test(start_paused = true)]
@@ -994,9 +1039,7 @@ mod tests {
         s.note_fetch_estimate(&key(1), 7).await.unwrap();
         let claimed = s.claim(10, Duration::from_secs(120)).await.unwrap();
         assert_eq!(claimed.len(), 2);
-        let est = |k: DhtKey| {
-            claimed.iter().find(|i| i.dht_key == k).unwrap().seeders_est
-        };
+        let est = |k: DhtKey| claimed.iter().find(|i| i.dht_key == k).unwrap().seeders_est;
         assert_eq!(est(key(1)), Some(7));
         assert_eq!(est(key(2)), None);
     }
@@ -1024,18 +1067,12 @@ mod tests {
         assert_eq!(live.len(), 2);
         assert_eq!(live[0].dht_key, key(2));
         assert_eq!(live[1].dht_key, key(1));
-        assert!(
-            live.iter()
-                .all(|i| i.seeders_est.is_some_and(|e| e > 0))
-        );
+        assert!(live.iter().all(|i| i.seeders_est.is_some_and(|e| e > 0)));
         // Leased by the live phase: the follow-up unfiltered claim cannot
         // re-lease them, so the pair never double-leases.
         let rest = s.claim(10, Duration::from_secs(120)).await.unwrap();
         assert_eq!(rest.len(), 2);
-        assert!(
-            rest.iter()
-                .all(|i| !i.seeders_est.is_some_and(|e| e > 0))
-        );
+        assert!(rest.iter().all(|i| !i.seeders_est.is_some_and(|e| e > 0)));
         assert_eq!(s.live_claim_calls(), 1);
         assert_eq!(s.claim_calls(), 2);
     }

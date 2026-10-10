@@ -1768,6 +1768,40 @@ async fn purge_tombstoned_holds_the_change_feed_lock(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn oversized_batches_fail_loudly(pool: PgPool) {
+    let s = Store::from_pool(pool);
+    // Past the caps the calls fail before touching the database, instead
+    // of holding the change-feed lock for an unbounded transaction.
+    let big: Vec<(DhtKey, NewTorrent)> = (0..MAX_COMPLETE_BATCH + 1)
+        .map(|i| {
+            let mut b = [0u8; 20];
+            b[..4].copy_from_slice(&(i as u32).to_be_bytes());
+            let k = DhtKey(b);
+            (k, torrent(k, "too many"))
+        })
+        .collect();
+    assert!(matches!(
+        s.complete_batch(&big).await,
+        Err(StoreError::Invalid(_))
+    ));
+    let many: Vec<Observation> = (0..MAX_OBSERVE_BATCH + 1)
+        .map(|i| {
+            let mut b = [0u8; 20];
+            b[..4].copy_from_slice(&(i as u32).to_be_bytes());
+            Observation {
+                key: DhtKey(b),
+                sightings: 1,
+                priority: false,
+            }
+        })
+        .collect();
+    assert!(matches!(
+        s.observe(&many, NO_LIMIT).await,
+        Err(StoreError::Invalid(_))
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn concurrent_observes_do_not_lose_seen_counts(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let k = key(45);

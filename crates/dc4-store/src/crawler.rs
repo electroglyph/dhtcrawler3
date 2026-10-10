@@ -14,9 +14,10 @@ use crate::types::{
 };
 use crate::{
     CountedTable, DailyCounter, EXACT_COUNT_THRESHOLD, FAIL_BASE_BACKOFF, FAIL_MAX_BACKOFF,
-    MAX_CLAIM, MAX_FETCH_ATTEMPTS, MAX_NAME_CHARS, MAX_PATH_CHARS, MAX_STORED_FILES, OBSERVE_CHUNK,
-    Result, Store, StoreError, bump_daily, check_key_len, check_len, count_u64, estimated_rows,
-    get, lock_change_shared, lock_keys, prefix, secs, to_i64,
+    MAX_CLAIM, MAX_COMPLETE_BATCH, MAX_FETCH_ATTEMPTS, MAX_NAME_CHARS, MAX_OBSERVE_BATCH,
+    MAX_PATH_CHARS, MAX_STORED_FILES, OBSERVE_CHUNK, Result, Store, StoreError, bump_daily,
+    check_key_len, check_len, count_u64, estimated_rows, get, lock_change_shared, lock_keys,
+    prefix, secs, to_i64,
 };
 
 /// Bumps `seen_count` of live torrents stored under the given DHT keys.
@@ -338,6 +339,12 @@ impl Store {
         let mut out = ObserveOutcome::default();
         if merged.is_empty() {
             return Ok(out);
+        }
+        if merged.len() > MAX_OBSERVE_BATCH {
+            return Err(StoreError::Invalid(format!(
+                "observe batch of {} exceeds the limit of {MAX_OBSERVE_BATCH}",
+                merged.len()
+            )));
         }
         // Read before the transaction starts, so the change lock is never held
         // while the queue is counted.
@@ -710,6 +717,12 @@ impl Store {
         }
         if items.is_empty() {
             return Ok(Vec::new());
+        }
+        if items.len() > MAX_COMPLETE_BATCH {
+            return Err(StoreError::Invalid(format!(
+                "complete batch of {} exceeds the limit of {MAX_COMPLETE_BATCH}",
+                items.len()
+            )));
         }
         let mut prepared = Vec::with_capacity(items.len());
         for (key, t) in items {

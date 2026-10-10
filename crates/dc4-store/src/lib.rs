@@ -113,6 +113,16 @@ pub const GET_BY_KEY_MAX_PATH_BYTES: i64 = 256 * 1024;
 pub const MAX_DAILY_STATS_DAYS: u32 = 366;
 /// Keys per statement inside one [`Store::observe`] transaction.
 pub const OBSERVE_CHUNK: usize = 5_000;
+/// Largest batch one [`Store::observe`] call processes. Past this the call
+/// fails loudly instead of holding the change-feed lock (and the indexer's
+/// high-water mark with it) for an unbounded transaction; production
+/// batches are per-interval flushes, far smaller.
+pub const MAX_OBSERVE_BATCH: usize = 100_000;
+/// Largest batch one [`Store::complete_batch`] call stores. Past this the
+/// call fails loudly instead of holding the change-feed lock plus every
+/// key lock for an unbounded transaction; production batches hold a
+/// handful of keys (the fetch path falls back to one key at a time).
+pub const MAX_COMPLETE_BATCH: usize = 1_024;
 
 /// Base retry delay after a failed fetch; doubled per earlier attempt.
 pub const FAIL_BASE_BACKOFF: Duration = Duration::from_secs(5 * 60);
