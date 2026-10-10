@@ -225,6 +225,19 @@ impl MemoryStore {
         self.lock().fails.get(key).copied().unwrap_or(0)
     }
 
+    /// Live queue rows with their attempt counts, for tests asserting
+    /// queue invariants (no live row may sit at or past the give-up
+    /// count: every fail path flips `gave_up` on the final attempt).
+    /// Read-only: unlike `claim`, it sets no leases.
+    pub fn live_attempts(&self) -> Vec<(DhtKey, u32)> {
+        self.lock()
+            .pending
+            .iter()
+            .filter(|(_, p)| !p.gave_up)
+            .map(|(k, p)| (*k, p.attempts))
+            .collect()
+    }
+
     /// The piggybacked seeder estimate queued for `key`, if any.
     pub fn pending_seeders(&self, key: &DhtKey) -> Option<u32> {
         self.lock().pending.get(key).and_then(|p| p.seeders)

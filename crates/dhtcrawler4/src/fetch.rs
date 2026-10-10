@@ -2111,4 +2111,289 @@ mod tests {
         assert_eq!(f.process(&item(k)).await, FetchOutcome::NoPeers);
         assert_eq!(store.pending_seeders(&k), Some(1));
     }
+
+    /// Deterministic xorshift: random peers without a new dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0 | 1;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// The DHT as the server sees it: every key draws fresh random peers
+    /// every round — correct seeders, wrong-data seeders, a private
+    /// torrent, dead ports, empty lookups — routed per key.
+    #[derive(Clone)]
+    struct ChaosPeers {
+        table: Arc<std::sync::Mutex<BTreeMap<DhtKey, Vec<SocketAddr>>>>,
+    }
+
+    impl ChaosPeers {
+        fn set(&self, key: DhtKey, peers: Vec<SocketAddr>) {
+            self.table.lock().unwrap().insert(key, peers);
+        }
+    }
+
+    impl PeerSource for ChaosPeers {
+        async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+        async fn scrape_peers(&self, key: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
+            let peers = self
+                .table
+                .lock()
+                .unwrap()
+                .get(&key)
+                .cloned()
+                .unwrap_or_default();
+            dc3_dht::ScrapeReport {
+                peers,
+                ..dc3_dht::ScrapeReport::default()
+            }
+        }
+        fn own_ips(&self) -> Vec<IpAddr> {
+            vec![ip("127.0.0.1")]
+        }
+        fn own_endpoints(&self) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+    }
+
+    /// A dialable-nothing address: refused instantly, like a dead peer.
+    async fn dead_addr() -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a = l.local_addr().unwrap();
+        drop(l);
+        a
+    }
+
+    fn chaos_key(seed: u64, i: usize) -> DhtKey {
+        let mut b = [0xABu8; 20];
+        b[0..8].copy_from_slice(&seed.to_le_bytes());
+        b[8..16].copy_from_slice(&(i as u64).to_le_bytes());
+        DhtKey(b)
+    }
+
+    /// One drain of everything due, over 4 concurrent claim→process
+    /// workers (the claimer/worker split, minus the channel): three run
+    /// the batch path, one the single-key path. Returns every key
+    /// claimed this drain, so the caller can check none was terminal.
+    async fn drain(store: &MemoryStore, f: &Arc<Fetcher<MemoryStore, ChaosPeers>>) -> Vec<DhtKey> {
+        let claimed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut js = tokio::task::JoinSet::new();
+        for w in 0..4 {
+            let (store, f, claimed) = (store.clone(), Arc::clone(f), Arc::clone(&claimed));
+            js.spawn(async move {
+                loop {
+                    let items = store
+                        .claim(CLAIM_BATCH, Duration::from_secs(120))
+                        .await
+                        .unwrap();
+                    if items.is_empty() {
+                        break;
+                    }
+                    claimed
+                        .lock()
+                        .unwrap()
+                        .extend(items.iter().map(|i| i.dht_key));
+                    if w == 3 {
+                        for it in &items {
+                            f.process(it).await;
+                        }
+                    } else {
+                        f.process_batch(&items).await;
+                    }
+                }
+            });
+        }
+        while js.join_next().await.is_some() {}
+        Arc::try_unwrap(claimed).unwrap().into_inner().unwrap()
+    }
+
+    /// Mimics the server against the real pipeline: random DHT behavior
+    /// redrawn every round, concurrent workers, transient store faults
+    /// forcing the one-key-at-a-time fallbacks. After every round it
+    /// asserts the two invariants the server diag put in doubt: no live
+    /// row at or past the give-up count, and no terminal key re-claimed.
+    /// A failure here names the mechanism behind live attempts-2..5
+    /// rows; staying green says the pipeline cannot mint them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn chaos_pipeline_preserves_queue_invariants() {
+        for seed in [11u64, 0x9e3779b97f4a7c15, 0xd1ab011c] {
+            chaos_once(seed).await;
+        }
+    }
+
+    async fn chaos_once(seed: u64) {
+        const GOOD: usize = 5;
+        const CHAOS: usize = 34;
+        const ROUNDS: usize = 5;
+        // Short backoff so retries come due between rounds; the 1.5 s
+        // sleeps below hold 3x margin.
+        let store = MemoryStore::with_fail_backoff(Duration::from_millis(500));
+        let peers = ChaosPeers {
+            table: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        };
+        let f = fetcher_with(&store, peers.clone(), test_tuning());
+
+        // Fixed identities: good keys own a correct seeder each, one key
+        // owns a private torrent; the rest draw chaos every round.
+        let mut keys = Vec::new();
+        let mut good_addrs = Vec::new();
+        for i in 0..GOOD {
+            let info = info_dict(&format!("chaos good {seed}-{i}"), &["f.bin"], false);
+            good_addrs.push((key_of(&info), seeder(&info).await));
+            keys.push(key_of(&info));
+        }
+        let private_info = info_dict("chaos private", &["p.bin"], true);
+        let private_key = key_of(&private_info);
+        let private_addr = seeder(&private_info).await;
+        keys.push(private_key);
+        let wrong_info = info_dict("chaos wrong", &["w.bin"], false);
+        let wrong_addr = seeder(&wrong_info).await;
+        for i in 0..CHAOS {
+            keys.push(chaos_key(seed, i));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            for k in &keys {
+                assert!(seen.insert(*k), "duplicate test key");
+            }
+        }
+        for k in &keys {
+            store.enqueue(*k);
+        }
+
+        let max_live = u32::try_from(dc3_store::MAX_FETCH_ATTEMPTS).unwrap_or(u32::MAX) - 1;
+        let mut rng = Lcg(seed);
+        let mut completed = std::collections::HashSet::new();
+        let mut gave_up = std::collections::HashSet::new();
+        // Non-vacuity: the draws must actually produce retries, stores
+        // and give-ups, or the invariant asserts prove nothing.
+        let mut saw_retry = false;
+
+        for round in 0..ROUNDS {
+            // Redraw the DHT: sticky outcomes for the fixed identities,
+            // fresh chaos for the rest.
+            let mut dead = Vec::new();
+            for _ in 0..CHAOS {
+                dead.push(dead_addr().await);
+            }
+            let mut di = 0;
+            for k in &keys {
+                if let Some((_, a)) = good_addrs.iter().find(|(g, _)| g == k) {
+                    peers.set(*k, vec![*a]);
+                } else if *k == private_key {
+                    peers.set(*k, vec![private_addr]);
+                } else {
+                    let roll = rng.below(100);
+                    peers.set(
+                        *k,
+                        match roll {
+                            0..30 => Vec::new(),
+                            30..60 => vec![dead[di % dead.len()]],
+                            60..75 => vec![wrong_addr],
+                            75..85 => vec![dead[di % dead.len()], wrong_addr],
+                            85..95 => vec![private_addr],
+                            _ => Vec::new(),
+                        },
+                    );
+                    di += 1;
+                }
+            }
+            // Transient store faults force the batch fallbacks (same
+            // semantics, one key at a time) on some rounds.
+            if round >= 1 && rng.below(2) == 0 {
+                store.fail_next_batches(1 + rng.below(2) as usize);
+            }
+
+            let claimed = drain(&store, &f).await;
+            for k in &claimed {
+                assert!(
+                    !completed.contains(k) && !gave_up.contains(k),
+                    "seed {seed} round {round}: terminal key re-claimed: {k:?}"
+                );
+            }
+            // THE server anomaly, checked every round: the fail paths
+            // flip `gave_up` on the final attempt, so a live row must
+            // never reach the give-up count.
+            for (k, a) in store.live_attempts() {
+                assert!(
+                    a <= max_live,
+                    "seed {seed} round {round}: live {k:?} at attempts {a}"
+                );
+                saw_retry |= a == max_live;
+            }
+            for k in &keys {
+                if completed.contains(k) || gave_up.contains(k) {
+                    continue;
+                }
+                if store.live_attempts().iter().any(|(l, _)| l == k) {
+                    continue;
+                }
+                if store.torrent(k).is_some() {
+                    completed.insert(*k);
+                } else {
+                    gave_up.insert(*k);
+                }
+            }
+            // Round 0 settles the fixed identities: good keys stored,
+            // the private key gave up at once.
+            if round == 0 {
+                for (g, _) in &good_addrs {
+                    assert!(
+                        completed.contains(g),
+                        "seed {seed}: good key not stored: {g:?}"
+                    );
+                }
+                assert!(
+                    gave_up.contains(&private_key),
+                    "seed {seed}: private key live"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+
+        // One last drain with faults off: everything must be terminal,
+        // nothing live, nothing stuck.
+        let claimed = drain(&store, &f).await;
+        for k in &claimed {
+            assert!(
+                !completed.contains(k) && !gave_up.contains(k),
+                "seed {seed} final: terminal key re-claimed: {k:?}"
+            );
+        }
+        assert!(
+            store.live_attempts().is_empty(),
+            "seed {seed} final: stuck live rows: {:?}",
+            store.live_attempts()
+        );
+        for k in &keys {
+            if completed.contains(k) || gave_up.contains(k) {
+                continue;
+            }
+            if store.torrent(k).is_some() {
+                completed.insert(*k);
+            } else {
+                gave_up.insert(*k);
+            }
+        }
+        assert_eq!(completed.len() + gave_up.len(), keys.len());
+        assert!(
+            saw_retry,
+            "seed {seed}: never observed a live retry — chaos draws are vacuous"
+        );
+        assert!(
+            !completed.is_empty() && !gave_up.is_empty(),
+            "seed {seed}: one terminal path never fired"
+        );
+    }
 }
