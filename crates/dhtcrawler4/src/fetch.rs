@@ -9,15 +9,19 @@
 //!    while the batch is worked — a full batch can outlive the lease);
 //! 2. collects peers from the hint map and `get_peers` (6 s), each passing
 //!    the address chokepoint and the per-destination limits;
-//! 3. tries up to 8 peers, 3 at a time, inside the global connection limit
-//!    and the metadata byte budget, all within 45 s;
+//! 3. tries up to 8 peers (3 for unscraped or measured-dead keys), 3 at a
+//!    time, inside the global connection limit and the metadata byte
+//!    budget, all within 45 s — high-estimate keys get one second lookup
+//!    when the first drains before giving up;
 //! 4. verifies and parses the metadata;
 //! 5. records successes in one transaction and failures and give-ups in one
 //!    each (`complete_batch`, `fail_batch`, `give_up_batch`), falling back
 //!    to one key at a time when a batch is rejected.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -64,6 +68,16 @@ pub const KEY_DEADLINE: Duration = Duration::from_secs(45);
 pub const MAX_PEER_ATTEMPTS: usize = 8;
 /// Peers tried at the same time per key.
 pub const PARALLEL_ATTEMPTS: usize = 3;
+/// Peers tried per key with no live evidence: unscraped (`None`) or
+/// measured-dead (`Some(0)`) estimates (update.md step 4). Must stay below
+/// [`MAX_PEER_ATTEMPTS`]; the saving lands on keys with peers, since
+/// peerless keys start no dials either way.
+pub const LOW_EFFORT_MAX_ATTEMPTS: usize = 3;
+/// Smallest estimate that earns the second lookup. A starting value, not
+/// derived — no estimate-split outcome data exists yet; move it on the gate.
+pub const HIGH_EST_MIN: u32 = 5;
+/// Lookups per key with `seeders_est >= HIGH_EST_MIN`.
+pub const HIGH_EST_MAX_LOOKUPS: u8 = 2;
 /// TCP connect timeout per peer.
 pub const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Handshake timeout per peer.
@@ -97,6 +111,55 @@ const METRIC_CLAIM_CHAN_DEPTH: &str = "dc3_claim_chan_depth";
 /// `live` up / `false` down vs the pre-change hour. In-memory only,
 /// permanent, two series.
 const METRIC_CLAIMED: &str = "dc3_claimed_total";
+/// Started peer dials, by claim-time estimate bucket (`null`/`dead`/`low`/
+/// `high`, see [`est_bucket`]). Read against [`METRIC_FETCH`] with the same
+/// label as ok per 10k dials per bucket — the step-4 gate. In-memory only,
+/// permanent, four series.
+const METRIC_DIALS: &str = "dc3_fetch_dials_total";
+
+/// Per-key fetch effort derived from the claim-time estimate (update.md
+/// step 4): junk gets a small dial budget and one lookup, proven swarms
+/// get today's budget plus one second lookup when the first drains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyEffort {
+    /// Peers tried at most (hints and lookup peers share this budget).
+    pub max_attempts: usize,
+    /// Lookups issued at most.
+    pub max_lookups: u8,
+}
+
+/// Effort for one key from its claim-time `seeders_est`: `None` (unscraped)
+/// and `Some(0)` (measured dead, never live) get the floor, `1..HIGH_EST_MIN`
+/// gets today's effort, `>= HIGH_EST_MIN` gets today's effort plus a second
+/// lookup on drain.
+pub fn effort_for(est: Option<u32>) -> KeyEffort {
+    match est {
+        None | Some(0) => KeyEffort {
+            max_attempts: LOW_EFFORT_MAX_ATTEMPTS,
+            max_lookups: 1,
+        },
+        Some(e) if e < HIGH_EST_MIN => KeyEffort {
+            max_attempts: MAX_PEER_ATTEMPTS,
+            max_lookups: 1,
+        },
+        Some(_) => KeyEffort {
+            max_attempts: MAX_PEER_ATTEMPTS,
+            max_lookups: HIGH_EST_MAX_LOOKUPS,
+        },
+    }
+}
+
+/// Metric bucket for one key's claim-time estimate. The mid-fetch piggyback
+/// writes the DB row, never the in-hand item, so claim-time keeps dials and
+/// outcomes joinable.
+pub fn est_bucket(est: Option<u32>) -> &'static str {
+    match est {
+        None => "null",
+        Some(0) => "dead",
+        Some(e) if e < HIGH_EST_MIN => "low",
+        Some(_) => "high",
+    }
+}
 
 /// The claim channel's receiving end, shared by every fetch worker. The
 /// mutex serialises only the handoff: a worker holds it while waiting for
@@ -315,7 +378,7 @@ impl DestDenied {
 /// `progress` counts completed work (finished attempts, finished lookups);
 /// requeueing only when it advanced guarantees a permanently-refused peer
 /// waits for real time to pass instead of spinning, and terminates because
-/// progress steps are bounded by the attempt budget plus one lookup.
+/// progress steps are bounded by the attempt budget plus two lookups.
 #[derive(Debug, Default)]
 struct Deferred {
     peers: Vec<SocketAddr>,
@@ -720,9 +783,10 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                 self.tuning.renew_every,
             )
         });
-        let obtained = tokio::time::timeout(self.tuning.key_deadline, self.obtain(key))
-            .await
-            .unwrap_or(Obtained::Failed);
+        let obtained =
+            tokio::time::timeout(self.tuning.key_deadline, self.obtain(key, item.seeders_est))
+                .await
+                .unwrap_or(Obtained::Failed);
         drop(renewal);
         match obtained {
             Obtained::NoPeers => Staged::Missing,
@@ -758,8 +822,15 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
     }
 
     /// The outcome counter and debug log, identical for every store path.
+    /// Both counters carry the claim-time estimate bucket (see
+    /// [`est_bucket`]), so ok per dial is readable per bucket.
     fn emit(&self, item: &PendingItem, outcome: FetchOutcome) {
-        metrics::counter!(METRIC_FETCH, "outcome" => outcome.as_str()).increment(1);
+        metrics::counter!(
+            METRIC_FETCH,
+            "outcome" => outcome.as_str(),
+            "est" => est_bucket(item.seeders_est)
+        )
+        .increment(1);
         tracing::debug!(
             outcome = outcome.as_str(),
             earlier_attempts = item.attempts,
@@ -773,7 +844,10 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         self.store_one(item, staged).await
     }
 
-    async fn obtain(&self, key: DhtKey) -> Obtained {
+    async fn obtain(&self, key: DhtKey, est: Option<u32>) -> Obtained {
+        let effort = effort_for(est);
+        let bucket = est_bucket(est);
+        let max_attempts = effort.max_attempts;
         let mut own = OwnAddrs::of(&self.peers);
         let mut queue: VecDeque<SocketAddr> = VecDeque::new();
         let mut seen: HashSet<SocketAddr> = HashSet::new();
@@ -784,9 +858,14 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                 queue.push_back(peer);
             }
         }
-        let lookup = self.peers.scrape_peers(key, self.tuning.get_peers_timeout);
-        tokio::pin!(lookup);
-        let mut lookup_done = false;
+        // Boxed so a high-estimate key can run a second lookup after the
+        // first drains (update.md step 4); `scrape_peers` takes `&self`, so
+        // every call is a fresh future. The caller's key deadline bounds the
+        // pair — no new timeout knob.
+        let mut lookup: Option<Pin<Box<dyn Future<Output = dc3_dht::ScrapeReport> + Send>>> = Some(
+            Box::pin(self.peers.scrape_peers(key, self.tuning.get_peers_timeout)),
+        );
+        let mut lookups_done: u8 = 0;
         let mut attempts = 0usize;
         let mut running = FuturesUnordered::new();
         let mut deferred = Deferred::default();
@@ -795,13 +874,12 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
             if queue.is_empty() {
                 deferred.requeue(&mut queue, progress);
             }
-            while running.len() < self.tuning.parallel_attempts
-                && attempts < self.tuning.max_attempts
-            {
+            while running.len() < self.tuning.parallel_attempts && attempts < max_attempts {
                 let Some(peer) = queue.pop_front() else { break };
                 match self.limiter.try_acquire(peer, Instant::now()) {
                     Ok(permit) => {
                         attempts = attempts.saturating_add(1);
+                        metrics::counter!(METRIC_DIALS, "est" => bucket).increment(1);
                         running.push(self.attempt(peer, key, permit));
                     }
                     Err(denied) => {
@@ -813,12 +891,34 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
                     }
                 }
             }
-            if running.is_empty() && (lookup_done || attempts >= self.tuning.max_attempts) {
+            // A proven swarm earns one more lookup when stalled drained:
+            // nothing running, nothing queued, dial budget left. This also
+            // un-sticks limiter-deferred peers: the completing lookup counts
+            // as progress, so they requeue on the next pass. Capped at
+            // `max_lookups`, so the loop still terminates.
+            if lookup.is_none()
+                && lookups_done < effort.max_lookups
+                && running.is_empty()
+                && queue.is_empty()
+                && attempts < max_attempts
+            {
+                lookup = Some(Box::pin(
+                    self.peers.scrape_peers(key, self.tuning.get_peers_timeout),
+                ));
+            }
+            if running.is_empty() && (lookup.is_none() || attempts >= max_attempts) {
                 break;
             }
             tokio::select! {
-                report = &mut lookup, if !lookup_done => {
-                    lookup_done = true;
+                report = async {
+                    if let Some(lookup) = lookup.as_mut() {
+                        lookup.await
+                    } else {
+                        std::future::pending().await
+                    }
+                }, if lookup.is_some() => {
+                    lookups_done = lookups_done.saturating_add(1);
+                    lookup = None;
                     progress = progress.saturating_add(1);
                     own = OwnAddrs::of(&self.peers);
                     // §8 piggyback: the traversal was already paid for, so
@@ -1484,6 +1584,13 @@ mod tests {
         }
     }
 
+    fn item_with(key: DhtKey, est: Option<u32>) -> PendingItem {
+        PendingItem {
+            seeders_est: est,
+            ..item(key)
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn claim_bulk_puts_live_keys_first_and_tops_up() {
         let store = MemoryStore::new();
@@ -1776,6 +1883,266 @@ mod tests {
             store.calls.lock().unwrap().clone(),
             vec![("claim_live", 8), ("claim", 7)]
         );
+    }
+
+    #[test]
+    fn effort_buckets_match_the_plan() {
+        assert_eq!(LOW_EFFORT_MAX_ATTEMPTS, 3);
+        assert_eq!(HIGH_EST_MIN, 5);
+        assert_eq!(HIGH_EST_MAX_LOOKUPS, 2);
+        assert!(LOW_EFFORT_MAX_ATTEMPTS < MAX_PEER_ATTEMPTS);
+        assert_eq!(
+            effort_for(None),
+            KeyEffort {
+                max_attempts: 3,
+                max_lookups: 1
+            }
+        );
+        assert_eq!(
+            effort_for(Some(0)),
+            KeyEffort {
+                max_attempts: 3,
+                max_lookups: 1
+            }
+        );
+        assert_eq!(
+            effort_for(Some(1)),
+            KeyEffort {
+                max_attempts: MAX_PEER_ATTEMPTS,
+                max_lookups: 1
+            }
+        );
+        assert_eq!(
+            effort_for(Some(4)),
+            KeyEffort {
+                max_attempts: MAX_PEER_ATTEMPTS,
+                max_lookups: 1
+            }
+        );
+        assert_eq!(
+            effort_for(Some(5)),
+            KeyEffort {
+                max_attempts: MAX_PEER_ATTEMPTS,
+                max_lookups: 2
+            }
+        );
+        assert_eq!(
+            effort_for(Some(u32::MAX)),
+            KeyEffort {
+                max_attempts: MAX_PEER_ATTEMPTS,
+                max_lookups: 2
+            }
+        );
+        assert_eq!(est_bucket(None), "null");
+        assert_eq!(est_bucket(Some(0)), "dead");
+        assert_eq!(est_bucket(Some(4)), "low");
+        assert_eq!(est_bucket(Some(5)), "high");
+    }
+
+    /// Scripted lookups for the effort tests: each `scrape_peers` call pops
+    /// the next peer list and counts the call, so tests pin both the dial
+    /// budget and the lookup count.
+    #[derive(Clone)]
+    struct ScriptedLookups {
+        scripts: Arc<Mutex<std::collections::VecDeque<Vec<SocketAddr>>>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ScriptedLookups {
+        fn new(scripts: Vec<Vec<SocketAddr>>) -> Self {
+            Self {
+                scripts: Arc::new(Mutex::new(scripts.into_iter().collect())),
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl PeerSource for ScriptedLookups {
+        async fn get_peers(&self, _: DhtKey, _: Duration) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+        async fn scrape_peers(&self, _: DhtKey, _: Duration) -> dc3_dht::ScrapeReport {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let peers = lock(&self.scripts).pop_front().unwrap_or_default();
+            dc3_dht::ScrapeReport {
+                peers,
+                ..dc3_dht::ScrapeReport::default()
+            }
+        }
+        fn own_ips(&self) -> Vec<IpAddr> {
+            vec![ip("127.0.0.1")]
+        }
+        fn own_endpoints(&self) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+    }
+
+    /// An open port that accepts and drops: every inbound connection is one
+    /// counted dial that then fails fast at the handshake.
+    async fn counting_listener() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&dials);
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((socket, _)) => {
+                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        drop(socket);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (addr, dials)
+    }
+
+    async fn counting_pool(
+        n: usize,
+    ) -> (Vec<SocketAddr>, Vec<Arc<std::sync::atomic::AtomicUsize>>) {
+        let mut addrs = Vec::with_capacity(n);
+        let mut counters = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (addr, dials) = counting_listener().await;
+            addrs.push(addr);
+            counters.push(dials);
+        }
+        (addrs, counters)
+    }
+
+    fn dial_count(counters: &[Arc<std::sync::atomic::AtomicUsize>]) -> usize {
+        counters
+            .iter()
+            .map(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+            .sum()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn null_and_dead_estimates_cap_dials_at_three() {
+        for est in [None, Some(0)] {
+            let store = MemoryStore::new();
+            let (addrs, counters) = counting_pool(10).await;
+            let peers = ScriptedLookups::new(vec![addrs]);
+            let f = fetcher(&store, peers.clone());
+            let k = DhtKey([91; 20]);
+            assert!(matches!(f.obtain(k, est).await, Obtained::Failed));
+            assert_eq!(peers.calls(), 1, "est {est:?}: one lookup");
+            assert_eq!(dial_count(&counters), 3, "est {est:?}: three dials");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn low_estimate_keeps_today_effort() {
+        let store = MemoryStore::new();
+        let (addrs, counters) = counting_pool(10).await;
+        let peers = ScriptedLookups::new(vec![addrs]);
+        let f = fetcher(&store, peers.clone());
+        assert!(matches!(
+            f.obtain(DhtKey([92; 20]), Some(4)).await,
+            Obtained::Failed
+        ));
+        assert_eq!(peers.calls(), 1);
+        assert_eq!(dial_count(&counters), MAX_PEER_ATTEMPTS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn high_estimate_reruns_a_drained_lookup() {
+        let store = MemoryStore::new();
+        let (addrs, counters) = counting_pool(10).await;
+        let peers = ScriptedLookups::new(vec![Vec::new(), addrs]);
+        let f = fetcher(&store, peers.clone());
+        assert!(matches!(
+            f.obtain(DhtKey([93; 20]), Some(50)).await,
+            Obtained::Failed
+        ));
+        assert_eq!(peers.calls(), 2);
+        assert_eq!(dial_count(&counters), MAX_PEER_ATTEMPTS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn high_estimate_skips_the_second_lookup_when_spent() {
+        // The first lookup alone exhausts the dial budget: no budget is left
+        // for a second round's peers, so no second lookup issues.
+        let store = MemoryStore::new();
+        let (addrs, counters) = counting_pool(20).await;
+        let peers = ScriptedLookups::new(vec![addrs]);
+        let f = fetcher(&store, peers.clone());
+        assert!(matches!(
+            f.obtain(DhtKey([94; 20]), Some(50)).await,
+            Obtained::Failed
+        ));
+        assert_eq!(peers.calls(), 1);
+        assert_eq!(dial_count(&counters), MAX_PEER_ATTEMPTS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn high_estimate_skips_the_second_lookup_on_success() {
+        let info = info_dict("second lookup skipped", &["a.txt"], false);
+        let addr = seeder(&info).await;
+        let store = MemoryStore::new();
+        let peers = ScriptedLookups::new(vec![vec![addr], vec![addr]]);
+        let f = fetcher(&store, peers.clone());
+        assert!(matches!(
+            f.obtain(key_of(&info), Some(50)).await,
+            Obtained::Metadata(_)
+        ));
+        assert_eq!(peers.calls(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drained_second_lookup_can_still_win() {
+        let info = info_dict("second lookup wins", &["a.txt"], false);
+        let addr = seeder(&info).await;
+        let store = MemoryStore::new();
+        let peers = ScriptedLookups::new(vec![Vec::new(), vec![addr]]);
+        let f = fetcher(&store, peers.clone());
+        assert!(matches!(
+            f.obtain(key_of(&info), Some(50)).await,
+            Obtained::Metadata(_)
+        ));
+        assert_eq!(peers.calls(), 2);
+    }
+
+    #[test]
+    fn fetch_and_dial_metrics_carry_the_claim_time_bucket() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        // A manual current-thread runtime inside the local recorder: the
+        // fetch runs on this thread, so its counters land in `recorder`.
+        metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let store = MemoryStore::new();
+                    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let dead_addr = dead.local_addr().unwrap();
+                    drop(dead);
+                    let f = fetcher(&store, FixedPeers(vec![dead_addr]));
+                    let k = DhtKey([95; 20]);
+                    store.enqueue(k);
+                    assert_eq!(
+                        f.process(&item_with(k, Some(50))).await,
+                        FetchOutcome::FetchFailed
+                    );
+                });
+        });
+        let text = handle.render();
+        assert!(
+            text.contains("dc3_fetch_dials_total{est=\"high\"} 1"),
+            "{text}"
+        );
+        let fetch_line = text
+            .lines()
+            .find(|l| l.starts_with("dc3_fetch_total{") && l.contains("est=\"high\""))
+            .unwrap_or_else(|| panic!("no high-bucket fetch_total:\n{text}"));
+        assert!(fetch_line.contains("outcome=\"fetch_failed\""), "{text}");
     }
 
     #[test]
