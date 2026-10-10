@@ -228,19 +228,21 @@ SELECT u.id, u.dht_key, u.seeders_est, u.scrape_failures, u.last_seen_at, u.chan
 
 /// Stats-only scrape write: no `change_seq` bump (the indexer must not see
 /// churn) and no `files` touch (which would fire `torrents_files_shape`).
+/// Tombstoned rows are left alone: a delayed scrape must not resurrect
+/// stats on a dead row.
 const RECORD_SCRAPE_SQL: &str = "\
 UPDATE torrents
    SET seeders_est = $2, scrape_failures = $3, last_scraped_at = now()
- WHERE id = $1";
+ WHERE id = $1 AND deleted_at IS NULL";
 
 /// Batched stats-only scrape write (win 7): one statement for a whole
 /// scrape batch, same column set as [`RECORD_SCRAPE_SQL`] — no `change_seq`
-/// bump, no `files` touch.
+/// bump, no `files` touch, and tombstoned rows left alone.
 const RECORD_SCRAPES_SQL: &str = "\
 UPDATE torrents AS t
    SET seeders_est = i.est, scrape_failures = i.failures, last_scraped_at = now()
   FROM unnest($1::bigint[], $2::integer[], $3::integer[]) AS i(id, est, failures)
- WHERE t.id = i.id";
+ WHERE t.id = i.id AND t.deleted_at IS NULL";
 
 /// Conditional scrape tombstone: wipes name/files but only when the row is
 /// still exactly as claimed, so a concurrent fetch is never clobbered. The
@@ -387,7 +389,12 @@ impl Store {
         self.claim_with(true, n, lease).await
     }
 
-    async fn claim_with(&self, live_only: bool, n: i64, lease: Duration) -> Result<Vec<PendingItem>> {
+    async fn claim_with(
+        &self,
+        live_only: bool,
+        n: i64,
+        lease: Duration,
+    ) -> Result<Vec<PendingItem>> {
         if n <= 0 {
             return Ok(Vec::new());
         }

@@ -38,6 +38,8 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 
 - Search: indexed torrent names are truncated to the same byte budget as file lists, so out-of-band oversized documents cannot pin indexing work.
 
+- Store: scrape writes skip tombstoned rows, so a delayed scrape can no longer resurrect seeder stats on a dead row.
+
 ## 0.4.0
 
 - Fetch effort scales by estimate: unscraped (`None`) and measured-dead (`Some(0)`) keys get 3 dials and one lookup, `1–4` keeps today's 8 dials and one lookup, `>= 5` gets 8 dials plus one second lookup when the first drains — fan-out stays 3-wide for every bucket and the key deadline still bounds the pair, so per-key concurrency never exceeds today's. `dc4_fetch_dials_total{est}` counts started dials and `dc4_fetch_total` gains the same `est` (`null`/`dead`/`low`/`high`) label for the ok-per-dial gate; both use the claim-time estimate so dials and outcomes stay joinable.

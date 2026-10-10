@@ -1604,6 +1604,29 @@ async fn record_scrape_writes_stats_without_index_churn(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn record_scrape_leaves_tombstoned_rows_alone(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let k = key(33);
+    let id = s.complete(&k, &torrent(k, "doomed")).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    assert!(!raw_torrent(&pool, id).await.is_live());
+    // A delayed scrape write landing after the tombstone must neither
+    // match nor resurrect stats on the dead row.
+    assert!(!s.record_scrape(id, Some(21), 0).await.unwrap());
+    assert_eq!(s.record_scrapes(&[(id, Some(21), 0)]).await.unwrap(), 0);
+    assert_eq!(scrape_row(&pool, id).await, (None, 0));
+    let row = raw_torrent(&pool, id).await;
+    assert!(!row.is_live());
+    assert!(row.last_scraped_at.is_none());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn tombstone_dead_missing_row_rolls_back_and_releases(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     // Missing row takes the early-Ok(false) path, which must roll back
@@ -1981,7 +2004,10 @@ async fn claim_live_takes_only_live_and_carries_estimates(pool: PgPool) {
     // re-lease them.
     let rest = s.claim(10, Duration::from_secs(120)).await.unwrap();
     assert_eq!(rest.len(), 2);
-    assert!(rest.iter().all(|i| i.dht_key != key(83) && i.dht_key != key(84)));
+    assert!(
+        rest.iter()
+            .all(|i| i.dht_key != key(83) && i.dht_key != key(84))
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
