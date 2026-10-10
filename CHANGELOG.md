@@ -4,7 +4,7 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 
 ## 0.5.0
 
-- Audit fixes (see `audit.md`): every still-standing finding fixed with regression coverage.
+- DHT: responses with top-level `ro=1` (BEP 43) no longer enter the routing table, the external-IP vote, or the sampler frontier.
 
 ## 0.4.0
 

@@ -991,6 +991,47 @@ async fn wrong_id_replies_count_as_failures() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_only_responses_teach_nothing() {
+    timeout(Duration::from_secs(30), async {
+        let (node, _rx) = start(config(&[])).await;
+        let to = addr(&node);
+        let mut peer = RawClient::new().await;
+        let me = CompactNode {
+            id: peer.id,
+            addr: peer.addr(),
+        };
+        let mut observer = RawClient::new().await;
+        // Plain query: the node learns the peer and pings it back.
+        peer.call(to, Method::Ping).await;
+        // Answer every ping with ro=1 (BEP 43): delivered to the querier,
+        // but must not confirm the responder or enter the table.
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut answered = 0u32;
+        while Instant::now() < deadline {
+            if let Some(q) = peer.next_query_from(to, Duration::from_millis(500)).await {
+                let mut reply = reply_as(&q, me.id);
+                reply.read_only = true;
+                send_msg(&peer, to, &reply).await;
+                answered += 1;
+            }
+        }
+        assert!(answered > 0, "the node never pinged the peer back");
+        assert_eq!(
+            node.good_nodes(),
+            0,
+            "an ro=1 responder was confirmed as good"
+        );
+        assert!(
+            !advertises(&mut observer, to, me).await,
+            "an ro=1 responder is advertised"
+        );
+        node.shutdown().await;
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn junk_does_not_starve_replies() {
     timeout(Duration::from_secs(30), async {
         let (node, _rx) = start(config(&[])).await;

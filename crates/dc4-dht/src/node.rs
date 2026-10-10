@@ -844,10 +844,18 @@ impl Inner {
                 Body::Query(query) => {
                     self.on_query(sock, &msg.tid, msg.read_only, &query, from, now)
                 }
-                Body::Response(response) => {
-                    self.on_reply(sock, &msg.tid, Ok(response), msg.ip, from, now)
+                Body::Response(response) => self.on_reply(
+                    sock,
+                    &msg.tid,
+                    Ok(response),
+                    msg.ip,
+                    from,
+                    msg.read_only,
+                    now,
+                ),
+                Body::Error(error) => {
+                    self.on_reply(sock, &msg.tid, Err(error), msg.ip, from, false, now)
                 }
-                Body::Error(error) => self.on_reply(sock, &msg.tid, Err(error), msg.ip, from, now),
             },
             Err(DecodeError::BadQuery { tid, code, message }) => {
                 self.counters.queries_received.count_other();
@@ -996,6 +1004,7 @@ impl Inner {
         body: Result<Response, KrpcError>,
         reported_ip: Option<SocketAddr>,
         from: SocketAddr,
+        sender_read_only: bool,
         now: Instant,
     ) {
         let pending = lock(&sock.state).txns.take(tid, &from);
@@ -1006,7 +1015,15 @@ impl Inner {
                 .drop_packet(DropReason::Unsolicited);
             return;
         };
-        self.deliver_reply(sock, pending, body, reported_ip, from, now);
+        self.deliver_reply(
+            sock,
+            pending,
+            body,
+            reported_ip,
+            from,
+            sender_read_only,
+            now,
+        );
     }
 
     /// Delivers an already-claimed reply. `handle_datagram` calls this on the
@@ -1019,12 +1036,21 @@ impl Inner {
         body: Result<Response, KrpcError>,
         reported_ip: Option<SocketAddr>,
         from: SocketAddr,
+        sender_read_only: bool,
         now: Instant,
     ) {
         let reply = match body {
             Ok(response) => {
                 incr(&self.counters.responses_received);
-                self.learn_from_response(sock, &response, reported_ip, from, pending.expect, now);
+                self.learn_from_response(
+                    sock,
+                    &response,
+                    reported_ip,
+                    from,
+                    pending.expect,
+                    sender_read_only,
+                    now,
+                );
                 Reply::Response(response)
             }
             Err(error) => {
@@ -1050,10 +1076,18 @@ impl Inner {
         match decoded {
             Ok(msg) => match msg.body {
                 Body::Response(response) => {
-                    self.deliver_reply(sock, pending, Ok(response), msg.ip, from, now);
+                    self.deliver_reply(
+                        sock,
+                        pending,
+                        Ok(response),
+                        msg.ip,
+                        from,
+                        msg.read_only,
+                        now,
+                    );
                 }
                 Body::Error(error) => {
-                    self.deliver_reply(sock, pending, Err(error), msg.ip, from, now);
+                    self.deliver_reply(sock, pending, Err(error), msg.ip, from, false, now);
                 }
                 Body::Query(_) => {
                     // Unreachable by construction (see above): degrade to a
@@ -1082,7 +1116,9 @@ impl Inner {
     }
 
     /// Updates the routing table, the external-IP vote and the sampler
-    /// frontier from a response to one of our queries.
+    /// frontier from a response to one of our queries. A response with the
+    /// top-level `ro` flag (BEP 43) is delivered to the querier but teaches
+    /// us nothing: no table entry, no IP vote, no sampler candidates.
     fn learn_from_response(
         &self,
         sock: &SocketNode,
@@ -1090,30 +1126,40 @@ impl Inner {
         reported_ip: Option<SocketAddr>,
         from: SocketAddr,
         expect: Option<NodeId>,
+        sender_read_only: bool,
         now: Instant,
     ) {
         let (external_changed, switched) = {
             let mut st = lock(&sock.state);
             // An answer under another ID is a failure of the expected entry;
-            // the ID that did answer is learned like any other responder.
+            // the ID that did answer is learned like any other responder,
+            // unless it is read-only.
             if let Some(expected) = expect
                 && expected != response.id
             {
                 st.table.on_wrong_id(&expected, &from, now);
             }
-            if response.id != st.id && !st.routers.contains(&from) {
-                let bep42 = is_bep42_valid(&response.id, from.ip());
-                st.table.on_response(response.id, from, bep42, now);
-            }
-            // Only the top-level `ip` of a response to our own query votes.
-            match reported_ip.map(|a| canonical_ip(a.ip())) {
-                Some(ip) if Family::of_ip(&ip) == sock.family && self.policy.dialable_ip(ip) => {
-                    match st.voter.record(self.policy.voter_key(&from), ip, now) {
-                        Some(winner) => self.on_external_ip(&mut st, winner, now),
-                        None => (false, false),
-                    }
+            if sender_read_only {
+                // BEP 43: a read-only responder teaches us nothing — no
+                // table entry, no IP vote, no sampler candidates below.
+                (false, false)
+            } else {
+                if response.id != st.id && !st.routers.contains(&from) {
+                    let bep42 = is_bep42_valid(&response.id, from.ip());
+                    st.table.on_response(response.id, from, bep42, now);
                 }
-                _ => (false, false),
+                // Only the top-level `ip` of a response to our own query votes.
+                match reported_ip.map(|a| canonical_ip(a.ip())) {
+                    Some(ip)
+                        if Family::of_ip(&ip) == sock.family && self.policy.dialable_ip(ip) =>
+                    {
+                        match st.voter.record(self.policy.voter_key(&from), ip, now) {
+                            Some(winner) => self.on_external_ip(&mut st, winner, now),
+                            None => (false, false),
+                        }
+                    }
+                    _ => (false, false),
+                }
             }
         };
         if external_changed {
@@ -1126,6 +1172,9 @@ impl Inner {
                 family = sock.family.as_str(),
                 "external address confirmed; switched to a BEP 42 node ID"
             );
+        }
+        if sender_read_only {
+            return;
         }
         if let Some(sampler) = &self.sampler {
             let own_ids = self.own_ids();
