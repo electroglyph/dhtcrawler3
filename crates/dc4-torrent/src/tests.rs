@@ -330,6 +330,22 @@ fn long_paths_and_names_are_capped() {
 }
 
 #[test]
+fn cut_paths_show_components_but_not_the_truncated_join() {
+    // 40 × 255-char components: the capped join is cut, so the visitor
+    // sees each component once — and never the truncated join (showing
+    // both would burn the text budget twice for one entry).
+    let comp = "y".repeat(255);
+    let comps: Vec<&str> = std::iter::repeat_n(comp.as_str(), 40).collect();
+    let (m, seen) = parse_visited(&v1_multi(vec![v1_file(1, &comps)]));
+    let m = m.unwrap();
+    assert!(m.files[0].path.chars().count() <= PATH_MAX_CHARS);
+    let joined = comps.join("/");
+    let truncated: String = joined.chars().take(PATH_MAX_CHARS).collect();
+    assert!(!seen.iter().any(|s| *s == truncated));
+    assert_eq!(seen.iter().filter(|s| *s == &comp).count(), 40);
+}
+
+#[test]
 fn v2_only_torrent() {
     let tree = d([
         ("dir", d([("b.txt", v2_file(3)), ("a.txt", v2_file(2))])),
@@ -846,15 +862,16 @@ fn v2_paths_match_v1_paths_under_the_length_cap() {
 
 #[test]
 fn many_files_under_long_directories_stay_bounded() {
-    // Every file shares a 4 096-character directory prefix: the joined
-    // paths would exceed the text budget, so parsing fails closed after
-    // showing each directory once and every file name.
+    // Every file shares a ~3 840-character directory prefix that fits the
+    // path cap, so each joined path is shown: 20 000 of them exceed the
+    // text budget, so parsing fails closed after showing each directory
+    // once and every file name.
     let dir = "目".repeat(255);
     let files: Vec<(Vec<u8>, O)> = (0..20_000)
         .map(|n| (format!("{n}").into_bytes(), v2_file(1)))
         .collect();
     let mut node = O::Dict(files.into_iter().collect());
-    for _ in 0..20 {
+    for _ in 0..15 {
         node = d([(dir.as_str(), node)]);
     }
     let raw = encode(&v2_only(node));
@@ -864,10 +881,12 @@ fn many_files_under_long_directories_stay_bounded() {
         assert!(p.chars().count() <= PATH_MAX_CHARS);
     });
     assert_eq!(r, Err(ParseError::TooMuchText));
-    // name + 20 directories + 20 000 file names (the paths are cut by the
-    // cap), plus the joined paths that fit in the budget.
-    let base = 1 + 20 + 20_000;
-    assert!(calls > base && calls <= base + text_budget(&raw) / PATH_MAX_CHARS);
+    // name + 15 directories + 20 000 file names, plus the joined paths
+    // that fit in the budget.
+    let base = 1 + 15 + 20_000;
+    // Exactly one visit per file (the joined path or the components,
+    // never both), plus the name and each directory once.
+    assert_eq!(calls, base);
 }
 
 #[test]
@@ -902,7 +921,9 @@ fn text_budget(raw: &[u8]) -> usize {
 
 #[test]
 fn shared_long_prefix_is_not_rescanned_per_file() {
-    // F1: many tiny files under one ~4 096-character directory prefix.
+    // F1: many tiny files under one ~3 840-character directory prefix that
+    // fits the path cap, so every joined path is shown and the total
+    // exceeds the text budget.
     let dir = "d".repeat(255);
     let files: Vec<(Vec<u8>, O)> = (0..20_000)
         .map(|n| (format!("{n}").into_bytes(), v2_file(1)))
@@ -910,7 +931,7 @@ fn shared_long_prefix_is_not_rescanned_per_file() {
     let mut files: Map = files.into_iter().collect();
     files.insert(b"zz blocked".to_vec(), v2_file(1));
     let mut node = O::Dict(files);
-    for _ in 0..16 {
+    for _ in 0..15 {
         node = d([(dir.as_str(), node)]);
     }
     let raw = encode(&v2_only(node));
@@ -930,7 +951,8 @@ fn shared_long_prefix_is_not_rescanned_per_file() {
 #[test]
 fn visited_bound_is_budget_plus_metadata_len() {
     // F-05: the documented bound on visited text is budget + info length
-    // (fail-closed with TooMuchText), not the budget alone.
+    // (fail-closed with TooMuchText), not the budget alone. The prefix fits
+    // the path cap so every joined path is shown.
     let dir = "e".repeat(255);
     let files: Vec<(Vec<u8>, O)> = (0..20_000)
         .map(|n| (format!("{n}").into_bytes(), v2_file(1)))
@@ -938,7 +960,7 @@ fn visited_bound_is_budget_plus_metadata_len() {
     let mut files: Map = files.into_iter().collect();
     files.insert(b"zz blocked".to_vec(), v2_file(1));
     let mut node = O::Dict(files);
-    for _ in 0..16 {
+    for _ in 0..15 {
         node = d([(dir.as_str(), node)]);
     }
     let raw = encode(&v2_only(node));

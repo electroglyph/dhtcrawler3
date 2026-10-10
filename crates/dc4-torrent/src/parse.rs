@@ -499,8 +499,13 @@ fn v1_files(
                 }
                 whole = !capped.cut;
                 path = capped.finish();
-                if let Some(p) = &path {
-                    whole &= files.show_joined(p);
+                // A cut path is shown component-wise below: showing the
+                // truncated join too would burn the text budget twice for
+                // the same entry.
+                if whole {
+                    if let Some(p) = &path {
+                        whole &= files.show_joined(p);
+                    }
                 }
             }
             if !whole {
@@ -626,8 +631,11 @@ impl OpenDirs {
             capped.push(comp);
             whole = !capped.cut;
             path = capped.finish();
-            if let Some(p) = &path {
-                whole &= files.show_joined(p);
+            // As above: a cut path is shown component-wise below.
+            if whole {
+                if let Some(p) = &path {
+                    whole &= files.show_joined(p);
+                }
             }
         }
         if !whole {

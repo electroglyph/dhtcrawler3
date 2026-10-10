@@ -59,6 +59,7 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 - Store: the least-privilege role check covers the crawler's tombstone-purge duty (which needs its `DELETE` grant) instead of asserting a blanket denial that production contradicts.
 
 - Torrent: the per-listing file cap is documented as applying to the v2 tree and the v1 list independently.
+- Torrent: a path cut short by the length cap is shown component-wise only, instead of burning the visitor text budget twice with the truncated join too.
 
 ## 0.4.0
 
