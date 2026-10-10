@@ -12,6 +12,7 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 - DHT: only replies under the queried node ID count towards an answer; wrong-ID replies no longer trigger the final sweep alone.
 - DHT: the external-IP vote documents its accepted bound (a flood past voter capacity flushes honest votes; each vote costs a network).
 - DHT: `sampler_concurrency = 0` is rejected at validation instead of silently running no sampler workers.
+- DHT: a bootstrap round that resolves more routers than fit no longer wipes the known routers; overflow is dropped (but still queried that round).
 
 ## 0.4.0
 

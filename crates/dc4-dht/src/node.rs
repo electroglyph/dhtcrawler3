@@ -1536,6 +1536,20 @@ fn maybe_bootstrap(inner: &Arc<Inner>, sock: &Arc<SocketNode>, good: usize, now:
     });
 }
 
+/// Merges freshly resolved bootstrap `routers` into the known set without
+/// exceeding [`MAX_ROUTERS`]: known routers are always kept and overflow is
+/// dropped (a bad DNS round can no longer flush every good router). The
+/// dropped addresses are still queried this round by the caller; they are
+/// just not remembered.
+fn merge_routers(known: &mut HashSet<SocketAddr>, fresh: &[SocketAddr]) {
+    for addr in fresh.iter().copied() {
+        if known.len() >= MAX_ROUTERS {
+            break;
+        }
+        known.insert(addr);
+    }
+}
+
 /// Resolves the routers, asks them and the saved contacts for nodes near our
 /// own ID, then runs a lookup for our own ID.
 async fn bootstrap(inner: &Inner, sock: &SocketNode) {
@@ -1567,10 +1581,7 @@ async fn bootstrap(inner: &Inner, sock: &SocketNode) {
     }
     let own_id = {
         let mut st = lock(&sock.state);
-        if st.routers.len().saturating_add(routers.len()) > MAX_ROUTERS {
-            st.routers.clear();
-        }
-        st.routers.extend(routers.iter().copied());
+        merge_routers(&mut st.routers, &routers);
         st.id
     };
     let replies = join_all(
@@ -1594,4 +1605,33 @@ async fn bootstrap(inner: &Inner, sock: &SocketNode) {
         responders = outcome.closest.len(),
         "DHT bootstrap round finished"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([9, 9, 9, 9], port))
+    }
+
+    #[test]
+    fn merge_routers_keeps_known_and_drops_overflow() {
+        let mut known: HashSet<SocketAddr> = (0..MAX_ROUTERS as u16).map(addr).collect();
+        // One bad DNS round with fresh addresses flushes nothing.
+        merge_routers(&mut known, &[addr(1000), addr(1001)]);
+        assert_eq!(known.len(), MAX_ROUTERS);
+        assert!(known.contains(&addr(0)));
+        assert!(!known.contains(&addr(1000)));
+    }
+
+    #[test]
+    fn merge_routers_fills_room_and_ignores_duplicates() {
+        let mut known: HashSet<SocketAddr> = [addr(1), addr(2)].into_iter().collect();
+        merge_routers(&mut known, &[addr(2), addr(3), addr(4)]);
+        assert!(known.contains(&addr(1)));
+        assert!(known.contains(&addr(3)));
+        assert!(known.contains(&addr(4)));
+        assert_eq!(known.len(), 4);
+    }
 }
