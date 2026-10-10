@@ -670,7 +670,7 @@ cd ~/dhtcrawler4/deploy
   echo -n 'claim failures: '
   docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'claiming queue items failed' || true
   echo '### crawl metrics ###'
-  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_(fetch_total|queue_depth|db_pool_size|db_pool_idle|claim_chan_depth|discovered_total|admitted_total|blocked_total|scrape_total|scrape_zero_seeder_share|scrape_unaware_share|destination_skipped_total)|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total|sampler_early_total|sampler_visited_full_total|responder_dropped_total|discovered_dropped_total|peer_store_keys)" <&3'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_(fetch_total|queue_depth|db_pool_size|db_pool_idle|claim_chan_depth|discovered_total|admitted_total|blocked_total|scrape_total|scrape_zero_seeder_share|scrape_unaware_share|destination_skipped_total|purge_gave_up_total)|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total|sampler_early_total|sampler_visited_full_total|responder_dropped_total|discovered_dropped_total|peer_store_keys)" <&3'
 } 2>&1 | tee /tmp/dc3-diag.txt
 ```
 
@@ -738,7 +738,9 @@ How to read the output:
 - **Why is yield near zero?** The queue-age leg discriminates. Oldest
   `discovered_at` in weeks with attempts piled at max and `null_est`
   ≈ queued means a dead queue: the DHT correctly reports no peers for
-  corpses, and the fix is admission/expiry, not fetch knobs. Everything
+  corpses, and the fix is admission/expiry, not fetch knobs — with the
+  sweep purging them hourly (`gave_up_purge_hours`), corpses also stop
+  counting against the cap. Everything
   young with attempts near 0 means junk discovery (e.g. polluted
   `sample_infohashes`), and the fix is the discovery source. On the
   metrics side: `admitted_total` by `source` shows where keys come from,
@@ -749,6 +751,15 @@ How to read the output:
   whole routing tables for few keys, and `scrape_zero_seeder_share` /
   `scrape_unaware_share` near 1 confirm the swarms are dead or unknown
   rather than the network being broken.
+- **Is the queue stalled on corpses?** `queue_depth` pinned at the cap
+  with `queued` draining 1:1 into `gave_up`, `blocked_total{reason="queue_full"}`
+  climbing, and `fetch_total` frozen means nothing claimable is left:
+  gave-up rows count against `max_pending` without ever becoming due
+  again. The scrape sweep purges them hourly — `purge_gave_up_total`
+  climbing once per sweep is the proof it runs; flat at zero an hour
+  after a restart means the sweep is not firing, not that there is
+  nothing to purge. After the purge catches up, depth drops below the
+  cap and the `queue_full` drops stop.
 - **Disk filling up?** `docker system df` first: gigabytes of reclaimable
   build cache is normal after repeated `--build` updates — `docker
   builder prune -f` drops it. Of the volumes, `pgdata` is always the
