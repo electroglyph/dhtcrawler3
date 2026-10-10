@@ -7,8 +7,10 @@
 //! connections wait in the kernel backlog. A connection fails with
 //! `TimedOut`, which closes it, when
 //! - a request head (from the connection's start, or from the first byte of
-//!   a later request, to the blank line that ends the head) takes longer
-//!   than [`HEADER_READ_TIMEOUT`], however steadily its bytes trickle in; or
+//!   a later request, to the blank line that ends the head) is still
+//!   incomplete when [`HEADER_READ_TIMEOUT`] elapses with no bytes presently
+//!   readable: bytes already buffered are accepted first, so a head that keeps
+//!   trickling never sees this timeout; or
 //! - it makes no read or write progress for [`CONNECTION_IDLE_TIMEOUT`].
 //!
 //! A request body is bounded by the request timeout of the middleware.

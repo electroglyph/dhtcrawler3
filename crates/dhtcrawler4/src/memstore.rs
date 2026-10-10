@@ -682,16 +682,18 @@ impl CrawlStore for MemoryStore {
     async fn purge_gave_up(&self, older_than: Duration) -> Result<u64> {
         let mut state = self.lock();
         let now = Instant::now();
-        // Mirrors the SQL predicate: only gave-up rows with a last attempt
-        // older than the age go; a missing timestamp (never attempted) keeps
-        // the row, as NULL does in the database.
+        // Mirrors the SQL predicate: gave-up rows purge once older than
+        // the age, and rows with no last attempt purge too (only possible
+        // via direct state injection: the code paths always stamp). Like
+        // NULL in the database, a missing timestamp can never satisfy an
+        // age comparison, so keeping it would leak the row forever.
         let doomed: Vec<DhtKey> = state
             .pending
             .iter()
             .filter(|(_, p)| {
                 p.gave_up
                     && p.last_attempt
-                        .is_some_and(|at| now.saturating_duration_since(at) >= older_than)
+                        .is_none_or(|at| now.saturating_duration_since(at) >= older_than)
             })
             .map(|(key, _)| *key)
             .collect();
@@ -1431,7 +1433,8 @@ mod scrape_tests {
     }
 
     /// Direct give-ups stamp the attempt time too: a zero age purges them.
-    /// A gave-up row with no stamp is kept, as NULL is in the database.
+    /// A gave-up row with no stamp purges as well, mirroring the SQL
+    /// predicate's IS NULL arm (it can never satisfy an age comparison).
     #[tokio::test(start_paused = true)]
     async fn purge_gave_up_covers_direct_give_ups() {
         let s = MemoryStore::new();
@@ -1452,7 +1455,7 @@ mod scrape_tests {
                 seeders: None,
             },
         );
-        assert_eq!(s.purge_gave_up(Duration::ZERO).await.unwrap(), 0);
-        assert!(s.lock().pending.contains_key(&key(35)));
+        assert_eq!(s.purge_gave_up(Duration::ZERO).await.unwrap(), 1);
+        assert!(!s.lock().pending.contains_key(&key(35)));
     }
 }

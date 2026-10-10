@@ -364,6 +364,19 @@ fn file_tree_of_only_empty_dirs_is_not_a_torrent() {
         parse(&v2_only(d([("a", d([("b", d([("c", d([]))]))]))]))),
         Err(ParseError::InvalidFileTree("no files in file tree"))
     );
+    // A tree of only padding is still no torrent: padding never counts.
+    assert_eq!(
+        parse(&v2_only(d([(".pad", d([("16", v2_file(16))]))]))),
+        Err(ParseError::InvalidFileTree("no files in file tree"))
+    );
+    // Padding by attribute alone, and nothing else: still no torrent.
+    assert_eq!(
+        parse(&v2_only(d([(
+            "a.bin",
+            with(v2_file(4), "", d([("length", i(4)), ("attr", b("p"))])),
+        )]))),
+        Err(ParseError::InvalidFileTree("no files in file tree"))
+    );
 }
 
 #[test]
