@@ -650,15 +650,15 @@ fn has_control(s: &str) -> bool {
 }
 
 /// True when two listen addresses would claim the same socket: same port and
-/// equal IPs, a wildcard covering an address of the same family, or both
-/// wildcards. `0.0.0.0:P` and `[::]:P` overlap: on Linux the default
+/// equal IPs, a wildcard covering an address of the same family, both
+/// wildcards, or a dual-stack `[::]` wildcard against any same-port IPv4
+/// address. `0.0.0.0:P` and `[::]:P` overlap: on Linux the default
 /// dual-stack `[::]` socket also claims the IPv4 port, so the second bind
 /// fails with `EADDRINUSE` at startup. (On platforms with `V6ONLY` forced on
 /// that pair could bind disjointly; rejecting it here is still the safe
 /// direction — a clear config error instead of a runtime bind failure.)
-/// A wildcard never overlaps a *specific* address of the other family
-/// (`0.0.0.0:P` and `[::1]:P` bind distinct sockets), so `is_unspecified`
-/// only counts across families when both sides are wildcards.
+/// The reverse is not true: an IPv4 wildcard never claims an IPv6 port, so
+/// `0.0.0.0:P` and `[::1]:P` bind distinct sockets.
 fn listen_addrs_overlap(a: SocketAddr, b: SocketAddr) -> bool {
     if a.port() != b.port() {
         return false;
@@ -667,6 +667,11 @@ fn listen_addrs_overlap(a: SocketAddr, b: SocketAddr) -> bool {
         return true;
     }
     if a.ip().is_unspecified() && b.ip().is_unspecified() {
+        return true;
+    }
+    if (a.ip() == IpAddr::V6(Ipv6Addr::UNSPECIFIED) && b.ip().is_ipv4())
+        || (b.ip() == IpAddr::V6(Ipv6Addr::UNSPECIFIED) && a.ip().is_ipv4())
+    {
         return true;
     }
     (a.ip().is_unspecified() || b.ip().is_unspecified()) && a.ip().is_ipv4() == b.ip().is_ipv4()
@@ -1311,16 +1316,23 @@ mod tests {
     }
 
     #[test]
-    fn cross_family_listen_addrs_overlap_only_when_both_wildcard() {
+    fn cross_family_listen_addrs_overlap() {
         let mut c = Config::default();
-        // IPv4 wildcard vs IPv6 loopback on the same port: distinct sockets.
+        // IPv4 wildcard vs IPv6 loopback on the same port: distinct sockets
+        // (an IPv4 wildcard never claims an IPv6 port).
         c.metrics.listen = "0.0.0.0:9100".parse().unwrap();
         c.web.listen = "[::1]:9100".parse().unwrap();
         assert!(c.validate().is_ok());
-        // IPv6 wildcard vs IPv4 loopback on the same port: distinct sockets.
+        // IPv6 wildcard vs IPv4 loopback on the same port: the dual-stack
+        // `[::]` claims the IPv4 port on Linux, so this is rejected at
+        // validation, not as a runtime `EADDRINUSE`.
         c.metrics.listen = "[::]:9100".parse().unwrap();
         c.web.listen = "127.0.0.1:9100".parse().unwrap();
-        assert!(c.validate().is_ok());
+        assert!(c.validate().is_err());
+        // Same in the other order.
+        c.metrics.listen = "127.0.0.1:9100".parse().unwrap();
+        c.web.listen = "[::]:9100".parse().unwrap();
+        assert!(c.validate().is_err());
         // Both wildcards on the same port conflict (dual-stack `[::]`
         // claims the IPv4 port on Linux): rejected at validation, not as a
         // runtime `EADDRINUSE`.
