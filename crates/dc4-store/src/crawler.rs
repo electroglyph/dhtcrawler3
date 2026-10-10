@@ -487,11 +487,11 @@ impl Store {
         if estimate > EXACT_COUNT_THRESHOLD {
             return Ok(estimate >= max_pending);
         }
-        // pending_depth() would count, and its count stops at the threshold
-        // plus one.
-        if max_pending > EXACT_COUNT_THRESHOLD.saturating_add(1) {
-            return Ok(false);
-        }
+        // The estimate is small (possibly stale after a bulk load without
+        // ANALYZE), so count exactly instead of trusting it: a stale-small
+        // estimate with a huge real depth must not read as room. This scan
+        // stops at `max_pending` rows; it only runs when `max_pending`
+        // exceeds the threshold cap, i.e. on unusually large queue caps.
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM pending LIMIT $1) p")
             .bind(max_pending)
             .fetch_one(&self.pool)
