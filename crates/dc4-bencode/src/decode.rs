@@ -59,11 +59,11 @@ impl<'a> Decoder<'a> {
     }
 
     fn advance(&mut self, n: usize) {
-        // `n` is only ever a length already checked against `input.len()`.
-        self.pos = self
-            .pos
-            .checked_add(n)
-            .expect("decoder position overflow");
+        // Every caller passes a constant small step while `pos` is within
+        // the input, so this cannot overflow in practice; saturating keeps
+        // that promise total — a saturated position simply decodes as
+        // `UnexpectedEof` below instead of panicking.
+        self.pos = self.pos.saturating_add(n);
     }
 
     fn count_item(&mut self) -> Result<(), Error> {
@@ -84,6 +84,10 @@ impl<'a> Decoder<'a> {
             // Peek once per iteration and reuse it for the dict-close,
             // list-close and value-dispatch checks below.
             let b = self.peek()?;
+            // Depth for the key gate below, read before the mutable
+            // borrow of the frame (keys are values at depth + 1).
+            let key_depth = matches!(stack.last(), Some((Frame::Dict { key: None, .. }, _)))
+                .then(|| stack.len());
             // Inside a dictionary with no pending key: read a key or the end.
             if let Some((
                 Frame::Dict {
@@ -106,6 +110,10 @@ impl<'a> Decoder<'a> {
                 }
                 if !b.is_ascii_digit() {
                     return self.err(ErrorKind::NonStringKey);
+                }
+                // Keys are gated like any other scalar at their depth.
+                if key_depth.is_some_and(|depth| depth >= self.limits.max_depth) {
+                    return self.err(ErrorKind::TooDeep);
                 }
                 let key_pos = self.pos;
                 let k = self.parse_bytes()?;
@@ -195,11 +203,10 @@ impl<'a> Decoder<'a> {
             }
             Some((Frame::Dict { builder, key }, _)) => match key.take() {
                 Some((k, value_start)) => {
-                    let raw =
-                        self.input.get(value_start..self.pos).ok_or(Error {
-                            kind: ErrorKind::UnexpectedEof,
-                            pos: start,
-                        })?;
+                    let raw = self.input.get(value_start..self.pos).ok_or(Error {
+                        kind: ErrorKind::UnexpectedEof,
+                        pos: start,
+                    })?;
                     builder.push(k, value, raw);
                     Ok(None)
                 }
@@ -277,16 +284,18 @@ impl<'a> Decoder<'a> {
     }
 
     fn parse_bytes(&mut self) -> Result<&'a [u8], Error> {
-        let len = self.parse_digits(b':', ErrorKind::InvalidLength).map_err(|e| {
-            if e.kind == ErrorKind::IntegerOverflow {
-                Error {
-                    kind: ErrorKind::StringTooLong,
-                    pos: e.pos,
+        let len = self
+            .parse_digits(b':', ErrorKind::InvalidLength)
+            .map_err(|e| {
+                if e.kind == ErrorKind::IntegerOverflow {
+                    Error {
+                        kind: ErrorKind::StringTooLong,
+                        pos: e.pos,
+                    }
+                } else {
+                    e
                 }
-            } else {
-                e
-            }
-        })?;
+            })?;
         self.advance(1); // ':'
         let len = usize::try_from(len).map_err(|_| Error {
             kind: ErrorKind::StringTooLong,

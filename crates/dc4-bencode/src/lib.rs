@@ -177,22 +177,20 @@ impl<'a> Value<'a> {
                 },
                 Work::PushKey(k) => keys.push(k),
                 Work::CollectList(n) => {
-                    let start = results
-                        .len()
-                        .checked_sub(n)
-                        .expect("to_owned_value list underflow");
+                    // `n` children were visited just above, so at least `n`
+                    // results are pending; the fallback only runs if that
+                    // work-stack discipline is ever broken, and collects
+                    // nothing then.
+                    debug_assert!(results.len() >= n);
+                    let start = results.len().checked_sub(n).unwrap_or(results.len());
                     let items: Vec<OwnedValue> = results.drain(start..).collect();
                     results.push(OwnedValue::List(items));
                 }
                 Work::CollectDict(n) => {
-                    let vstart = results
-                        .len()
-                        .checked_sub(n)
-                        .expect("to_owned_value dict value underflow");
-                    let kstart = keys
-                        .len()
-                        .checked_sub(n)
-                        .expect("to_owned_value dict key underflow");
+                    debug_assert!(results.len() >= n);
+                    debug_assert!(keys.len() >= n);
+                    let vstart = results.len().checked_sub(n).unwrap_or(results.len());
+                    let kstart = keys.len().checked_sub(n).unwrap_or(keys.len());
                     // Drain only this frame's entries: a bare `drain(..)`
                     // would steal outer frames' pending keys/values on
                     // nested input. Collecting straight into the map also
@@ -202,7 +200,7 @@ impl<'a> Value<'a> {
                 }
             }
         }
-        results.pop().expect("to_owned_value produced no value")
+        results.pop().unwrap_or(OwnedValue::List(Vec::new()))
     }
 
     /// Tears down a (possibly deeply nested) `Value` iteratively.

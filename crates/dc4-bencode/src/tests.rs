@@ -55,10 +55,7 @@ fn invalid_strings() {
     assert_eq!(kind(b"04:spam"), ErrorKind::InvalidLength);
     assert_eq!(kind(b"5:spam"), ErrorKind::UnexpectedEof);
     assert_eq!(kind(b":"), ErrorKind::UnexpectedByte(b':'));
-    assert_eq!(
-        kind(b"99999999999999999999999:x"),
-        ErrorKind::StringTooLong
-    );
+    assert_eq!(kind(b"99999999999999999999999:x"), ErrorKind::StringTooLong);
     let small = Limits {
         max_string_len: 3,
         ..L
@@ -172,6 +169,9 @@ fn depth_limit_gates_scalars_at_every_level() {
         ErrorKind::TooDeep
     );
     assert!(decode(b"1:a", &one).is_ok());
+    // Keys are gated like values: a key sitting at the limit is TooDeep
+    // instead of being parsed past it.
+    assert_eq!(decode(b"d1:ae", &one).unwrap_err().kind, ErrorKind::TooDeep);
 }
 
 /// Dropping a deeply nested `Value` recurses in the compiler-generated drop
@@ -302,14 +302,8 @@ fn regression_f03_length_digit_overflow_is_string_too_long() {
     // F-03: huge length digits overflowing u64 report StringTooLong,
     // same as in-range huge lengths, so callers matching only
     // StringTooLong catch both.
-    assert_eq!(
-        kind(b"99999999999999999999999:x"),
-        ErrorKind::StringTooLong
-    );
-    assert_eq!(
-        kind(b"18446744073709551615:x"),
-        ErrorKind::StringTooLong
-    );
+    assert_eq!(kind(b"99999999999999999999999:x"), ErrorKind::StringTooLong);
+    assert_eq!(kind(b"18446744073709551615:x"), ErrorKind::StringTooLong);
     // Genuine integer overflow (i...e) still reports IntegerOverflow.
     assert_eq!(
         kind(b"i99999999999999999999999e"),
@@ -388,8 +382,22 @@ fn encoder_int_edge_cases_without_alloc() {
 fn decoder_single_peek_branches() {
     // One peek per loop iteration covering dict-close, list-close and
     // value dispatch.
-    assert!(decode(b"le", &Limits::KRPC).unwrap().as_list().unwrap().is_empty());
-    assert!(decode(b"de", &Limits::KRPC).unwrap().as_dict().unwrap().iter().next().is_none());
+    assert!(
+        decode(b"le", &Limits::KRPC)
+            .unwrap()
+            .as_list()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        decode(b"de", &Limits::KRPC)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .iter()
+            .next()
+            .is_none()
+    );
     let v = decode(b"d1:a1:b1:c1:de", &Limits::KRPC).unwrap();
     let d = v.as_dict().unwrap();
     assert_eq!(d.get_bytes(b"a"), Some(&b"b"[..]));
