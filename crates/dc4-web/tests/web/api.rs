@@ -50,12 +50,20 @@ async fn search_json_has_exactly_the_documented_fields() {
     let json = r.json();
     assert_eq!(
         keys(&json),
-        set(&["query", "page", "per_page", "total", "results"])
+        set(&[
+            "query",
+            "page",
+            "per_page",
+            "total",
+            "index_total",
+            "results"
+        ])
     );
     assert_eq!(json["query"], "example");
     assert_eq!(json["page"], 1);
     assert_eq!(json["per_page"], 3);
     assert_eq!(json["total"], 2);
+    assert_eq!(json["index_total"], 3);
     let results = json["results"].as_array().unwrap();
     // The hidden hit is skipped, and the total counts visible matches only.
     assert_eq!(results.len(), 2);

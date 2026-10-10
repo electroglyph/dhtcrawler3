@@ -86,7 +86,13 @@ struct ApiSearch<'a> {
     query: &'a str,
     page: u32,
     per_page: u32,
+    /// Visible matches on this page's basis: the index count minus hits
+    /// hidden on this page only, so it can differ between pages of one
+    /// query. Paginate with `index_total`, not this.
     total: u64,
+    /// The unadjusted index count; stable across pages and the basis for
+    /// fetching further pages.
+    index_total: u64,
     results: Vec<ApiTorrent>,
 }
 
@@ -133,6 +139,7 @@ pub(crate) async fn search<B: Backend>(
                 page,
                 per_page,
                 total: found.total,
+                index_total: found.index_total,
                 results: found
                     .torrents
                     .iter()

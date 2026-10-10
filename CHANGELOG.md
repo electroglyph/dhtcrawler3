@@ -24,6 +24,8 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 
 - Config: a dual-stack `[::]` listen address overlapping any same-port IPv4 address is rejected at validation instead of failing later as a runtime `EADDRINUSE`.
 
+- Web: the search API also returns the stable `index_total` next to the page-relative `total`, so clients can paginate without it shifting under them.
+
 ## 0.4.0
 
 - Fetch effort scales by estimate: unscraped (`None`) and measured-dead (`Some(0)`) keys get 3 dials and one lookup, `1–4` keeps today's 8 dials and one lookup, `>= 5` gets 8 dials plus one second lookup when the first drains — fan-out stays 3-wide for every bucket and the key deadline still bounds the pair, so per-key concurrency never exceeds today's. `dc4_fetch_dials_total{est}` counts started dials and `dc4_fetch_total` gains the same `est` (`null`/`dead`/`low`/`high`) label for the ok-per-dial gate; both use the claim-time estimate so dials and outcomes stay joinable.
