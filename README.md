@@ -663,7 +663,7 @@ cd ~/dhtcrawler4/deploy
   echo '### queue churn (compare two diag files for rates) ###'
   docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT relname, n_tup_ins, n_tup_upd, n_tup_hot_upd, n_dead_tup, last_autovacuum FROM pg_stat_user_tables WHERE relname IN ('"'"'pending'"'"','"'"'torrents'"'"');" -c "SELECT indexrelname, pg_size_pretty(pg_relation_size(indexrelid)) AS size, idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE relname = '"'"'pending'"'"';" -c "SELECT count(*) AS n, state, wait_event_type, wait_event, LEFT(query, 60) AS query FROM pg_stat_activity WHERE datname = current_database() GROUP BY 2, 3, 4, 5 ORDER BY 1 DESC LIMIT 8;"'
   echo '### queue age (dead queue vs junk discovery) ###'
-  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT min(first_seen_at) AS oldest, max(first_seen_at) AS newest, avg(attempts) AS avg_attempts FROM pending WHERE NOT gave_up;" -c "SELECT attempts, count(*) FROM pending WHERE NOT gave_up GROUP BY 1 ORDER BY 1 LIMIT 10;" -c "SELECT count(*) FILTER (WHERE seeders_est IS NULL) AS null_est, count(*) AS queued FROM pending WHERE NOT gave_up;"'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT min(discovered_at) AS oldest, max(discovered_at) AS newest, avg(attempts) AS avg_attempts FROM pending WHERE NOT gave_up;" -c "SELECT attempts, count(*) FROM pending WHERE NOT gave_up GROUP BY 1 ORDER BY 1 LIMIT 10;" -c "SELECT count(*) FILTER (WHERE seeders_est IS NULL) AS null_est, count(*) AS queued FROM pending WHERE NOT gave_up;"'
   echo '### crawl logs (last 500 lines) ###'
   echo -n 'pool timed out: '
   docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'pool timed out while waiting' || true
@@ -736,7 +736,7 @@ How to read the output:
   lines just mean no working IPv6 (expected when it is disabled on the
   host; harmless).
 - **Why is yield near zero?** The queue-age leg discriminates. Oldest
-  `first_seen_at` in weeks with attempts piled at max and `null_est`
+  `discovered_at` in weeks with attempts piled at max and `null_est`
   ≈ queued means a dead queue: the DHT correctly reports no peers for
   corpses, and the fix is admission/expiry, not fetch knobs. Everything
   young with attempts near 0 means junk discovery (e.g. polluted
