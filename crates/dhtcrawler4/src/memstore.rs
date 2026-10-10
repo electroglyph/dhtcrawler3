@@ -245,9 +245,10 @@ impl CrawlStore for MemoryStore {
             entry.0 = entry.0.saturating_add(u64::from(o.sightings));
             entry.1 |= o.priority;
         }
-        let full = i64::try_from(state.pending.values().filter(|p| !p.gave_up).count())
-            .unwrap_or(i64::MAX)
-            >= max_pending;
+        // Production counts every row, corpses included
+        // (`Store::pending_depth`); the stand-in must gate on the same
+        // number or tests never reproduce a corpse-jammed queue.
+        let full = i64::try_from(state.pending.len()).unwrap_or(i64::MAX) >= max_pending;
         let mut out = ObserveOutcome::default();
         let now = Instant::now();
         for (key, (n, priority)) in merged {
@@ -422,10 +423,10 @@ impl CrawlStore for MemoryStore {
     }
 
     async fn pending_depth(&self) -> Result<i64> {
-        Ok(
-            i64::try_from(self.lock().pending.values().filter(|p| !p.gave_up).count())
-                .unwrap_or(i64::MAX),
-        )
+        // Production counts corpses (`Store::pending_depth` documents it);
+        // counting only live rows here would let tests admit into a queue
+        // that production calls full.
+        Ok(i64::try_from(self.lock().pending.len()).unwrap_or(i64::MAX))
     }
 
     async fn claim_scrape_due(
@@ -848,17 +849,27 @@ mod tests {
         );
     }
 
+    /// Gave-up rows count toward the cap, like production: corpses jam
+    /// the queue until the purge removes them.
     #[tokio::test(start_paused = true)]
-    async fn gave_up_keys_do_not_fill_the_queue() {
+    async fn gave_up_keys_count_toward_the_cap_until_purged() {
         let s = MemoryStore::new();
         s.observe(&[obs(key(1), false), obs(key(2), false)], 10)
             .await
             .unwrap();
         assert!(s.give_up(&key(1)).await.unwrap());
         assert!(s.give_up(&key(2)).await.unwrap());
-        // Nothing claimable remains, so depth counts only live entries.
+        // Nothing claimable remains, but the corpses still count.
+        assert!(s.pending_keys().is_empty());
+        assert_eq!(s.pending_depth().await.unwrap(), 2);
+        // At the cap a new key is dropped, not queued.
+        let out = s.observe(&[obs(key(3), false)], 1).await.unwrap();
+        assert_eq!(out.queued, 0);
+        assert_eq!(out.dropped, 1);
+        assert_eq!(s.pending_depth().await.unwrap(), 2);
+        // The purge reopens the queue: corpses leave, the key is accepted.
+        assert_eq!(s.purge_gave_up(Duration::ZERO).await.unwrap(), 2);
         assert_eq!(s.pending_depth().await.unwrap(), 0);
-        // The queue must not look full: a new key is still accepted.
         let out = s.observe(&[obs(key(3), false)], 1).await.unwrap();
         assert_eq!(out.queued, 1);
         assert_eq!(out.dropped, 0);
