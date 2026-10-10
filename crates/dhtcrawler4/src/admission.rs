@@ -1293,6 +1293,26 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn shed_flag_keeps_prior_value_when_depth_poll_fails() {
+        let store = MemoryStore::new();
+        let mut a = admission(&store, PeerFilter::PRODUCTION);
+        let own = OwnAddrs::default();
+        let now = Instant::now();
+        // A failed poll keeps the flag either way and never fails the flush:
+        // the batch still writes.
+        a.shed_sampler = true;
+        store.fail_next_depths(1);
+        a.handle(event(key(1), Source::Announce, "1.2.3.4", None), &own, now);
+        a.flush(None, None).await.unwrap();
+        assert!(a.shed_sampler);
+        assert_eq!(store.pending_keys(), vec![key(1)]);
+        a.shed_sampler = false;
+        store.fail_next_depths(1);
+        a.flush(None, None).await.unwrap();
+        assert!(!a.shed_sampler);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn source_counts_reset_with_the_generation() {
         let store = MemoryStore::new();
         let mut a = admission(&store, PeerFilter::PRODUCTION);

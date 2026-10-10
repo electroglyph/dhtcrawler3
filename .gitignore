@@ -1,4 +1,5 @@
 /target
+/update.md
 /audit*.md
 /cache.md
 **/fuzz/target

@@ -49,6 +49,7 @@ struct State {
     failing_completes: usize,
     failing_removals: usize,
     failing_batches: usize,
+    failing_depths: usize,
     renewals: usize,
     fails: HashMap<DhtKey, u32>,
     /// `None` means [`MEMORY_FAIL_BACKOFF`].
@@ -213,6 +214,12 @@ impl MemoryStore {
     /// so workers exercise their one-key-at-a-time path.
     pub fn fail_next_batches(&self, n: usize) {
         self.lock().failing_batches = n;
+    }
+
+    /// Makes the next `n` `pending_depth` calls fail (as if the database
+    /// hiccuped mid-read). Admission keeps its prior shed flag.
+    pub fn fail_next_depths(&self, n: usize) {
+        self.lock().failing_depths = n;
     }
 
     /// Number of successful lease renewals.
@@ -444,7 +451,12 @@ impl CrawlStore for MemoryStore {
         // Production counts corpses (`Store::pending_depth` documents it);
         // counting only live rows here would let tests admit into a queue
         // that production calls full.
-        Ok(i64::try_from(self.lock().pending.len()).unwrap_or(i64::MAX))
+        let mut state = self.lock();
+        if state.failing_depths > 0 {
+            state.failing_depths = state.failing_depths.saturating_sub(1);
+            return Err(StoreError::Invalid("injected depth failure".into()));
+        }
+        Ok(i64::try_from(state.pending.len()).unwrap_or(i64::MAX))
     }
 
     async fn claim_scrape_due(
