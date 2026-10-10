@@ -76,6 +76,13 @@ async fn idle_timeout(store: &Store) -> String {
         .unwrap()
 }
 
+async fn sync_commit(store: &Store) -> String {
+    sqlx::query_scalar("SHOW synchronous_commit")
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn roles_have_least_privilege() {
     let Some(urls) = urls() else {
@@ -114,6 +121,12 @@ async fn roles_have_least_privilege() {
     let web = Store::connect(&urls.web, 2).await.unwrap();
     for store in [&owner, &crawler, &indexer, &web] {
         assert_eq!(idle_timeout(store).await, "1min");
+    }
+    // Queue churn tuning: the crawler commits asynchronously (its queue is
+    // lease-healed); every other role keeps full durability.
+    assert_eq!(sync_commit(&crawler).await, "off");
+    for store in [&owner, &indexer, &web] {
+        assert_eq!(sync_commit(store).await, "on");
     }
 
     // --- crawler: the whole pipeline works.

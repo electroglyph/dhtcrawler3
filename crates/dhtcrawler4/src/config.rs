@@ -1170,6 +1170,9 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = include_str!("../../../deploy/config/dhtcrawler4.toml");
+    const COMPOSE: &str = include_str!("../../../deploy/docker-compose.yml");
+    const ROLES_SH: &str = include_str!("../../../deploy/postgres/init/10-roles.sh");
+    const README: &str = include_str!("../../../README.md");
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         pairs
@@ -1212,6 +1215,47 @@ mod tests {
             Path::new("/run/secrets/dc3_web_password")
         );
         assert_eq!(parsed.credentials(DbRole::Main).0, "dc3_crawler");
+    }
+
+    #[test]
+    fn deploy_queue_tuning_pins() {
+        // Part 2 of the db churn plan: bigger checkpoints on the db command,
+        // async commits for the crawler role only, and a README pool bullet
+        // that matches the compose pool instead of the stale 96.
+        for needle in [
+            "max_connections=200",
+            "checkpoint_timeout=900",
+            "max_wal_size=4GB",
+            "DC3_DATABASE__MAX_CONNECTIONS: \"128\"",
+        ] {
+            assert!(COMPOSE.contains(needle), "compose lost {needle}");
+        }
+        assert!(
+            ROLES_SH.contains("ALTER ROLE dc3_crawler SET synchronous_commit = off;"),
+            "crawler async-commit setting missing from 10-roles.sh"
+        );
+        assert!(
+            ROLES_SH.contains("ALTER ROLE dc3_crawler CONNECTION LIMIT 200;"),
+            "crawler connection limit moved in 10-roles.sh"
+        );
+        for role in ["dc3_indexer", "dc3_web"] {
+            assert!(
+                !ROLES_SH.contains(&format!("{role} SET synchronous_commit")),
+                "{role} must keep full durability"
+            );
+        }
+        for needle in [
+            "compose sets 128",
+            "synchronous_commit = off",
+            "checkpoint_timeout=900",
+            "max_wal_size=4GB",
+        ] {
+            assert!(README.contains(needle), "readme pool bullet lost {needle}");
+        }
+        assert!(
+            !README.contains("compose sets 96"),
+            "stale compose pool size is back in the readme"
+        );
     }
 
     #[test]

@@ -517,8 +517,15 @@ docker compose ps                     # includes healthcheck status
   port).
 - **Database pool pressure:** `dc3_db_pool_size` vs `dc3_db_pool_idle` on the
   crawl role. Idle pinned near zero means the pool is saturated — raise
-  `DC3_DATABASE__MAX_CONNECTIONS` (compose sets 96) and PostgreSQL's
+  `DC3_DATABASE__MAX_CONNECTIONS` (compose sets 128) and PostgreSQL's
   `max_connections` (compose sets 200) together, never just one side.
+  Queue write churn is already tamed where it matters: the crawler commits
+  asynchronously (`ALTER ROLE dc3_crawler SET synchronous_commit = off` in
+  `deploy/postgres/init/10-roles.sh` — run it once by hand on an existing
+  database, new installs get it automatically) and checkpoints are bigger
+  (`checkpoint_timeout=900`, `max_wal_size=4GB` on the `db` command).
+  Expect fewer fsyncs and checkpoints at equal fetch throughput, not
+  proportionally fewer WAL bytes.
 - **Totals:** `docker compose exec crawl stats` (the image bakes in the
   binary and config path, so only the subcommand is needed)
 - **Config check (prints config without secrets):** same with

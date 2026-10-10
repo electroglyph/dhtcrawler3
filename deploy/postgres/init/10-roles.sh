@@ -77,6 +77,14 @@ ALTER ROLE dc3_crawler SET idle_in_transaction_session_timeout = '60s';
 ALTER ROLE dc3_indexer SET idle_in_transaction_session_timeout = '60s';
 ALTER ROLE dc3_web     SET idle_in_transaction_session_timeout = '60s';
 
+-- The crawl queue is self-healing: every claim holds a 120 s lease and an
+-- uncommitted batch is reclaimed on expiry, so losing ~200 ms of recent
+-- crawler commits (one WAL-writer window) on a crash only re-fetches those
+-- keys. Asynchronous commits cut fsyncs/IOPS (not WAL bytes) on the
+-- write-hot queue. Crawler only: the indexer and web keep full durability,
+-- and a cluster-wide setting stays rejected.
+ALTER ROLE dc3_crawler SET synchronous_commit = off;
+
 CREATE DATABASE dc3 OWNER dc3_owner ENCODING 'UTF8' TEMPLATE template0;
 REVOKE ALL ON DATABASE dc3 FROM PUBLIC;
 GRANT CONNECT ON DATABASE dc3 TO dc3_crawler, dc3_indexer, dc3_web;
