@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::admission::{Admission, AdmissionTuning, DISCOVERED_CHANNEL_CAPACITY, shared_hints};
 use crate::config::{Config, ConfigError};
-use crate::fetch::{FetchLimitsConfig, FetchTuning, Fetcher};
+use crate::fetch::{FetchLimitsConfig, FetchTuning, Fetcher, claim_channel};
 use crate::peers::PeerFilter;
 use crate::scrape::{ScrapeTuning, Scraper};
 use crate::stores::CrawlStore;
@@ -196,8 +196,14 @@ impl Crawler {
             opts.fetch,
         ));
         let mut workers = JoinSet::new();
+        // One bulk claim per 512 keys instead of one 8-key scan per worker:
+        // the claimer feeds batches over a bounded channel (256 batches =
+        // 2048 keys) and a full channel backpressures it. The claimer joins
+        // the same set, so its panic fails the role loudly like any worker's.
+        let (claim_tx, claim_rx) = claim_channel();
+        workers.spawn(Arc::clone(&fetcher).run_claimer(claim_tx, stop.clone()));
         for _ in 0..opts.fetch_workers {
-            workers.spawn(Arc::clone(&fetcher).run_worker(stop.clone()));
+            workers.spawn(Arc::clone(&fetcher).run_worker(Arc::clone(&claim_rx), stop.clone()));
         }
         let scraper = Arc::new(Scraper::new(
             store.clone(),

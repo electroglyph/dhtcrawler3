@@ -41,6 +41,7 @@ struct State {
     next_id: i64,
     observe_calls: usize,
     observed: Vec<Observation>,
+    claim_calls: usize,
     failing_observes: usize,
     failing_completes: usize,
     failing_removals: usize,
@@ -174,6 +175,12 @@ impl MemoryStore {
         self.lock().observe_calls
     }
 
+    /// Number of `claim` calls. The single claimer is the only caller in
+    /// production, so this bounds its scan rate (no claim storm).
+    pub fn claim_calls(&self) -> usize {
+        self.lock().claim_calls
+    }
+
     /// Every observation of every successful `observe` call, in order.
     pub fn observed(&self) -> Vec<Observation> {
         self.lock().observed.clone()
@@ -272,6 +279,10 @@ impl CrawlStore for MemoryStore {
     }
 
     async fn claim(&self, n: i64, lease: Duration) -> Result<Vec<PendingItem>> {
+        {
+            let mut state = self.lock();
+            state.claim_calls = state.claim_calls.saturating_add(1);
+        }
         let mut state = self.lock();
         let now = Instant::now();
         let limit = usize::try_from(n.max(0)).unwrap_or(0);

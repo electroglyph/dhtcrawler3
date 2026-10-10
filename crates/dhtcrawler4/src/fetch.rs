@@ -1,9 +1,12 @@
 //! Fetch workers (design §13): claim a key, find peers, fetch its metadata
 //! over BEP 9, verify and parse it, and store the result.
 //!
-//! Each worker:
-//! 1. claims up to 8 keys with a 120 s lease, renewed in the background
-//!    while the batch is worked (a full batch can outlive the lease);
+//! One claimer bulk-claims up to 512 due keys per scan, slices each scan
+//! into batches of up to 8, and feeds the workers over a bounded channel
+//! (256 batches = 2048 keys); a full channel backpressures the claimer, so
+//! there is one bound and no outstanding counter to drift. Each worker:
+//! 1. receives one batch (keys carry a 120 s lease, renewed in the background
+//!    while the batch is worked — a full batch can outlive the lease);
 //! 2. collects peers from the hint map and `get_peers` (6 s), each passing
 //!    the address chokepoint and the per-destination limits;
 //! 3. tries up to 8 peers, 3 at a time, inside the global connection limit
@@ -24,7 +27,7 @@ use dc3_peer::{BYTE_BUDGET_UNIT, FetchError, FetchLimits};
 use dc3_store::{FileRow, NewTorrent, PendingItem, StoreError};
 use dc3_torrent::TorrentMeta;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -34,6 +37,17 @@ use crate::stores::CrawlStore;
 
 /// Queue items claimed at a time by one worker.
 pub const CLAIM_BATCH: i64 = 8;
+/// Keys per bulk scan by the single claimer. One scan per 512 keys replaces
+/// 64 per-worker scans, so the ~47k-tuple prefix walk runs ~1.5/s instead of
+/// ~95/s. Within `MAX_CLAIM`, so no store change is needed.
+pub const CLAIM_BULK: i64 = 512;
+/// Claim-channel capacity in batches (`CLAIM_CHAN_BATCHES` × `CLAIM_BATCH`
+/// = 2048 keys). The only bound in the design: a full channel backpressures
+/// the claimer via `send`. Worst-case buffer dwell is 2048 keys of work
+/// (~2.7 s at 758 keys/s, ~3.4 s counting the in-hand bulk), two orders of
+/// magnitude inside the 120 s lease — and a full drain fits the 30 s
+/// shutdown wait the same way.
+pub const CLAIM_CHAN_BATCHES: usize = 256;
 /// Lease on a claimed key.
 pub const CLAIM_LEASE: Duration = Duration::from_secs(120);
 /// How often a lease is renewed while its key is being worked on.
@@ -77,6 +91,28 @@ const MIN_RENEW_INTERVAL: Duration = Duration::from_millis(10);
 
 const METRIC_FETCH: &str = "dc3_fetch_total";
 const METRIC_DESTINATION_SKIPPED: &str = "dc3_destination_skipped_total";
+const METRIC_CLAIM_CHAN_DEPTH: &str = "dc3_claim_chan_depth";
+
+/// The claim channel's receiving end, shared by every fetch worker. The
+/// mutex serialises only the handoff: a worker holds it while waiting for
+/// the next batch, never while fetching or storing.
+pub type ClaimRx = std::sync::Arc<tokio::sync::Mutex<mpsc::Receiver<Vec<PendingItem>>>>;
+
+/// The claim channel from the single claimer to the workers
+/// ([`CLAIM_CHAN_BATCHES`] batches). Senders backpressure when it is full;
+/// receivers see `None` once the claimer is gone and it is drained.
+pub fn claim_channel() -> (mpsc::Sender<Vec<PendingItem>>, ClaimRx) {
+    let (tx, rx) = mpsc::channel(CLAIM_CHAN_BATCHES);
+    (tx, std::sync::Arc::new(tokio::sync::Mutex::new(rx)))
+}
+
+/// Batches waiting in the claim channel, read sender-side. `Sender` has no
+/// `len()` (only the receiver does), but `max_capacity() - capacity()` is
+/// the same number; a racing `send` moves it by ±1 at most, immaterial for
+/// a depth gauge.
+fn claim_chan_depth(tx: &mpsc::Sender<Vec<PendingItem>>) -> usize {
+    tx.max_capacity().saturating_sub(tx.capacity())
+}
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -847,32 +883,97 @@ impl<S: CrawlStore, P: PeerSource> Fetcher<S, P> {
         }
     }
 
-    /// One worker: claims and processes keys until `stop` fires. A key
-    /// already claimed is finished first.
-    pub async fn run_worker(self: Arc<Self>, stop: CancellationToken) {
+    /// The single claimer: bulk-claims [`CLAIM_BULK`] keys per scan, slices
+    /// each scan into [`CLAIM_BATCH`] batches, and feeds the workers. A full
+    /// channel blocks `send`, which is the backpressure — there is no
+    /// separate outstanding counter to drift. Each bulk scan is
+    /// attempts-first ordered and the channel is FIFO, so order holds within
+    /// a scan; across scans, keys that become due while the buffer is full
+    /// wait behind at most 2048 already-claimed keys (~2.7 s of work).
+    ///
+    /// Stopping drops `tx`: workers drain what is buffered, then exit.
+    /// Scans already claimed but never sent keep their leases, which expire
+    /// in at most the lease — identical to crash semantics today. There is
+    /// deliberately no renewal guard here: the worst-case dwell (~2.7 s,
+    /// ~3.4 s counting the in-hand bulk) never reaches the first 90 s
+    /// renewal tick, so it could never fire. Batch guards cover keys from
+    /// dispense onward, unchanged.
+    pub async fn run_claimer(
+        self: Arc<Self>,
+        tx: mpsc::Sender<Vec<PendingItem>>,
+        stop: CancellationToken,
+    ) {
         let base = self.tuning.store_retry_base;
         let mut backoff = base;
-        while !stop.is_cancelled() {
-            let pause = match self.store.claim(CLAIM_BATCH, self.tuning.lease).await {
+        metrics::gauge!(METRIC_CLAIM_CHAN_DEPTH).set(0.0);
+        'outer: loop {
+            if stop.is_cancelled() {
+                break;
+            }
+            metrics::gauge!(METRIC_CLAIM_CHAN_DEPTH).set(claim_chan_depth(&tx) as f64);
+            match self.store.claim(CLAIM_BULK, self.tuning.lease).await {
                 Ok(items) if items.is_empty() => {
                     backoff = base;
-                    self.idle_pause()
+                    let pause = self.idle_pause();
+                    tokio::select! {
+                        () = stop.cancelled() => break 'outer,
+                        () = tokio::time::sleep(pause) => {}
+                    }
                 }
                 Ok(items) => {
                     backoff = base;
-                    self.process_batch(&items).await;
-                    continue;
+                    let batch_size = usize::try_from(CLAIM_BATCH).unwrap_or(usize::MAX).max(1);
+                    for chunk in items.chunks(batch_size) {
+                        let batch = chunk.to_vec();
+                        tokio::select! {
+                            () = stop.cancelled() => break 'outer,
+                            res = tx.send(batch) => {
+                                if res.is_err() {
+                                    // Every worker is gone; nothing will ever
+                                    // drain the channel again.
+                                    break 'outer;
+                                }
+                            }
+                        }
+                        metrics::gauge!(METRIC_CLAIM_CHAN_DEPTH).set(claim_chan_depth(&tx) as f64);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "claiming queue items failed");
                     let pause = backoff;
                     backoff = backoff.saturating_mul(2).min(self.tuning.store_retry_max);
-                    pause
+                    tokio::select! {
+                        () = stop.cancelled() => break 'outer,
+                        () = tokio::time::sleep(pause) => {}
+                    }
                 }
+            }
+        }
+    }
+
+    /// One worker: processes batches from the claim channel until `stop`
+    /// fires and the channel is drained. A batch already received is
+    /// finished first. When the claimer is gone and the channel is empty,
+    /// the worker exits — the claimer only exits on `stop` (or when no
+    /// worker can receive), so this is the shutdown path, and a panicked
+    /// claimer still fails the role through the shared `JoinSet`.
+    pub async fn run_worker(self: Arc<Self>, rx: ClaimRx, stop: CancellationToken) {
+        loop {
+            let batch = tokio::select! {
+                biased;
+                () = stop.cancelled() => {
+                    // Drain-then-break: what is left buffered is seconds of
+                    // work, far inside the shutdown wait, and every batch
+                    // taken here is finished first below.
+                    rx.lock().await.try_recv().ok()
+                }
+                batch = async { rx.lock().await.recv().await } => batch,
             };
-            tokio::select! {
-                () = stop.cancelled() => break,
-                () = tokio::time::sleep(pause) => {}
+            match batch {
+                Some(batch) => {
+                    self.process_batch(&batch).await;
+                }
+                None => break,
             }
         }
     }
@@ -1650,6 +1751,251 @@ mod tests {
         }
     }
 
+    #[test]
+    fn claim_channel_sizing() {
+        // The single bound: 256 batches of up to 8 keys = 2048 keys, and a
+        // bulk scan of 512 fits the store's 10 000-claim ceiling.
+        assert_eq!(CLAIM_BULK, 512);
+        const {
+            assert!(CLAIM_BULK < dc3_store::MAX_CLAIM);
+        }
+        assert_eq!(CLAIM_CHAN_BATCHES, 256);
+        assert_eq!(CLAIM_CHAN_BATCHES as i64 * CLAIM_BATCH, 2048);
+    }
+
+    #[tokio::test]
+    async fn claim_channel_depth_reports_buffered_batches() {
+        let (tx, rx) = claim_channel();
+        assert_eq!(claim_chan_depth(&tx), 0);
+        for _ in 0..3 {
+            tx.send(vec![item(DhtKey([1; 20]))]).await.unwrap();
+        }
+        assert_eq!(claim_chan_depth(&tx), 3);
+        rx.lock().await.recv().await.unwrap();
+        assert_eq!(claim_chan_depth(&tx), 2);
+    }
+
+    /// Distinct keys `0..n` packed into 20 bytes.
+    fn many_keys(n: u16) -> Vec<DhtKey> {
+        (0..n)
+            .map(|i| {
+                let mut b = [9u8; 20];
+                b[0] = (i & 0xff) as u8;
+                b[1] = (i >> 8) as u8;
+                DhtKey(b)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn claimer_feeds_every_key_exactly_once() {
+        // 1200 keys over an 8-batch channel: several bulk scans under real
+        // backpressure, 8 recorders racing the handoff. Delivery must be a
+        // permutation of the queue: no loss, no duplicate.
+        let keys = many_keys(1200);
+        let store = MemoryStore::new();
+        for k in &keys {
+            store.enqueue(*k);
+        }
+        let f = fetcher(&store, FixedPeers(Vec::new()));
+        let (tx, rx) = {
+            let (tx, raw) = mpsc::channel(8);
+            (tx, Arc::new(tokio::sync::Mutex::new(raw)))
+        };
+        let stop = CancellationToken::new();
+        let claimer = tokio::spawn(Arc::clone(&f).run_claimer(tx, stop.clone()));
+        let seen: Arc<Mutex<Vec<DhtKey>>> = Arc::default();
+        let mut recorders = Vec::new();
+        for _ in 0..8 {
+            let rx = Arc::clone(&rx);
+            let seen = Arc::clone(&seen);
+            recorders.push(tokio::spawn(async move {
+                while let Some(batch) = rx.lock().await.recv().await {
+                    lock(&seen).extend(batch.iter().map(|p| p.dht_key));
+                }
+            }));
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if lock(&seen).len() >= keys.len() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {} of {} keys delivered",
+                lock(&seen).len(),
+                keys.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), claimer)
+            .await
+            .unwrap()
+            .unwrap();
+        for r in recorders {
+            tokio::time::timeout(Duration::from_secs(5), r)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let mut got = lock(&seen).clone();
+        got.sort();
+        let mut want = keys.clone();
+        want.sort();
+        assert_eq!(got, want, "every queued key delivered exactly once");
+        // Three bulk scans cover 1200 keys; anything more is idle re-scans
+        // of an empty (all leased) queue, never duplicate delivery.
+        assert!(store.claim_calls() >= 3, "claims: {}", store.claim_calls());
+    }
+
+    #[tokio::test]
+    async fn claimer_workers_match_one_by_one_outcomes() {
+        // The same 4-key setup as `process_batch_matches_process`, driven
+        // through the claim channel instead of direct calls: the end state
+        // must match one-by-one `process()`.
+        let first = info_dict("batch one", &["a.txt"], false);
+        let second = info_dict("batch two", &["b.txt"], false);
+        let private = info_dict("batch private", &["c.txt"], true);
+        let seeders = [
+            seeder(&first).await,
+            seeder(&second).await,
+            seeder(&private).await,
+        ];
+        let peers = FixedPeers(seeders.to_vec());
+        let keys = [
+            key_of(&first),
+            key_of(&second),
+            key_of(&private),
+            DhtKey([77; 20]),
+        ];
+        let store = MemoryStore::new();
+        for k in &keys {
+            store.enqueue(*k);
+        }
+        let f = fetcher(&store, peers);
+        let stop = CancellationToken::new();
+        let (tx, rx) = claim_channel();
+        let claimer = tokio::spawn(Arc::clone(&f).run_claimer(tx, stop.clone()));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            workers.push(tokio::spawn(
+                Arc::clone(&f).run_worker(Arc::clone(&rx), stop.clone()),
+            ));
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let done = store.torrent(&keys[0]).is_some()
+                && store.torrent(&keys[1]).is_some()
+                && store.pending_keys() == vec![keys[3]];
+            if done {
+                break;
+            }
+            assert!(Instant::now() < deadline, "workers did not finish");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        for (k, name) in [(keys[0], "batch one"), (keys[1], "batch two")] {
+            let stored = store.torrent(&k).unwrap();
+            assert_eq!(stored.name, name);
+        }
+        assert!(store.torrent(&keys[2]).is_none());
+        assert_eq!(store.failures(&keys[3]), 1);
+        stop.cancel();
+        for w in workers {
+            tokio::time::timeout(Duration::from_secs(5), w)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), claimer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_mid_run_leaves_no_stuck_keys() {
+        // 48 keys, a 4-batch channel, no workers: the claimer parks on send
+        // backpressure with an in-hand bulk, then `stop` drops everything
+        // buffered — like a crash. After the 2 s leases expire every key
+        // must be reclaimable: nothing is stuck.
+        let keys: Vec<DhtKey> = (0..48u8).map(|i| DhtKey([i; 20])).collect();
+        let store = MemoryStore::new();
+        for k in &keys {
+            store.enqueue(*k);
+        }
+        let tuning = FetchTuning {
+            lease: Duration::from_secs(2),
+            idle_min: Duration::from_millis(1),
+            idle_max: Duration::from_millis(2),
+            ..test_tuning()
+        };
+        let f = fetcher_with(&store, FixedPeers(Vec::new()), tuning);
+        let (tx, rx) = {
+            let (tx, raw) = mpsc::channel(4);
+            (tx, Arc::new(tokio::sync::Mutex::new(raw)))
+        };
+        let stop = CancellationToken::new();
+        let claimer = tokio::spawn(Arc::clone(&f).run_claimer(tx, stop.clone()));
+        // One scan of 48 keys, then parked on the full channel: no second
+        // scan, no spin.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), claimer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.claim_calls(), 1);
+        drop(rx);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let again = store.claim(48, Duration::from_secs(60)).await.unwrap();
+        assert_eq!(again.len(), 48, "every key reclaimable after expiry");
+        let mut got: Vec<DhtKey> = again.iter().map(|p| p.dht_key).collect();
+        got.sort();
+        let mut want = keys.clone();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn empty_queue_bounds_claim_rate_and_parks_workers() {
+        // No keys: the claimer's idle cadence (20–40 ms) is the only claim
+        // rate, and the workers sit in `recv` making no progress.
+        let store = MemoryStore::new();
+        let f = fetcher(&store, FixedPeers(Vec::new()));
+        let stop = CancellationToken::new();
+        let (tx, rx) = claim_channel();
+        let claimer = tokio::spawn(Arc::clone(&f).run_claimer(tx, stop.clone()));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            workers.push(tokio::spawn(
+                Arc::clone(&f).run_worker(Arc::clone(&rx), stop.clone()),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // A spinning claimer would scan thousands of times; the idle cadence
+        // gives a handful (first scan immediate, then one per 20–40 ms).
+        let calls = store.claim_calls();
+        assert!(calls >= 1, "the claimer never scanned");
+        assert!(calls <= 10, "claim storm on an empty queue: {calls} scans");
+        assert_eq!(store.torrent_count(), 0);
+        assert!(!claimer.is_finished(), "the claimer must park, not exit");
+        for w in &workers {
+            assert!(!w.is_finished(), "a worker must park, not exit");
+        }
+        stop.cancel();
+        for w in workers {
+            tokio::time::timeout(Duration::from_secs(5), w)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), claimer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn unusable_verified_metadata_gives_up_at_once() {
         let store = MemoryStore::new();
@@ -1703,7 +2049,9 @@ mod tests {
         lock(&f.hints).add(k, addr, Instant::now());
         store.enqueue(k);
         let stop = CancellationToken::new();
-        let worker = tokio::spawn(Arc::clone(&f).run_worker(stop.clone()));
+        let (tx, rx) = claim_channel();
+        let claimer = tokio::spawn(Arc::clone(&f).run_claimer(tx, stop.clone()));
+        let worker = tokio::spawn(Arc::clone(&f).run_worker(rx, stop.clone()));
         let deadline = Instant::now() + Duration::from_secs(10);
         while store.torrent(&k).is_none() {
             assert!(
@@ -1714,6 +2062,10 @@ mod tests {
         }
         stop.cancel();
         tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), claimer)
             .await
             .unwrap()
             .unwrap();
