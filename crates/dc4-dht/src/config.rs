@@ -112,9 +112,9 @@ impl DhtConfig {
                 "scrape_packets_per_sec must be at least 1".into(),
             ));
         }
-        if self.sampler_concurrency > MAX_SAMPLER_CONCURRENCY {
+        if self.sampler_concurrency == 0 || self.sampler_concurrency > MAX_SAMPLER_CONCURRENCY {
             return Err(Error::Config(format!(
-                "sampler_concurrency must be at most {MAX_SAMPLER_CONCURRENCY}"
+                "sampler_concurrency must be between 1 and {MAX_SAMPLER_CONCURRENCY}"
             )));
         }
         self.tuning.validate()
@@ -426,6 +426,10 @@ mod tests {
             },
             DhtConfig {
                 sampler_concurrency: MAX_SAMPLER_CONCURRENCY + 1,
+                ..DhtConfig::default()
+            },
+            DhtConfig {
+                sampler_concurrency: 0,
                 ..DhtConfig::default()
             },
             tuned(DhtTuning {
