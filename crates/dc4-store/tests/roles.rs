@@ -165,7 +165,54 @@ async fn roles_have_least_privilege() {
     assert!(crawler.give_up(&bad).await.unwrap());
     crawler.purge_gave_up(Duration::from_secs(1)).await.unwrap();
     crawler.observe(&[obs(k, 1, false)], 1_000).await.unwrap();
-    must_deny(&crawler, "DELETE FROM torrents").await;
+    // Purge duty: the crawler hard-deletes old tombstones through
+    // `purge_tombstoned` (granted by the migrations because the sweep
+    // needs it), so a blanket DELETE denial would break the pipeline.
+    // Least privilege still holds: anything beyond the pipeline SQL is
+    // denied. A separate torrent is purged so the assertions below still
+    // see the completed one.
+    let purge_key = DhtKey([70; 20]);
+    crawler
+        .observe(&[obs(purge_key, 1, false)], 1_000)
+        .await
+        .unwrap();
+    let claimed = crawler.claim(10, Duration::from_secs(60)).await.unwrap();
+    assert!(claimed.iter().any(|c| c.dht_key == purge_key));
+    let purge_torrent = NewTorrent {
+        dht_key: purge_key,
+        info_hash_v1: Some(purge_key),
+        info_hash_v2: None,
+        name: "purge me".into(),
+        total_size: 1,
+        file_count: 1,
+        files: vec![FileRow {
+            path: "f".into(),
+            size: 1,
+        }],
+        files_truncated: false,
+        piece_length: Some(16384),
+    };
+    let purge_id = crawler.complete(&purge_key, &purge_torrent).await.unwrap();
+    let snap = crawler
+        .claim_scrape_due(
+            10,
+            Duration::from_secs(7 * 86400),
+            Duration::from_secs(30 * 86400),
+        )
+        .await
+        .unwrap();
+    let item = snap.iter().find(|c| c.id == purge_id).unwrap().clone();
+    assert!(
+        crawler
+            .tombstone_dead(purge_id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        crawler.purge_tombstoned(Duration::ZERO, 10).await.unwrap(),
+        1
+    );
+    must_deny(&crawler, "TRUNCATE torrents").await;
     must_allow(
         &crawler,
         "UPDATE torrents SET seen_count = seen_count WHERE false",
@@ -198,7 +245,9 @@ async fn roles_have_least_privilege() {
     assert!(web.get_by_key(&AnyKey::V1OrDht(k)).await.unwrap().is_some());
     assert_eq!(web.get_many(&[id]).await.unwrap().len(), 1);
     let stats = web.public_stats().await.unwrap();
-    assert_eq!((stats.torrents, stats.added_today), (1, 1));
+    // One torrent visible (the purged one is gone); two completed today
+    // (the purge-duty torrent above plus the completed one).
+    assert_eq!((stats.torrents, stats.added_today), (1, 2));
     web.daily_stats(7).await.unwrap();
     assert_denied("web stats", web.stats().await);
 
