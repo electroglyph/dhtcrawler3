@@ -655,11 +655,20 @@ cd ~/dhtcrawler4/deploy
   # mountpoint it reports instead:
   # docker volume inspect dhtcrawler4_pgdata --format '{{.Mountpoint}}'
   echo '### database ###'
-  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT * FROM stats_daily ORDER BY day DESC LIMIT 3;" -c "SELECT count(*) AS torrents FROM torrents;" -c "SELECT count(*) FILTER (WHERE NOT gave_up) AS queued, count(*) FILTER (WHERE gave_up) AS gave_up FROM pending;" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS size FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 6;"'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT * FROM stats_daily ORDER BY day DESC LIMIT 3;" -c "SELECT count(*) AS torrents FROM torrents;" -c "SELECT count(*) FILTER (WHERE NOT gave_up) AS queued, count(*) FILTER (WHERE gave_up) AS gave_up FROM pending;" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;" -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS size FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 6;" -c "SELECT now() - pg_postmaster_start_time() AS postmaster_uptime;"'
 
   echo '\di pending*' | docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3'
+  echo '### database settings (source shows where each is set) ###'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT name, setting, unit, source FROM pg_settings WHERE name IN ('"'"'synchronous_commit'"'"','"'"'checkpoint_timeout'"'"','"'"'max_wal_size'"'"','"'"'wal_writer_delay'"'"');" -c "SELECT rolname, unnest(rolconfig) AS setting FROM pg_roles WHERE rolname LIKE '"'"'dc3%'"'"';" -c "SELECT num_timed, num_requested, buffers_written, write_time, sync_time FROM pg_stat_checkpointer;" -c "SELECT wal_records, wal_fpi, pg_size_pretty(wal_bytes::bigint) AS wal_bytes FROM pg_stat_wal;"'
+  echo '### queue churn (compare two diag files for rates) ###'
+  docker compose exec -T db sh -c 'PGPASSWORD=$(cat /run/secrets/pg_superuser_password) psql -U postgres -d dc3 -c "SELECT relname, n_tup_ins, n_tup_upd, n_tup_hot_upd, n_dead_tup, last_autovacuum FROM pg_stat_user_tables WHERE relname IN ('"'"'pending'"'"','"'"'torrents'"'"');" -c "SELECT indexrelname, pg_size_pretty(pg_relation_size(indexrelid)) AS size, idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE relname = '"'"'pending'"'"';" -c "SELECT count(*) AS n, state, wait_event_type, wait_event, LEFT(query, 60) AS query FROM pg_stat_activity WHERE datname = current_database() GROUP BY 2, 3, 4, 5 ORDER BY 1 DESC LIMIT 8;"'
+  echo '### crawl logs (last 500 lines) ###'
+  echo -n 'pool timed out: '
+  docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'pool timed out while waiting' || true
+  echo -n 'claim failures: '
+  docker compose logs --tail=500 crawl 2>/dev/null | grep -c 'claiming queue items failed' || true
   echo '### crawl metrics ###'
-  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_(fetch_total|queue_depth|db_pool_size|db_pool_idle)|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total)" <&3'
+  docker compose exec -T db bash -c 'exec 3<>/dev/tcp/crawl/9100 && printf "GET /metrics HTTP/1.0\r\nHost: crawl\r\n\r\n" >&3 && grep -E "^dc3_(fetch_total|queue_depth|db_pool_size|db_pool_idle|claim_chan_depth)|^dc3_dht_(routing_nodes|good_nodes|samples_total|timeouts_total|queries_received_total)" <&3'
 } 2>&1 | tee /tmp/dc3-diag.txt
 ```
 
@@ -687,14 +696,35 @@ How to read the output:
   after a restart, workers have not finished a single key — the stall is
   upstream of fetching (pool, DB), not the DHT; see the pool bullet.
 - **Crawl logs full of `pool timed out`?** The DB cannot serve the pool:
-  `dc3_db_pool_idle` pinned at zero confirms it. Usual cause is one slow
-  query holding every connection — historically the fetch claim sorting
+  `dc3_db_pool_idle` pinned at zero confirms it, and the snippet's log
+  counts say it outright. Usual cause is one slow query holding every connection — historically the fetch claim sorting
   millions of rows for want of its index (fixed by migration
   `000010_pending_claim`; the `\di pending*` leg proves it is applied).
-  Confirm with what the backends are doing:
-  `... -c "SELECT count(*), state, wait_event FROM pg_stat_activity
-  GROUP BY 2,3 ORDER BY 1 DESC;"` — a wall of `active` on the same query
-  means fix the query/plan, not the knobs.
+  The `pg_stat_activity` grouping in the churn leg shows what the backends
+  are doing right now instead of guessing: a wall of `active` on the same
+  query means fix the query/plan, not the knobs.
+  `claim failures` must sit near zero — the single claimer is the only
+  thing that claims, so any sustained count there is a database problem,
+  not worker contention.
+- **Is the single claimer keeping up?** `dc3_claim_chan_depth` fluctuating
+  well under 256 is healthy backpressure (the claimer outpaces the
+  workers for seconds at a time). Pinned at 256 with `fetch_total` frozen
+  means the workers are stuck, not the claimer — see the pool bullet.
+  Claim scan rate comes from two diag files: `pending_claim` `idx_tup_read`
+  growth divided by keys fetched (≈47k tuples per 8-key claim before the
+  claimer, ≈1.5 bulk scans/s after).
+- **Did the durability/checkpoint tuning take?** The settings leg shows
+  each value plus its `source` (compose command vs default) and the
+  crawler role's stored `rolconfig` (`synchronous_commit=off`): a fresh
+  crawler session inherits it, old pool connections do not (recreate the
+  role containers after changing it). Acceptance is `num_requested`
+  barely climbing and `wal_fpi` (full-page writes) growing slowly at
+  equal fetch throughput — not proportionally fewer WAL bytes.
+- **Is index churn down?** `pending` `n_tup_hot_upd` should stay a large
+  fraction of `n_tup_upd` (HOT updates skip the indexes), and `\di`
+  proves `pending_ready` is gone so its write cost is too. Rates need two
+  diag files: divide counter growth by `postmaster_uptime` growth (or by
+  keys fetched from `stats_daily`).
 - **Is the DHT side healthy?** `good_nodes` in the hundreds with
   `timeouts_total` a small fraction of `samples_total` is fine, and the
   table keeps filling for the first days. `queries_received_total`
