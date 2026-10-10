@@ -1446,6 +1446,38 @@ async fn schema_constraints(pool: PgPool) {
     }
 }
 
+#[test]
+fn embedded_migrations_match_migrations_dir() {
+    // Regression test for the stale-`migrate` incident: `sqlx::migrate!`
+    // embeds `migrations/` at compile time, but Cargo doesn't rebuild this
+    // crate when only a migration file is added, so the shipped binary can
+    // embed fewer migrations than the directory holds (and `migrate` then
+    // exits 0 having applied nothing). The directory is read here at test
+    // time, so even a stale test binary fails this: disk versions must equal
+    // the embedded ones. `build.rs` (`rerun-if-changed=migrations`) is the
+    // fix that keeps them in step.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut on_disk: Vec<i64> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".sql"))
+        .map(|n| {
+            n.split('_')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap_or_else(|_| panic!("migration file without a numeric prefix: {n}"))
+        })
+        .collect();
+    on_disk.sort_unstable();
+    let mut embedded: Vec<i64> = MIGRATOR.migrations.iter().map(|m| m.version).collect();
+    embedded.sort_unstable();
+    assert_eq!(
+        embedded, on_disk,
+        "embedded migration list is stale (rebuild dc3-store): embedded={embedded:?} on_disk={on_disk:?}"
+    );
+}
+
 fn days(n: i64) -> Duration {
     Duration::from_secs((n as u64).saturating_mul(24 * 60 * 60))
 }
