@@ -247,8 +247,13 @@ impl CrawlStore for MemoryStore {
         }
         // Production counts every row, corpses included
         // (`Store::pending_depth`); the stand-in must gate on the same
-        // number or tests never reproduce a corpse-jammed queue.
+        // number or tests never reproduce a corpse-jammed queue. The
+        // double gate mirrors production: past twice the cap nothing is
+        // admitted, priority included (the all-priority fast path is only
+        // a saved count query with identical outcomes, so it is skipped).
         let full = i64::try_from(state.pending.len()).unwrap_or(i64::MAX) >= max_pending;
+        let closed =
+            i64::try_from(state.pending.len()).unwrap_or(i64::MAX) >= max_pending.saturating_mul(2);
         let mut out = ObserveOutcome::default();
         let now = Instant::now();
         for (key, (n, priority)) in merged {
@@ -262,7 +267,7 @@ impl CrawlStore for MemoryStore {
                 }
             } else if let Some(p) = state.pending.get_mut(&key) {
                 p.seen = p.seen.saturating_add(n);
-            } else if full && !priority {
+            } else if closed || (full && !priority) {
                 out.dropped = out.dropped.saturating_add(1);
             } else {
                 state.pending.insert(
@@ -790,15 +795,15 @@ mod tests {
         let out = s
             .observe(
                 &[obs(key(1), false), obs(key(1), true), obs(key(2), false)],
-                1,
+                2,
             )
             .await
             .unwrap();
         // The queue was empty, so both are queued.
         assert_eq!(out.queued, 2);
-        let out = s.observe(&[obs(key(3), false)], 1).await.unwrap();
+        let out = s.observe(&[obs(key(3), false)], 2).await.unwrap();
         assert_eq!(out.dropped, 1);
-        let out = s.observe(&[obs(key(3), true)], 1).await.unwrap();
+        let out = s.observe(&[obs(key(3), true)], 2).await.unwrap();
         assert_eq!(out.queued, 1);
 
         let claimed = s.claim(10, Duration::from_secs(120)).await.unwrap();
@@ -874,6 +879,33 @@ mod tests {
         assert_eq!(out.queued, 1);
         assert_eq!(out.dropped, 0);
         assert_eq!(s.pending_depth().await.unwrap(), 1);
+    }
+
+    /// Past twice the cap nothing is admitted, priority included
+    /// (production `Closed`); between one and twice only priority passes.
+    #[tokio::test(start_paused = true)]
+    async fn closed_queue_drops_priority_keys_like_production() {
+        let s = MemoryStore::new();
+        s.observe(&[obs(key(51), false), obs(key(52), false)], 10)
+            .await
+            .unwrap();
+        // Twice the cap: sampler and announce keys drop like get_peers ones.
+        let out = s
+            .observe(&[obs(key(53), true), obs(key(54), false)], 1)
+            .await
+            .unwrap();
+        assert_eq!(out.queued, 0);
+        assert_eq!(out.dropped, 2);
+        assert_eq!(s.pending_depth().await.unwrap(), 2);
+        // Between one and twice the cap only priority gets through.
+        let out = s
+            .observe(&[obs(key(55), true), obs(key(56), false)], 2)
+            .await
+            .unwrap();
+        assert_eq!(out.queued, 1);
+        assert_eq!(out.dropped, 1);
+        assert_eq!(s.pending_keys(), vec![key(51), key(52), key(55)]);
+        assert_eq!(s.pending_depth().await.unwrap(), 3);
     }
 
     #[tokio::test(start_paused = true)]
