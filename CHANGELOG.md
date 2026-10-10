@@ -9,6 +9,7 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 - DHT: peers returned inside `get_peers`/scrape `values` are filtered against our own addresses, like traversal candidates already were.
 - DHT: `sample_infohashes` answers under an unexpected node ID are treated as unsupported (no samples, no visited entry, long backoff) instead of honouring the reply's interval.
 - DHT: a bucket refresh that reaches no live node leaves the bucket due for the next round instead of silencing it for a full refresh interval.
+- DHT: only replies under the queried node ID count towards an answer; wrong-ID replies no longer trigger the final sweep alone.
 
 ## 0.4.0
 

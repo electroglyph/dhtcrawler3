@@ -406,6 +406,21 @@ async fn ask(
     }
 }
 
+/// Whether a reply counts towards `answered` for the final-sweep decision:
+/// only an answer under the queried node's own ID. Wrong-ID replies fail
+/// their candidate in [`Lookup::complete`] and must not trigger the final
+/// sweep on their own.
+fn counts_as_answered(
+    batch: &[CompactNode],
+    addr: &SocketAddr,
+    result: &Result<Response, QueryError>,
+) -> bool {
+    match result {
+        Ok(response) => batch.iter().any(|n| n.addr == *addr && n.id == response.id),
+        Err(_) => false,
+    }
+}
+
 async fn run(
     inner: &Inner,
     sock: &SocketNode,
@@ -477,7 +492,7 @@ async fn run(
             let Some((addr, result)) = next else { break };
             if batch.iter().any(|n| n.addr == addr) {
                 waiting = waiting.saturating_sub(1);
-                if result.is_ok() {
+                if counts_as_answered(&batch, &addr, &result) {
                     answered = answered.saturating_add(1);
                 }
             }
@@ -694,6 +709,32 @@ mod tests {
         };
         l.complete(responder.addr, Ok(response), None);
         assert_eq!(l.peers, vec![good]);
+    }
+
+    #[test]
+    fn only_matching_ids_count_as_answered() {
+        let addr: SocketAddr = "8.8.8.8:6881".parse().unwrap();
+        let batch = vec![CompactNode {
+            id: NodeId([7; 20]),
+            addr,
+        }];
+        let matching = || Response {
+            id: NodeId([7; 20]),
+            ..Response::default()
+        };
+        assert!(counts_as_answered(&batch, &addr, &Ok(matching())));
+        let spoofed = Response {
+            id: NodeId([9; 20]),
+            ..Response::default()
+        };
+        assert!(!counts_as_answered(&batch, &addr, &Ok(spoofed)));
+        assert!(!counts_as_answered(
+            &batch,
+            &addr,
+            &Err(QueryError::Timeout)
+        ));
+        let elsewhere: SocketAddr = "8.8.4.4:6881".parse().unwrap();
+        assert!(!counts_as_answered(&batch, &elsewhere, &Ok(matching())));
     }
 
     #[test]
