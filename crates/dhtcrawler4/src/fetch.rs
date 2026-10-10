@@ -187,6 +187,9 @@ fn claim_chan_depth(tx: &mpsc::Sender<Vec<PendingItem>>) -> usize {
 /// unfiltered claim so workers never idle. The live leases exclude those
 /// keys from the top-up, so the pair never double-leases; when the live
 /// pool is dry the top-up is the whole bulk (today's behavior exactly).
+/// A failed top-up does not waste the live leases already held: they are
+/// fed to the workers with a warning, and only an empty live pool still
+/// errors the scan (the claimer backs off).
 /// Counts both halves into [`METRIC_CLAIMED`] by liveness.
 pub async fn claim_bulk<S: CrawlStore>(
     store: &S,
@@ -196,11 +199,24 @@ pub async fn claim_bulk<S: CrawlStore>(
     let mut items = store.claim_live(n, lease).await?;
     if (items.len() as i64) < n {
         let rest = n.saturating_sub(items.len() as i64);
-        items.extend(store.claim(rest, lease).await?);
+        match store.claim(rest, lease).await {
+            Ok(topup) => items.extend(topup),
+            Err(e) if items.is_empty() => return Err(e),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    live = items.len(),
+                    "claim top-up failed; feeding live leases"
+                );
+            }
+        }
     }
     // Liveness is read off the items, so a concurrent piggyback write
     // between the two phases still counts exactly.
-    let live_now = items.iter().filter(|i| i.seeders_est.is_some_and(|e| e > 0)).count();
+    let live_now = items
+        .iter()
+        .filter(|i| i.seeders_est.is_some_and(|e| e > 0))
+        .count();
     let unproven = items.len().saturating_sub(live_now);
     if live_now > 0 {
         metrics::counter!(METRIC_CLAIMED, "live" => "true").increment(live_now as u64);
@@ -1687,10 +1703,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bulk.len(), 3);
-        assert!(
-            bulk.iter()
-                .all(|i| i.seeders_est.is_some_and(|e| e > 0))
-        );
+        assert!(bulk.iter().all(|i| i.seeders_est.is_some_and(|e| e > 0)));
         // The live phase covered the bulk: no second round trip.
         assert_eq!(store.live_claim_calls(), 1);
         assert_eq!(store.claim_calls(), 1);
@@ -1749,11 +1762,7 @@ mod tests {
         ) -> dc4_store::Result<dc4_store::ObserveOutcome> {
             unimplemented!()
         }
-        async fn claim(
-            &self,
-            n: i64,
-            _lease: Duration,
-        ) -> dc4_store::Result<Vec<PendingItem>> {
+        async fn claim(&self, n: i64, _lease: Duration) -> dc4_store::Result<Vec<PendingItem>> {
             self.calls.lock().unwrap().push(("claim", n));
             if self.fail_topup {
                 return Err(StoreError::Invalid("injected top-up failure".into()));
@@ -1768,18 +1777,10 @@ mod tests {
             self.calls.lock().unwrap().push(("claim_live", n));
             Ok(self.live.clone())
         }
-        async fn renew(
-            &self,
-            _key: &DhtKey,
-            _lease: Duration,
-        ) -> dc4_store::Result<bool> {
+        async fn renew(&self, _key: &DhtKey, _lease: Duration) -> dc4_store::Result<bool> {
             unimplemented!()
         }
-        async fn complete(
-            &self,
-            _key: &DhtKey,
-            _t: &NewTorrent,
-        ) -> dc4_store::Result<i64> {
+        async fn complete(&self, _key: &DhtKey, _t: &NewTorrent) -> dc4_store::Result<i64> {
             unimplemented!()
         }
         async fn fail(&self, _key: &DhtKey) -> dc4_store::Result<bool> {
@@ -1821,17 +1822,10 @@ mod tests {
         ) -> dc4_store::Result<bool> {
             unimplemented!()
         }
-        async fn purge_tombstoned(
-            &self,
-            _grace: Duration,
-            _limit: i64,
-        ) -> dc4_store::Result<u64> {
+        async fn purge_tombstoned(&self, _grace: Duration, _limit: i64) -> dc4_store::Result<u64> {
             unimplemented!()
         }
-        async fn purge_gave_up(
-            &self,
-            _older_than: Duration,
-        ) -> dc4_store::Result<u64> {
+        async fn purge_gave_up(&self, _older_than: Duration) -> dc4_store::Result<u64> {
             unimplemented!()
         }
         async fn note_fetch_estimate(
@@ -1855,10 +1849,7 @@ mod tests {
         ) -> dc4_store::Result<Vec<dc4_store::RemovalCooldown>> {
             unimplemented!()
         }
-        async fn note_removed_sightings(
-            &self,
-            _keys: &[DhtKey],
-        ) -> dc4_store::Result<u64> {
+        async fn note_removed_sightings(&self, _keys: &[DhtKey]) -> dc4_store::Result<u64> {
             unimplemented!()
         }
         async fn refresh_scraped(&self, _keys: &[DhtKey]) -> dc4_store::Result<u64> {
@@ -1896,23 +1887,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn claim_bulk_top_up_failure_errors_the_scan() {
+    async fn claim_bulk_top_up_failure_feeds_live_leases() {
+        let live_key = DhtKey([64; 20]);
         let store = ScriptedClaims {
-            live: vec![item(DhtKey([64; 20]))],
+            live: vec![PendingItem {
+                dht_key: live_key,
+                attempts: 1,
+                seen_count: 2,
+                seeders_est: Some(9),
+            }],
             topup: Vec::new(),
             fail_topup: true,
             calls: Arc::new(Mutex::new(Vec::new())),
         };
-        // A failed top-up errors the whole scan (the claimer backs off)
-        // instead of feeding a short bulk.
+        // A failed top-up feeds the live leases already held (with a
+        // warning) instead of erroring the scan and idling the workers
+        // while the leases tick down in the database.
+        let bulk = claim_bulk(&store, 8, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(bulk.len(), 1);
+        assert_eq!(bulk[0].dht_key, live_key);
+        assert_eq!(
+            store.calls.lock().unwrap().clone(),
+            vec![("claim_live", 8), ("claim", 7)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_bulk_empty_live_top_up_failure_still_errors() {
+        let store = ScriptedClaims {
+            live: Vec::new(),
+            topup: Vec::new(),
+            fail_topup: true,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        // Nothing leased and nothing to top up with: the scan still errors
+        // so the claimer backs off.
         assert!(
             claim_bulk(&store, 8, Duration::from_secs(120))
                 .await
                 .is_err()
-        );
-        assert_eq!(
-            store.calls.lock().unwrap().clone(),
-            vec![("claim_live", 8), ("claim", 7)]
         );
     }
 
