@@ -152,6 +152,13 @@ impl Transactions {
 /// `AddrPolicy::voter_key`) has one vote, and its latest vote replaces the
 /// earlier one. Votes expire after `ttl`. A candidate wins with at least
 /// `min_votes` current votes and more than two-thirds of them.
+///
+/// Accepted bound: at most [`MAX_IP_VOTES`] voters are kept and the oldest
+/// vote makes room when full, so an attacker with more distinct networks
+/// than that can flush honest votes before they win. This is inherent to a
+/// bounded in-memory vote without proof of work; the per-network voter key
+/// (not per host) is what keeps the cost of such a flood at one network
+/// per vote.
 pub(crate) struct IpVoter {
     /// Voter → (address, time of the vote); the LRU order is the vote order.
     votes: LruCache<AddrKey, (IpAddr, Instant)>,
@@ -497,6 +504,24 @@ mod tests {
         }
         assert_eq!(v.tally.get(&a), Some(&1));
         assert_eq!(v.winner(), Some(b));
+    }
+
+    #[test]
+    fn a_flood_past_capacity_flushes_honest_votes() {
+        // Accepted bound (see `IpVoter` docs): more distinct networks than
+        // capacity evicts honest votes, so they can never win. The flood
+        // costs one network per vote.
+        let t0 = Instant::now();
+        let mut v = IpVoter::with_capacity(10, TTL, NonZeroUsize::new(12).unwrap());
+        let (ours, evil) = (ip("1.2.3.4"), ip("6.6.6.6"));
+        for i in 0..9 {
+            assert_eq!(v.record(net(i), ours, t0), None);
+        }
+        for i in 100..112 {
+            v.record(net(i), evil, t0);
+        }
+        assert_eq!(v.tally.get(&ours), None);
+        assert_eq!(v.winner(), Some(evil));
     }
 
     #[test]

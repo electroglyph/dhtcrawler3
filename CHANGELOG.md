@@ -10,6 +10,7 @@ Forked from upstream at `3350799` (2026-09-17, merge of Rust rewrite).
 - DHT: `sample_infohashes` answers under an unexpected node ID are treated as unsupported (no samples, no visited entry, long backoff) instead of honouring the reply's interval.
 - DHT: a bucket refresh that reaches no live node leaves the bucket due for the next round instead of silencing it for a full refresh interval.
 - DHT: only replies under the queried node ID count towards an answer; wrong-ID replies no longer trigger the final sweep alone.
+- DHT: the external-IP vote documents its accepted bound (a flood past voter capacity flushes honest votes; each vote costs a network).
 
 ## 0.4.0
 
