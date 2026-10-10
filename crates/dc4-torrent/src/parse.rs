@@ -668,6 +668,7 @@ fn walk_file_tree(
     if root.len() == 0 {
         return Err(ParseError::InvalidFileTree("empty file tree"));
     }
+    let recorded = files.file_count;
     let mut stack = vec![root.iter()];
     // Directories on the stack (the root has none).
     let mut dirs = OpenDirs::default();
@@ -701,6 +702,11 @@ fn walk_file_tree(
             dirs.open(&name);
             stack.push(child.iter());
         }
+    }
+    // Directories alone are not a torrent (mirrors the empty `files`
+    // rejection for v1): padding-only trees count no files either.
+    if files.file_count == recorded {
+        return Err(ParseError::InvalidFileTree("no files in file tree"));
     }
     Ok(())
 }

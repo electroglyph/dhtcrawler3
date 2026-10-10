@@ -354,6 +354,19 @@ fn empty_files_list_is_not_a_torrent() {
 }
 
 #[test]
+fn file_tree_of_only_empty_dirs_is_not_a_torrent() {
+    assert_eq!(
+        parse(&v2_only(d([("empty", d([]))]))),
+        Err(ParseError::InvalidFileTree("no files in file tree"))
+    );
+    // Nested empty directories: still no file.
+    assert_eq!(
+        parse(&v2_only(d([("a", d([("b", d([("c", d([]))]))]))]))),
+        Err(ParseError::InvalidFileTree("no files in file tree"))
+    );
+}
+
+#[test]
 fn v2_only_torrent() {
     let tree = d([
         ("dir", d([("b.txt", v2_file(3)), ("a.txt", v2_file(2))])),
