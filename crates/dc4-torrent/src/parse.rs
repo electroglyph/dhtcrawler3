@@ -462,6 +462,11 @@ fn v1_files(
 ) -> Result<(), ParseError> {
     if let Some(list) = dict.get(b"files") {
         let list = list.as_list().ok_or(ParseError::InvalidField("files"))?;
+        // BEP 3 multi-file torrents name at least one file: an empty list
+        // is not a torrent.
+        if list.is_empty() {
+            return Err(ParseError::InvalidField("files"));
+        }
         for item in list {
             let fd = item.as_dict().ok_or(ParseError::InvalidField("files"))?;
             let length = file_length(fd)?;

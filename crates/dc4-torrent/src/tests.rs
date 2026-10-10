@@ -346,6 +346,14 @@ fn cut_paths_show_components_but_not_the_truncated_join() {
 }
 
 #[test]
+fn empty_files_list_is_not_a_torrent() {
+    assert_eq!(
+        parse(&v1_multi(vec![])),
+        Err(ParseError::InvalidField("files"))
+    );
+}
+
+#[test]
 fn v2_only_torrent() {
     let tree = d([
         ("dir", d([("b.txt", v2_file(3)), ("a.txt", v2_file(2))])),
