@@ -1672,6 +1672,26 @@ async fn tombstone_dead_missing_row_rolls_back_and_releases(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn tombstone_dead_notes_every_name(pool: PgPool) {
+    let s = Store::from_pool(pool.clone());
+    let (k1, k2) = (key(51), key(52));
+    let mut t = torrent(k1, "hybrid");
+    t.info_hash_v1 = Some(k2);
+    let id = s.complete(&k1, &t).await.unwrap();
+    let snap = s.claim_scrape_due(10, days(7), days(30)).await.unwrap();
+    let item = snap.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(
+        s.tombstone_dead(id, item.last_seen_at, item.change_seq)
+            .await
+            .unwrap()
+    );
+    // Both the stored key and the alias carry removal memory: the alias
+    // cannot be used to re-queue the torrent with no cooldown.
+    assert!(s.removal_cooldown_remaining(&k1.0, 7).await.unwrap() > Duration::ZERO);
+    assert!(s.removal_cooldown_remaining(&k2.0, 7).await.unwrap() > Duration::ZERO);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn tombstone_dead_is_conditional_and_notes_removal(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let k = key(31);

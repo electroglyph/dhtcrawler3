@@ -626,20 +626,36 @@ impl CrawlStore for MemoryStore {
             return Ok(false);
         }
         let size = state.torrents.get(&key).map_or(0, |(_, t)| t.total_size);
+        // Removal memory covers every name of the torrent, mirroring
+        // production: a hybrid tombstoned via one key is not re-queued
+        // via an alias with no cooldown.
+        let mut names = vec![key];
+        if let Some((_, t)) = state.torrents.get(&key) {
+            if let Some(v1) = t.info_hash_v1 {
+                names.push(v1);
+            }
+            if let Some(v2) = t.info_hash_v2 {
+                names.push(v2.truncated());
+            }
+        }
+        names.sort_unstable();
+        names.dedup();
         state.torrents.remove(&key);
         state.scrapes.remove(&key);
         state.tombstoned.insert(key, (Instant::now(), id, size));
-        let entry = state
-            .removed
-            .entry(prefix(key.as_bytes()))
-            .or_insert(RemovedEntry {
-                removed_at: Instant::now(),
-                removals: 0,
-                sightings: 0,
-            });
-        entry.removed_at = Instant::now();
-        entry.removals = entry.removals.saturating_add(1);
-        entry.sightings = 0;
+        for name in names {
+            let entry = state
+                .removed
+                .entry(prefix(name.as_bytes()))
+                .or_insert(RemovedEntry {
+                    removed_at: Instant::now(),
+                    removals: 0,
+                    sightings: 0,
+                });
+            entry.removed_at = Instant::now();
+            entry.removals = entry.removals.saturating_add(1);
+            entry.sightings = 0;
+        }
         Ok(true)
     }
 
@@ -1169,6 +1185,30 @@ mod scrape_tests {
             }],
             files_truncated: false,
             piece_length: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tombstone_notes_every_name() {
+        use std::time::Duration as StdDuration;
+
+        let s = MemoryStore::new();
+        let (k1, k2) = (key(21), key(22));
+        let mut t = torrent(k1);
+        t.info_hash_v1 = Some(k2);
+        let id = s.complete(&k1, &t).await.unwrap();
+        let items = s.claim_scrape_due(10, LIVE, UNKNOWN).await.unwrap();
+        let snap = items.iter().find(|c| c.id == id).unwrap().clone();
+        assert!(
+            s.tombstone_dead(id, snap.last_seen_at, snap.change_seq)
+                .await
+                .unwrap()
+        );
+        // Both the stored key and the alias carry removal memory.
+        let rows = s.removal_cooldowns(&[k1, k2], 7, &[]).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert!(row.remaining > StdDuration::ZERO);
         }
     }
 

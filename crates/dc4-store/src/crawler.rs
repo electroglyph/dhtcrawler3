@@ -1077,15 +1077,30 @@ impl Store {
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         lock_change_shared(&mut tx).await?;
-        let key: Option<Vec<u8>> = sqlx::query_scalar("SELECT dht_key FROM torrents WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(key) = key else {
+        let row: Option<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT dht_key, info_hash_v1, info_hash_v2 FROM torrents WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((key, v1, v2)) = row else {
             tx.rollback().await?;
             return Ok(false);
         };
-        lock_keys(&mut tx, &[key.as_slice()]).await?;
+        // Removal memory covers every name of the torrent, mirroring what
+        // `complete` clears on fetch: otherwise a hybrid tombstoned via one
+        // key is immediately re-queued via an alias with no cooldown.
+        let mut names: Vec<Vec<u8>> = vec![key.clone()];
+        if let Some(v1) = v1 {
+            names.push(v1);
+        }
+        if let Some(v2) = v2 {
+            names.push(prefix(&v2).to_vec());
+        }
+        names.sort_unstable();
+        names.dedup();
+        let lock_set: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
+        lock_keys(&mut tx, &lock_set).await?;
         let n = sqlx::query(TOMBSTONE_DEAD_SQL)
             .bind(id)
             .bind(old_last_seen_at)
@@ -1097,10 +1112,12 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         }
-        sqlx::query(NOTE_REMOVAL_SQL)
-            .bind(key.as_slice())
-            .execute(&mut *tx)
-            .await?;
+        for name in &names {
+            sqlx::query(NOTE_REMOVAL_SQL)
+                .bind(name.as_slice())
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(true)
     }
