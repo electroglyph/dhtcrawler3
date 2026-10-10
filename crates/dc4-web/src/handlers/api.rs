@@ -173,7 +173,7 @@ pub(crate) async fn torrent<B: Backend>(
             let body = ApiTorrentDetail {
                 torrent: ApiTorrent::new(&record, &shown, st.seeder_freshness),
                 files,
-                files_truncated: record.files_truncated || shown.files_cut,
+                files_truncated: super::files_truncated(&record, &shown),
             };
             json(StatusCode::OK, &body)
         }

@@ -82,6 +82,17 @@ pub(crate) struct Shown {
     pub magnet: Option<String>,
 }
 
+/// Whether the file list shown for `record` is truncated. Call only for
+/// [`Detail::WithFiles`]: result lists show no files by design, so their
+/// empty `shown.files` must not count. The store may flag truncation, the
+/// display budget may cut paths, or the store may hand back fewer files
+/// than `file_count` without flagging either.
+pub(crate) fn files_truncated(record: &TorrentRecord, shown: &Shown) -> bool {
+    record.files_truncated
+        || shown.files_cut
+        || u64::try_from(shown.files.len()).unwrap_or(u64::MAX) < record.file_count
+}
+
 /// What of a stored torrent is displayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Detail {
@@ -262,6 +273,33 @@ mod tests {
         );
         assert!(shown.files.is_empty());
         assert!(!shown.files_cut);
+    }
+
+    #[test]
+    fn files_truncated_flags_all_three_causes() {
+        // Store flag.
+        let mut flagged = record("f", &["a"]);
+        flagged.files_truncated = true;
+        let shown = show(&flagged, Detail::WithFiles);
+        assert!(files_truncated(&flagged, &shown));
+        // Display budget cut.
+        let long = "x".repeat(MAX_PATH_CHARS);
+        let paths = vec![long.as_str(); 40];
+        let cut_record = record("c", &paths);
+        let cut = show(&cut_record, Detail::WithFiles);
+        assert!(cut.files_cut);
+        assert!(files_truncated(&cut_record, &cut));
+        // Fewer files handed back than stored, with neither flag set.
+        let mut short = record("s", &["a", "b"]);
+        short.file_count = 5;
+        let shown = show(&short, Detail::WithFiles);
+        assert!(!short.files_truncated && !shown.files_cut);
+        assert_eq!(shown.files.len(), 2);
+        assert!(files_truncated(&short, &shown));
+        // Complete listing: none of the three.
+        let whole = record("w", &["a", "b"]);
+        let shown = show(&whole, Detail::WithFiles);
+        assert!(!files_truncated(&whole, &shown));
     }
 
     #[tokio::test]

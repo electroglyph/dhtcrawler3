@@ -135,6 +135,26 @@ async fn torrent_json_has_exactly_the_documented_fields() {
 }
 
 #[tokio::test]
+async fn torrent_json_flags_unflagged_short_file_list() {
+    let _serial = serial().await;
+    // Neither the store flag nor the display budget fires, but the store
+    // hands back fewer files than `file_count`: still truncated.
+    let mut t = torrent(5, "short list", &[("dir/a.txt", 10), ("dir/b.txt", 20)]);
+    t.file_count = 5;
+    assert!(!t.files_truncated);
+    let app = app(vec![t]);
+    let r = send(
+        &app.router,
+        get(&format!("/api/v1/torrents/{}", key_for(5).to_hex())),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    let json = r.json();
+    assert_eq!(json["files"].as_array().unwrap().len(), 2);
+    assert_eq!(json["files_truncated"], true);
+}
+
+#[tokio::test]
 async fn api_errors_are_json() {
     let _serial = serial().await;
     let app = app(vec![torrent(1, "api error case", &[])]);

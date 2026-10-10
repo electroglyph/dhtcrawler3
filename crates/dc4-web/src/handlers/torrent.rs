@@ -70,14 +70,13 @@ pub(crate) async fn torrent_page<B: Backend>(
     };
 
     let listed = u64::try_from(shown.files.len()).unwrap_or(u64::MAX);
-    let files_note = (record.files_truncated || shown.files_cut || listed < record.file_count)
-        .then(|| {
-            format!(
-                "Only the first {} of {} files are listed.",
-                grouped(listed),
-                grouped(record.file_count.max(listed))
-            )
-        });
+    let files_note = super::files_truncated(&record, &shown).then(|| {
+        format!(
+            "Only the first {} of {} files are listed.",
+            grouped(listed),
+            grouped(record.file_count.max(listed))
+        )
+    });
     let dht_key = record.dht_key.to_hex();
     let seeders = fresh_seeders(&record, st.seeder_freshness);
     let view = TorrentView {
