@@ -930,10 +930,13 @@ impl Store {
     }
 
     /// Deletes queue rows that gave up more than `older_than` ago, so their
-    /// keys may be queued again. Returns the number removed.
+    /// keys may be queued again. Returns the number removed. A `gave_up`
+    /// row with no `last_attempt_at` (only possible via manual writes: the
+    /// code paths always stamp it) is purged too — it can never satisfy an
+    /// age comparison, so otherwise it would leak forever.
     pub async fn purge_gave_up(&self, older_than: Duration) -> Result<u64> {
         let res = sqlx::query(
-            "DELETE FROM pending WHERE gave_up AND last_attempt_at < now() - make_interval(secs => $1)",
+            "DELETE FROM pending WHERE gave_up AND (last_attempt_at IS NULL OR last_attempt_at < now() - make_interval(secs => $1))",
         )
         .bind(secs(older_than))
         .execute(&self.pool)

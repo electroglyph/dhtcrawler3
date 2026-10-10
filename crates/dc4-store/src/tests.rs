@@ -597,6 +597,16 @@ async fn fail_backs_off_and_gives_up(pool: PgPool) {
     assert_eq!(s.purge_gave_up(Duration::from_secs(3600)).await.unwrap(), 1);
     assert_eq!(s.stats().await.unwrap().gave_up, 0);
     assert_eq!(s.pending_depth().await.unwrap(), 0);
+
+    // A gave_up row with no attempt stamp (manual writes only) is purged
+    // too: NULL never satisfies the age comparison, so it would leak.
+    sqlx::query("INSERT INTO pending (dht_key, gave_up) VALUES ($1, true)")
+        .bind(key(77).0.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(s.purge_gave_up(Duration::from_secs(3600)).await.unwrap(), 1);
+    assert_eq!(s.pending_depth().await.unwrap(), 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
