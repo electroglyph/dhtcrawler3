@@ -813,6 +813,45 @@ async fn pending_depth_uses_the_estimate_above_the_threshold(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn pending_depth_reaches_counts_past_the_threshold_on_a_stale_estimate(pool: PgPool) {
+    // Regression test for the fail-open depth gate: with a stale-small
+    // planner estimate and a real depth above the exact-count threshold, the
+    // gate must count instead of reporting room. (Before the fix, any limit
+    // above the threshold read as room without touching the table.)
+    sqlx::query("ALTER TABLE pending SET (autovacuum_enabled = false)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let depth = EXACT_COUNT_THRESHOLD + 100;
+    sqlx::query(
+        "INSERT INTO pending (dht_key) \
+         SELECT decode(lpad(to_hex(g), 40, '0'), 'hex') FROM generate_series(1, $1) g",
+    )
+    .bind(depth)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Bulk load without ANALYZE: the planner still believes the table is
+    // nearly empty.
+    sqlx::query("UPDATE pg_class SET reltuples = 0 WHERE oid = 'pending'::regclass")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let s = Store::from_pool(pool.clone());
+    // The real depth reaches the limit but not limit + 1: the gate counts
+    // exactly instead of answering a constant.
+    assert!(s.pending_depth_reaches(depth).await.unwrap());
+    assert!(!s.pending_depth_reaches(depth + 1).await.unwrap());
+    // End to end: the full queue drops a non-priority key instead of
+    // queueing it.
+    let o = s
+        .observe(&[obs(key(200), 1)], EXACT_COUNT_THRESHOLD + 2)
+        .await
+        .unwrap();
+    assert_eq!((o.queued, o.dropped), (0, 1));
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn complete_is_idempotent_and_carries_seen_count(pool: PgPool) {
     let s = Store::from_pool(pool.clone());
     let k = key(7);
@@ -1848,6 +1887,32 @@ async fn concurrent_observes_do_not_lose_seen_counts(pool: PgPool) {
         let before = raw_torrent(&pool, id).await.seen_count;
         let one = [obs(1)];
         let two = [obs(2)];
+        let (a, b) = tokio::join!(s.observe(&one, NO_LIMIT), s.observe(&two, NO_LIMIT),);
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(raw_torrent(&pool, id).await.seen_count, before + 3);
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_alias_observes_do_not_lose_seen_counts(pool: PgPool) {
+    // Same race as above, but through the alias path: the row is stored
+    // under key(45) while observations arrive under its v1 infohash and its
+    // truncated v2 infohash. Without row locking in the alias `sums` read,
+    // the loser applies a stale sum and one increment vanishes per round.
+    let s = Store::from_pool(pool.clone());
+    let stored = key(45);
+    let v1alias = key(46);
+    let h2 = v2(47);
+    let v2alias = h2.truncated();
+    let mut t = torrent(stored, "aliased");
+    t.info_hash_v1 = Some(v1alias);
+    t.info_hash_v2 = Some(h2);
+    let id = s.complete(&stored, &t).await.unwrap();
+    for _ in 0..10 {
+        let before = raw_torrent(&pool, id).await.seen_count;
+        let one = [obs(v1alias, 1)];
+        let two = [obs(v2alias, 2)];
         let (a, b) = tokio::join!(s.observe(&one, NO_LIMIT), s.observe(&two, NO_LIMIT),);
         a.unwrap();
         b.unwrap();
