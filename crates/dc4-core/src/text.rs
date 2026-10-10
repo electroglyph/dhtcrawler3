@@ -103,17 +103,36 @@ fn sanitize_display_inner(s: &str, max_chars: usize, map_separators: bool) -> St
 
 /// Maximum characters kept from a single path component.
 pub const PATH_COMPONENT_MAX_CHARS: usize = 255;
+/// Maximum bytes kept from a single path component: filesystems limit
+/// names to 255 bytes, not 255 characters, so 255 multi-byte characters
+/// (up to 765 bytes) would still be too long.
+pub const PATH_COMPONENT_MAX_BYTES: usize = 255;
+
+/// Truncates `s` to at most `max_bytes` bytes on a character boundary,
+/// without leaving trailing whitespace (the input is already collapsed).
+fn truncate_to_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    s.get(..end).map(str::trim_end).unwrap_or("")
+}
 
 /// Sanitises one component of a file path from a torrent.
 ///
 /// Returns `None` for components that must not appear in a path: empty, `.`
 /// and `..` (directory traversal, BEP 52). Separators inside a component are
 /// replaced so a single component can never introduce extra path levels.
+/// The result fits both the character cap and the filesystem byte cap.
 pub fn sanitize_path_component(s: &str) -> Option<String> {
     let clean = sanitize_display_inner(s, PATH_COMPONENT_MAX_CHARS, true);
-    match clean.as_str() {
+    let clean = truncate_to_bytes(&clean, PATH_COMPONENT_MAX_BYTES);
+    match clean {
         "" | "." | ".." => None,
-        _ => Some(clean),
+        _ => Some(clean.to_owned()),
     }
 }
 
@@ -141,6 +160,27 @@ mod tests {
         assert_eq!(sanitize_display("ab cd", 2), "ab");
         assert_eq!(sanitize_display("ab cd", 3), "ab");
         assert_eq!(sanitize_display("ab cd", 4), "ab c");
+    }
+
+    #[test]
+    fn path_components_fit_the_filesystem_byte_cap() {
+        // 255 CJK characters are 765 bytes: cut to 255 bytes (85 chars).
+        let long = "東".repeat(255);
+        let clean = sanitize_path_component(&long).unwrap();
+        assert_eq!(clean.chars().count(), 85);
+        assert_eq!(clean.len(), 255);
+        // ASCII is untouched by the byte cap.
+        assert_eq!(
+            sanitize_path_component(&"x".repeat(255)).unwrap().len(),
+            255
+        );
+        assert_eq!(sanitize_path_component("a b"), Some("a b".into()));
+        // A cut right after a space never leaves trailing whitespace.
+        let spaced = format!("{} {}", "y".repeat(254), "z");
+        assert_eq!(sanitize_path_component(&spaced).unwrap(), "y".repeat(254));
+        assert_eq!(sanitize_path_component(""), None);
+        assert_eq!(sanitize_path_component("."), None);
+        assert_eq!(sanitize_path_component(".."), None);
     }
 
     #[test]

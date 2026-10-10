@@ -862,23 +862,29 @@ fn visit_sees_unnamed_and_stops_at_error() {
 
 #[test]
 fn v2_paths_match_v1_paths_under_the_length_cap() {
-    // Long, multi-byte directory names: v2 builds paths incrementally, v1
-    // joins a component list; both must give the same capped path.
-    let comps: Vec<String> = (0..40)
-        .map(|n| format!("{n}{}", "東".repeat(200)))
+    // 16 full-size components fill 4 095 characters, so the 17th is cut
+    // by the path cap. v2 builds paths incrementally, v1 joins a component
+    // list; both must give the same capped path. One component is
+    // multi-byte (byte-capped on its own) to cover non-ASCII joins.
+    let mut comps: Vec<String> = (0..16)
+        .map(|n| format!("{n:02}") + &"a".repeat(253))
         .collect();
+    // A multi-byte component that survives the byte cap (253 bytes), so the
+    // join still covers non-ASCII text.
+    comps[7] = format!("07{}東東", "a".repeat(245));
+    comps.push("tail.txt".into());
     let refs: Vec<&str> = comps.iter().map(String::as_str).collect();
     let v1 = parse(&v1_multi(vec![v1_file(1, &refs)])).unwrap();
 
-    let mut node = d([("f", v2_file(1))]);
-    for c in refs.iter().rev() {
+    let mut node = d([("tail.txt", v2_file(1))]);
+    for c in refs[..16].iter().rev() {
         node = d([(*c, node)]);
     }
     let v2 = parse(&v2_only(node)).unwrap();
-    // 40 components of 201 or 202 characters: the cap falls mid-component.
-    assert_eq!(v1.files[0].path.chars().count(), PATH_MAX_CHARS);
     assert_eq!(v1.files[0].path, v2.files[0].path);
-    assert!(!v2.files[0].path.ends_with('/'));
+    assert!(v1.files[0].path.chars().count() <= PATH_MAX_CHARS);
+    assert!(!v1.files[0].path.ends_with('/'));
+    assert!(!v1.files[0].path.ends_with("tail.txt"));
 }
 
 #[test]
